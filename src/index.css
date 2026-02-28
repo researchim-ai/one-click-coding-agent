@@ -1,0 +1,145 @@
+@import "tailwindcss";
+@import "highlight.js/styles/github-dark-dimmed.css";
+
+@theme {
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+}
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.8; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Resize handle */
+.resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+  z-index: 10;
+  transition: background 0.15s;
+}
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 1px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.resize-handle:hover::after,
+.resize-handle:active::after {
+  background: #3b82f6;
+}
+.resize-handle:active {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+/* Agent response prose — refined typography */
+.agent-prose {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: #d4d4d8;
+  letter-spacing: 0.01em;
+}
+.agent-prose p { margin: 0.5em 0; }
+.agent-prose p:first-child { margin-top: 0; }
+.agent-prose p:last-child { margin-bottom: 0; }
+
+.agent-prose strong { color: #e4e4e7; font-weight: 600; }
+.agent-prose em { color: #a1a1aa; font-style: italic; }
+
+.agent-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: rgba(63, 63, 70, 0.4);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #93c5fd;
+}
+
+.agent-prose pre {
+  background: #09090b;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.agent-prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.agent-prose h1, .agent-prose h2, .agent-prose h3 {
+  color: #f4f4f5;
+  font-weight: 600;
+  margin: 1em 0 0.4em;
+  letter-spacing: -0.01em;
+}
+.agent-prose h1 { font-size: 1.2em; }
+.agent-prose h2 { font-size: 1.1em; }
+.agent-prose h3 { font-size: 1em; }
+
+.agent-prose ul, .agent-prose ol {
+  padding-left: 1.4em;
+  margin: 0.4em 0;
+}
+.agent-prose li { margin: 0.15em 0; }
+.agent-prose li::marker { color: #52525b; }
+
+.agent-prose a {
+  color: #60a5fa;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.agent-prose blockquote {
+  border-left: 2px solid #3f3f46;
+  padding-left: 12px;
+  margin: 8px 0;
+  color: #a1a1aa;
+  font-style: italic;
+}
+
+.agent-prose hr {
+  border: none;
+  border-top: 1px solid #27272a;
+  margin: 12px 0;
+}
+
+/* Thinking block — soft, low-contrast italic */
+.thinking-text {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #71717a;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

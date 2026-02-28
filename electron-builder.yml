@@ -1,0 +1,75 @@
+appId: com.one-click-coding-agent
+productName: One-Click Coding Agent
+copyright: Copyright © 2025-2026 One-Click Coding Agent Contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+
+asar: true
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+    - target: rpm
+      arch: [x64]
+  # NOTE: rpm requires rpmbuild on the build machine (sudo apt install rpm)
+    - target: tar.gz
+      arch: [x64, arm64]
+  category: Development
+  icon: build/icons
+  synopsis: Local AI coding agent powered by Qwen3.5-35B
+  description: >-
+    Fully local, self-contained AI coding agent.
+    Downloads and serves Qwen3.5-35B-A3B via llama.cpp.
+    Reads, writes, and edits code autonomously.
+  desktop:
+    StartupWMClass: one-click-coding-agent
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  icon: build/icons/icon.icns
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: portable
+      arch: [x64]
+  icon: build/icons/icon.ico
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: One-Click Coding Agent
+
+dmg:
+  contents:
+    - x: 410
+      y: 150
+      type: link
+      path: /Applications
+    - x: 130
+      y: 150
+      type: file
+
+publish: null

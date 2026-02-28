@@ -1,3 +1,10 @@
+# Node / Electron
+node_modules/
+dist/
+dist-electron/
+release/
+*.AppImage
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

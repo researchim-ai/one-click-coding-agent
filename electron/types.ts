@@ -1,0 +1,68 @@
+export interface GpuInfo {
+  index: number
+  name: string
+  vramTotalMb: number
+  vramFreeMb: number
+}
+
+export interface SystemResources {
+  gpus: GpuInfo[]
+  cpuModel: string
+  cpuCores: number
+  cpuThreads: number
+  ramTotalMb: number
+  ramAvailableMb: number
+  cudaAvailable: boolean
+  cudaVersion: string | null
+  hasAmdGpu: boolean
+  totalVramMb: number
+  platform: NodeJS.Platform
+  arch: string
+}
+
+export interface BinarySelection {
+  primary: string
+  fallbacks: string[]
+  needsCudart: boolean
+  cudartAsset?: string
+}
+
+export interface ServerLaunchArgs {
+  nGpuLayers: number
+  ctxSize: number
+  threads: number
+  tensorSplit: string | null
+  flashAttn: boolean
+}
+
+export interface DownloadProgress {
+  downloadedMb: number
+  totalMb: number
+  percent: number
+  status: string
+}
+
+export interface AgentEvent {
+  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval'
+  content?: string
+  name?: string
+  args?: Record<string, unknown>
+  result?: string
+  done?: boolean
+  approvalId?: string
+}
+
+export interface AppStatus {
+  serverRunning: boolean
+  modelDownloaded: boolean
+  modelPath: string | null
+  llamaReady: boolean
+  serverHealth: { status: string }
+}
+
+export interface FileTreeEntry {
+  name: string
+  path: string
+  isDir: boolean
+  children?: FileTreeEntry[]
+}
