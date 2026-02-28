@@ -1,6 +1,6 @@
-appId: com.one-click-coding-agent
+appId: ai.researchim.one-click-coding-agent
 productName: One-Click Coding Agent
-copyright: Copyright © 2025-2026 One-Click Coding Agent Contributors
+copyright: Copyright © 2025-2026 researchim-ai
 
 directories:
   output: release

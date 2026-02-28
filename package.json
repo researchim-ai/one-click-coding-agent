@@ -3,8 +3,16 @@
   "version": "0.1.0",
   "description": "Fully local AI coding agent powered by Qwen3.5-35B via llama.cpp",
   "author": {
-    "name": "One-Click Coding Agent Contributors",
-    "email": "noreply@one-click-agent.dev"
+    "name": "researchim-ai",
+    "url": "https://github.com/researchim-ai"
+  },
+  "homepage": "https://github.com/researchim-ai/one-click-coding-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/researchim-ai/one-click-coding-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/researchim-ai/one-click-coding-agent/issues"
   },
   "license": "Apache-2.0",
   "private": true,
