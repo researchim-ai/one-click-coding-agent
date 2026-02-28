@@ -4,6 +4,8 @@ import type { AgentEvent, AppStatus, DownloadProgress, SystemResources } from '.
 contextBridge.exposeInMainWorld('api', {
   getStatus: (): Promise<AppStatus> => ipcRenderer.invoke('get-status'),
   detectResources: (): Promise<SystemResources> => ipcRenderer.invoke('detect-resources'),
+  getModelVariants: (): Promise<any[]> => ipcRenderer.invoke('get-model-variants'),
+  selectModelVariant: (quant: string): Promise<void> => ipcRenderer.invoke('select-model-variant', quant),
   autoSetup: (): Promise<void> => ipcRenderer.invoke('auto-setup'),
   downloadModel: (): Promise<string> => ipcRenderer.invoke('download-model'),
   ensureLlama: (): Promise<void> => ipcRenderer.invoke('ensure-llama'),
@@ -12,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   sendMessage: (msg: string, workspace: string): Promise<string> =>
     ipcRenderer.invoke('send-message', msg, workspace),
   resetAgent: (): Promise<void> => ipcRenderer.invoke('reset-agent'),
+  cancelAgent: (): Promise<void> => ipcRenderer.invoke('cancel-agent'),
   setWorkspace: (ws: string): Promise<void> => ipcRenderer.invoke('set-workspace', ws),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke('pick-directory'),
   listFiles: (workspace: string, dirPath?: string): Promise<import('./types').FileTreeEntry[]> =>
@@ -42,6 +45,16 @@ contextBridge.exposeInMainWorld('api', {
   respondApproval: (approvalId: string, approved: boolean) => {
     ipcRenderer.send('command-approval-response', approvalId, approved)
   },
+
+  // Session management
+  createSession: (): Promise<string> => ipcRenderer.invoke('create-session'),
+  switchSession: (id: string): Promise<boolean> => ipcRenderer.invoke('switch-session', id),
+  listSessions: (): Promise<any[]> => ipcRenderer.invoke('list-sessions'),
+  deleteSession: (id: string): Promise<void> => ipcRenderer.invoke('delete-session', id),
+  renameSession: (id: string, title: string): Promise<void> => ipcRenderer.invoke('rename-session', id, title),
+  getActiveSessionId: (): Promise<string | null> => ipcRenderer.invoke('get-active-session-id'),
+  saveUiMessages: (id: string, msgs: any[]): Promise<void> => ipcRenderer.invoke('save-ui-messages', id, msgs),
+  getUiMessages: (id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', id),
 
   // File operations
   createFile: (filePath: string): Promise<void> => ipcRenderer.invoke('create-file', filePath),

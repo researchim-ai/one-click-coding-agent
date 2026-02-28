@@ -6,9 +6,19 @@ import os from 'os'
 import type { DownloadProgress } from './types'
 
 const REPO_ID = 'unsloth/Qwen3.5-35B-A3B-GGUF'
-const QUANT = 'UD-Q4_K_XL'
+const DEFAULT_QUANT = 'UD-Q4_K_XL'
 const MAX_RETRIES = 3
 const RETRY_BASE_MS = 2000
+
+let selectedQuant: string = DEFAULT_QUANT
+
+export function getSelectedQuant(): string {
+  return selectedQuant
+}
+
+export function setSelectedQuant(q: string) {
+  selectedQuant = q
+}
 
 export function dataDir(): string {
   const d = path.join(os.homedir(), '.one-click-agent')
@@ -26,29 +36,37 @@ export function getModelPath(): string | null {
   const dir = modelsDir()
   if (!fs.existsSync(dir)) return null
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.gguf'))
+  const quantNorm = selectedQuant.toLowerCase().replace(/-/g, '_')
+  const match = files.find((f) => f.toLowerCase().replace(/-/g, '_').includes(quantNorm))
+  if (match) return path.join(dir, match)
   return files.length > 0 ? path.join(dir, files[0]) : null
 }
 
 export function isDownloaded(): boolean {
-  return getModelPath() !== null
+  const dir = modelsDir()
+  if (!fs.existsSync(dir)) return false
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.gguf'))
+  const quantNorm = selectedQuant.toLowerCase().replace(/-/g, '_')
+  return files.some((f) => f.toLowerCase().replace(/-/g, '_').includes(quantNorm))
 }
 
 interface HfSibling {
   rfilename: string
 }
 
-async function findModelFilename(): Promise<string> {
+async function findModelFilename(quant?: string): Promise<string> {
+  const q = quant ?? selectedQuant
   const url = `https://huggingface.co/api/models/${REPO_ID}`
   const body = await fetchJson(url)
   const siblings: HfSibling[] = body.siblings ?? []
-  const quantNorm = QUANT.toLowerCase().replace(/-/g, '_')
+  const quantNorm = q.toLowerCase().replace(/-/g, '_')
   const match = siblings
     .filter((s) => s.rfilename.endsWith('.gguf'))
     .find((s) => s.rfilename.toLowerCase().replace(/-/g, '_').includes(quantNorm))
 
   if (!match) {
     const available = siblings.filter((s) => s.rfilename.endsWith('.gguf')).map((s) => s.rfilename)
-    throw new Error(`Quant '${QUANT}' not found. Available: ${available.join(', ')}`)
+    throw new Error(`Quant '${q}' not found. Available: ${available.join(', ')}`)
   }
   return match.rfilename
 }

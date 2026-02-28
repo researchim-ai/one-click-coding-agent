@@ -21,12 +21,22 @@ interface Props {
   busy: boolean
   workspace: string
   onSend: (text: string) => void
+  onCancel?: () => void
   onApproval?: (id: string, approved: boolean) => void
   codeRefs?: CodeReference[]
   onRemoveCodeRef?: (index: number) => void
 }
 
-export function Chat({ messages, busy, workspace, onSend, onApproval, codeRefs = [], onRemoveCodeRef }: Props) {
+export function Chat({
+  messages,
+  busy,
+  workspace,
+  onSend,
+  onCancel,
+  onApproval,
+  codeRefs = [],
+  onRemoveCodeRef,
+}: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const [showMention, setShowMention] = useState(false)
@@ -185,11 +195,12 @@ export function Chat({ messages, busy, workspace, onSend, onApproval, codeRefs =
 
   const noWorkspace = !workspace
   const hasAttachments = attachedFiles.length > 0 || codeRefs.length > 0
+  const lastUserId = [...messages].reverse().find((m) => m.role === 'user')?.id
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0">
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-5 py-5">
+      <div className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
         <div className="flex flex-col gap-5">
           {messages.length === 0 && (
             <div className="text-center py-20 text-zinc-500">
@@ -232,6 +243,8 @@ export function Chat({ messages, busy, workspace, onSend, onApproval, codeRefs =
               message={msg}
               onApprove={onApproval ? (id) => onApproval(id, true) : undefined}
               onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
+              pending={busy && msg.role === 'user' && msg.id === lastUserId}
+              onCancel={busy && msg.role === 'user' && msg.id === lastUserId ? onCancel : undefined}
             />
           ))}
           <div ref={bottomRef} />

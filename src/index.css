@@ -11,6 +11,9 @@
 ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
 
+.scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }

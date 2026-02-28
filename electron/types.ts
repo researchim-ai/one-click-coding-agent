@@ -33,6 +33,8 @@ export interface ServerLaunchArgs {
   threads: number
   tensorSplit: string | null
   flashAttn: boolean
+  cacheTypeK: string
+  cacheTypeV: string
 }
 
 export interface DownloadProgress {
@@ -65,4 +67,19 @@ export interface FileTreeEntry {
   path: string
   isDir: boolean
   children?: FileTreeEntry[]
+}
+
+export interface ModelVariant {
+  quant: string
+  bits: number
+  label: string
+  sizeMb: number
+  quality: number
+}
+
+export interface ModelVariantInfo extends ModelVariant {
+  fits: boolean
+  maxCtx: number
+  mode: 'cpu' | 'hybrid' | 'full_gpu'
+  recommended: boolean
 }

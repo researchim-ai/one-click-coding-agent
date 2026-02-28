@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import type { AppStatus, DownloadProgress } from '../../electron/types'
+import type { AppStatus, DownloadProgress, ModelVariantInfo } from '../../electron/types'
 
 interface Props {
   status: AppStatus | null
@@ -10,12 +10,59 @@ interface Props {
 
 type Phase = 'idle' | 'installing' | 'downloading' | 'starting' | 'done' | 'error'
 
+const DEFAULT_QUANT = 'UD-Q4_K_XL'
+
+function formatSize(mb: number): string {
+  return (mb / 1024).toFixed(1) + ' ГБ'
+}
+
+function formatCtx(tokens: number): string {
+  if (tokens >= 1024) return Math.round(tokens / 1024) + 'K'
+  return String(tokens)
+}
+
+const BITS_COLOR: Record<number, string> = {
+  2: 'text-red-400',
+  3: 'text-orange-400',
+  4: 'text-yellow-300',
+  5: 'text-lime-400',
+  6: 'text-emerald-400',
+  8: 'text-cyan-400',
+}
+
 export function SetupWizard({ status, downloadProgress, buildStatus, onComplete }: Props) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [startTime, setStartTime] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+
+  const [variants, setVariants] = useState<ModelVariantInfo[]>([])
+  const [selectedQuant, setSelectedQuant] = useState(DEFAULT_QUANT)
+  const [dropdownOpen, setDropdownOpen] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    window.api.getModelVariants().then(setVariants).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  const selected = variants.find((v) => v.quant === selectedQuant)
+
+  const handleSelectVariant = async (quant: string) => {
+    setSelectedQuant(quant)
+    setDropdownOpen(false)
+    await window.api.selectModelVariant(quant).catch(() => {})
+  }
 
   const addLog = (msg: string) => {
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`])
@@ -56,7 +103,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
 
       setPhase('downloading')
       if (!status?.modelDownloaded) {
-        addLog('\u{1F4E5} Начинаем скачивание модели…')
+        addLog(`\u{1F4E5} Начинаем скачивание модели (${selectedQuant})…`)
         const modelPath = await window.api.downloadModel()
         addLog(`\u2705 Модель скачана: ${modelPath.split(/[\\/]/).pop()}`)
       } else {
@@ -80,6 +127,9 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0
   const elapsedStr = elapsed > 0 ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}` : ''
 
+  const selectedSize = selected ? formatSize(selected.sizeMb) : '~20 ГБ'
+  const selectedCtx = selected ? formatCtx(selected.maxCtx) : '?'
+
   const steps = [
     {
       key: 'install',
@@ -92,7 +142,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     {
       key: 'download',
       label: 'Скачивание модели',
-      desc: 'Qwen3.5-35B-A3B — UD-Q4_K_XL (~19 ГБ)',
+      desc: `Qwen3.5-35B-A3B — ${selectedQuant} (~${selectedSize})`,
       active: phase === 'downloading',
       done: ['starting', 'done'].includes(phase),
       detail: phase === 'downloading' ? downloadProgress?.status : null,
@@ -107,6 +157,8 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     },
   ]
 
+  const isRunning = phase !== 'idle' && phase !== 'done' && phase !== 'error'
+
   return (
     <div className="flex-1 flex items-center justify-center p-6 overflow-y-auto">
       <div className="max-w-2xl w-full">
@@ -116,7 +168,9 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
           <div className="text-6xl mb-3">{'⚡'}</div>
           <h1 className="text-3xl font-bold text-zinc-100 mb-2">One-Click Coding Agent</h1>
           <p className="text-zinc-400">
-            Qwen3.5-35B-A3B <span className="text-zinc-500">{'·'}</span> UD-Q4_K_XL <span className="text-zinc-500">{'·'}</span> llama.cpp
+            Qwen3.5-35B-A3B <span className="text-zinc-500">{'·'}</span>{' '}
+            <span className="text-zinc-300">{selectedQuant}</span>{' '}
+            <span className="text-zinc-500">{'·'}</span> llama.cpp
           </p>
         </div>
 
@@ -140,7 +194,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                     ? 'bg-blue-500 text-white animate-pulse'
                     : 'bg-zinc-800 text-zinc-500'
               }`}>
-                {step.done ? '✓' : i + 1}
+                {step.done ? '\u2713' : i + 1}
               </div>
 
               <div className="flex-1 min-w-0">
@@ -220,22 +274,93 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                   {line}
                 </div>
               ))}
-              {phase !== 'idle' && phase !== 'done' && phase !== 'error' && (
-                <div className="text-zinc-600 animate-pulse">{'▍'}</div>
+              {isRunning && (
+                <div className="text-zinc-600 animate-pulse">{'\u258D'}</div>
               )}
             </div>
           </div>
         )}
 
-        {/* Action buttons */}
+        {/* Action: variant picker + launch button */}
         {phase === 'idle' && (
           <div>
-            <button
-              onClick={handleStart}
-              className="w-full py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all cursor-pointer active:scale-[0.98]"
-            >
-              {'🚀'} Запустить автонастройку
-            </button>
+            <div className="flex gap-3 items-stretch">
+              {/* Variant dropdown */}
+              <div ref={dropdownRef} className="relative">
+                <button
+                  onClick={() => setDropdownOpen((o) => !o)}
+                  className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[220px]"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-zinc-200 font-medium truncate">{selectedQuant.replace('UD-', '')}</div>
+                    <div className="text-[11px] text-zinc-500 leading-tight">
+                      {selectedSize} {'\u00b7'} ctx {selectedCtx}
+                    </div>
+                  </div>
+                  <svg className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {dropdownOpen && variants.length > 0 && (
+                  <div className="absolute bottom-full left-0 mb-2 w-[340px] max-h-[400px] overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50 z-50">
+                    <div className="px-3 py-2 border-b border-zinc-800">
+                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Квантизация модели</span>
+                    </div>
+                    {variants.map((v) => {
+                      const isSel = v.quant === selectedQuant
+                      const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
+                      return (
+                        <button
+                          key={v.quant}
+                          disabled={!v.fits}
+                          onClick={() => handleSelectVariant(v.quant)}
+                          className={`w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer ${
+                            !v.fits
+                              ? 'opacity-35 cursor-not-allowed'
+                              : isSel
+                                ? 'bg-blue-500/10'
+                                : 'hover:bg-zinc-800'
+                          }`}
+                        >
+                          <div className={`w-7 text-center text-xs font-bold ${colorClass}`}>
+                            {v.bits}b
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-sm font-medium truncate ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
+                                {v.quant.replace('UD-', '')}
+                              </span>
+                              {v.recommended && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium shrink-0">
+                                  рек.
+                                </span>
+                              )}
+                              {isSel && (
+                                <span className="text-blue-400 shrink-0">{'\u2713'}</span>
+                              )}
+                            </div>
+                            <div className={`text-[11px] leading-tight mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                              {formatSize(v.sizeMb)}
+                              {v.fits && <> {'\u00b7'} ctx {formatCtx(v.maxCtx)} {'\u00b7'} {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
+                              {!v.fits && <> {'\u00b7'} не хватает памяти</>}
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Launch button */}
+              <button
+                onClick={handleStart}
+                className="flex-1 py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all cursor-pointer active:scale-[0.98]"
+              >
+                {'\u{1F680}'} Запустить
+              </button>
+            </div>
             <button
               onClick={onComplete}
               className="w-full mt-3 py-2.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
@@ -250,7 +375,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
             onClick={onComplete}
             className="w-full py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 transition-all cursor-pointer active:scale-[0.98]"
           >
-            {'✨'} Начать работу
+            {'\u2728'} Начать работу
           </button>
         )}
 
@@ -260,7 +385,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
               onClick={handleStart}
               className="flex-1 py-3 rounded-xl font-semibold text-sm bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer"
             >
-              {'🔄'} Попробовать снова
+              {'\u{1F504}'} Попробовать снова
             </button>
             <button
               onClick={onComplete}
@@ -271,7 +396,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
           </div>
         )}
 
-        {['installing', 'downloading', 'starting'].includes(phase) && (
+        {isRunning && (
           <div className="text-center text-xs text-zinc-600 mt-4">
             Не закрывай окно. {elapsedStr && `Прошло: ${elapsedStr}`}
           </div>

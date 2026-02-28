@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
 import os from 'os'
-import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection } from './types'
+import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection, ModelVariant, ModelVariantInfo } from './types'
 
 export function detectGpus(): GpuInfo[] {
   try {
@@ -120,97 +120,239 @@ export function pickBinaryVariant(res: SystemResources): BinarySelection {
 }
 
 // ---------------------------------------------------------------------------
-// Presets: Qwen3.5-35B-A3B (Q4_K_XL) ~19GB
-// RAM = системная память для CPU-части модели + KV cache
-// VRAM = видеопамять для GPU-слоёв (1 слой ≈ 300 MB)
-// ---------------------------------------------------------------------------
-// RAM (GB) | VRAM (GB) | Режим  | n-gpu-layers | ctx (tokens) | KV в RAM
-// ---------|-----------|--------|--------------|--------------|----------
-//  16      |    0      | —      | —            | не влезет    | модель 20GB
-//  24      |    0      | CPU    | 0            | 4096         |
-//  32      |    0      | CPU    | 0            | 8192         |
-//  48      |    0      | CPU    | 0            | 16384        |
-//  64+     |    0      | CPU    | 0            | 32768        |
-//  16      |    8      | Hybrid | 15–20        | 4096         | тесно
-//  24      |    8      | Hybrid | 18–22        | 6144         |
-//  32      |    8      | Hybrid | 18–22        | 8192         |
-//  48+     |    8      | Hybrid | 18–22        | 12288        |
-//  16      |   12      | Hybrid | 25–30        | 4096         |
-//  32      |   12      | Hybrid | 28–32        | 12288        |
-//  48+     |   12      | Hybrid | 28–32        | 16384        |
-//  32      |   16      | Hybrid | 40–50        | 16384        |
-//  48+     |   16      | Hybrid | 40–50        | 24576        |
-//  32+     |   24      | Full   | 999          | 32768–65536  | модель на GPU
-//  48+     |   24      | Full   | 999          | 65536–131072 |
-//  32+     |   48+     | Full   | 999          | 131072–262144|
+// Qwen3.5-35B-A3B architecture (from model card):
+//
+//   40 layers total, layout: 10 × (3 × DeltaNet + 1 × Attention)
+//   → 30 DeltaNet layers (recurrent, fixed-size state — no KV cache)
+//   → 10 Attention layers (traditional KV cache, scales with context)
+//
+//   Attention config: 2 KV heads, head_dim 256
+//   KV per attention layer per token: K = 2*256 = 512 vals, V = 2*256 = 512 vals
+//     f16:  (512+512) * 2 bytes = 2048 bytes/layer/token
+//     q8_0: (512+512) * ~1.0625 ≈ 1088 bytes/layer/token
+//
+//   Native context: 262,144 tokens (extensible to 1M+)
+//
+//   Only 10 out of 40 layers need KV cache → ~5x less KV memory than
+//   a standard transformer with the same layer count.
 // ---------------------------------------------------------------------------
 
-const MODEL_RAM_MB = 20200      // модель в RAM (CPU-часть или вся при CPU)
-const MODEL_VRAM_MB = 20200    // модель целиком на GPU
-const RAM_OVERHEAD_MB = 3000   // ОС, приложение, буферы
-const LAYER_VRAM_MB = 320      // примерный размер одного слоя на GPU
+// ---------------------------------------------------------------------------
+// Model variant catalog
+// ---------------------------------------------------------------------------
+
+export const MODEL_VARIANTS: ModelVariant[] = [
+  { quant: 'UD-IQ2_XXS',    bits: 2, label: 'IQ2_XXS — минимальный',     sizeMb: 9994,  quality: 1 },
+  { quant: 'UD-Q2_K_XL',    bits: 2, label: 'Q2_K_XL',                   sizeMb: 13210, quality: 2 },
+  { quant: 'UD-IQ3_XXS',    bits: 3, label: 'IQ3_XXS',                   sizeMb: 14438, quality: 3 },
+  { quant: 'UD-IQ3_S',      bits: 3, label: 'IQ3_S',                     sizeMb: 15565, quality: 4 },
+  { quant: 'UD-Q3_K_M',     bits: 3, label: 'Q3_K_M',                    sizeMb: 17101, quality: 5 },
+  { quant: 'UD-Q3_K_XL',    bits: 3, label: 'Q3_K_XL',                   sizeMb: 17613, quality: 5 },
+  { quant: 'UD-Q4_K_M',     bits: 4, label: 'Q4_K_M — баланс',           sizeMb: 20378, quality: 7 },
+  { quant: 'UD-Q4_K_XL',    bits: 4, label: 'Q4_K_XL — рекомендуемый',   sizeMb: 21094, quality: 8 },
+  { quant: 'UD-Q5_K_XL',    bits: 5, label: 'Q5_K_XL — высокое',         sizeMb: 25498, quality: 9 },
+  { quant: 'UD-Q6_K_XL',    bits: 6, label: 'Q6_K_XL',                   sizeMb: 31027, quality: 10 },
+  { quant: 'UD-Q8_K_XL',    bits: 8, label: 'Q8_K_XL — максимум',        sizeMb: 39629, quality: 11 },
+]
+
+// Per-layer VRAM for weight offloading (scales with model file size)
+// Q4_K_XL ≈ 21 GB, ~1.2 GB embeddings+output, 40 layers → ~500 MB/layer
+const REFERENCE_MODEL_MB = 21094
+const REFERENCE_LAYER_VRAM_MB = 500
+
+function modelMemoryMb(variant: ModelVariant): number {
+  return Math.round(variant.sizeMb * 1.03)
+}
+
+function layerVramMb(variant: ModelVariant): number {
+  return Math.round(REFERENCE_LAYER_VRAM_MB * (variant.sizeMb / REFERENCE_MODEL_MB))
+}
+
+export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
+  const freeVram = res.gpus.reduce((s, g) => s + g.vramFreeMb, 0)
+  const isLaptop = res.gpus.some((g) => /laptop|mobile/i.test(g.name))
+  const totalMem = res.ramTotalMb + freeVram
+
+  let bestFittingIdx = -1
+
+  const results = MODEL_VARIANTS.map((v) => {
+    const memMb = modelMemoryMb(v)
+    const layerMb = layerVramMb(v)
+
+    // mmap means ~70% of model pages need to be resident; GPU loads fully
+    const minRequired = Math.round(memMb * 0.70) + RAM_OVERHEAD_MB
+    const fits = totalMem >= minRequired
+
+    let mode: 'cpu' | 'hybrid' | 'full_gpu' = 'cpu'
+    let maxCtx = 4096
+
+    if (fits) {
+      const preset = selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layerMb)
+      maxCtx = preset.ctxSize
+      if (freeVram >= memMb + 2000) mode = 'full_gpu'
+      else if (freeVram >= 500) mode = 'hybrid'
+    }
+
+    return { ...v, fits, maxCtx, mode, recommended: false }
+  })
+
+  // Mark the best fitting variant as recommended (highest quality that gives >= 16K context)
+  for (let i = results.length - 1; i >= 0; i--) {
+    if (results[i].fits && results[i].maxCtx >= 16384) {
+      bestFittingIdx = i
+      break
+    }
+  }
+  // Fallback: any fitting variant
+  if (bestFittingIdx === -1) {
+    for (let i = results.length - 1; i >= 0; i--) {
+      if (results[i].fits) { bestFittingIdx = i; break }
+    }
+  }
+  if (bestFittingIdx >= 0) results[bestFittingIdx].recommended = true
+
+  return results
+}
+
+// ---------------------------------------------------------------------------
+// Preset calculation — parameterized by model size
+// ---------------------------------------------------------------------------
+
+const RAM_OVERHEAD_MB = 3000
+
+const TOTAL_LAYERS = 40
+const KV_LAYERS = 10                   // only 10 of 40 layers have attention KV cache
+const KV_BYTES_PER_LAYER_F16 = 2048   // (512K + 512V) * 2 bytes = 2*2*256*2
+const KV_BYTES_PER_LAYER_Q8 = 1088    // q8_0: ~1.0625 bytes per element
+const KV_SAFETY_FACTOR = 0.80         // 20% headroom for fragmentation, scratch buffers
+const MAX_CTX_SIZE = 262144            // native context window of the model
+
+const CTX_SNAP_TARGETS = [262144, 131072, 65536, 32768, 24576, 16384, 12288, 8192, 6144, 4096]
+
+function kvLayersSplit(gpuLayersCapped: number): { kvOnGpu: number; kvOnCpu: number } {
+  const kvOnGpu = Math.round(KV_LAYERS * Math.min(gpuLayersCapped, TOTAL_LAYERS) / TOTAL_LAYERS)
+  return { kvOnGpu, kvOnCpu: KV_LAYERS - kvOnGpu }
+}
+
+function calcContextFromMemory(
+  vramForKvMb: number,
+  kvOnGpu: number,
+  ramForKvMb: number,
+  kvOnCpu: number,
+  kvQuantized: boolean,
+): number {
+  const bytesPerLayer = kvQuantized ? KV_BYTES_PER_LAYER_Q8 : KV_BYTES_PER_LAYER_F16
+  let maxTokens = Infinity
+
+  if (kvOnGpu > 0 && vramForKvMb > 0) {
+    const vramBytes = vramForKvMb * 1024 * 1024 * KV_SAFETY_FACTOR
+    maxTokens = Math.min(maxTokens, Math.floor(vramBytes / (kvOnGpu * bytesPerLayer)))
+  }
+
+  if (kvOnCpu > 0 && ramForKvMb > 0) {
+    const ramBytes = ramForKvMb * 1024 * 1024 * KV_SAFETY_FACTOR
+    maxTokens = Math.min(maxTokens, Math.floor(ramBytes / (kvOnCpu * bytesPerLayer)))
+  }
+
+  maxTokens = Math.min(maxTokens, MAX_CTX_SIZE)
+
+  for (const s of CTX_SNAP_TARGETS) {
+    if (maxTokens >= s) return s
+  }
+  return 4096
+}
 
 interface Preset {
   nGpuLayers: number
   ctxSize: number
   flashAttn: boolean
+  cacheTypeK: string
+  cacheTypeV: string
+}
+
+function selectPresetForSize(
+  ramTotalMb: number,
+  freeVramMb: number,
+  isLaptop: boolean,
+  modelRamMb: number,
+  modelVramMb: number,
+  perLayerVramMb: number,
+): Preset {
+  const kvType = { cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' }
+  // mmap: only hot pages need physical RAM. For MoE only active experts are
+  // accessed, but we use 80% as a conservative factor to ensure stable perf.
+  const perLayerCpuMb = Math.round(perLayerVramMb * 0.80)
+
+  // CPU-only (model loaded via mmap)
+  if (freeVramMb < 500) {
+    const mmapModelMb = Math.round(modelRamMb * 0.80)
+    const ramForModel = ramTotalMb - RAM_OVERHEAD_MB
+    if (ramForModel < mmapModelMb) {
+      return { nGpuLayers: 0, ctxSize: 4096, flashAttn: false, ...kvType }
+    }
+    const ramForKv = ramForModel - mmapModelMb
+    const ctx = calcContextFromMemory(0, 0, ramForKv, KV_LAYERS, true)
+    return { nGpuLayers: 0, ctxSize: ctx, flashAttn: false, ...kvType }
+  }
+
+  // Full GPU
+  const fullGpuThreshold = modelVramMb + 2000
+  if (freeVramMb >= fullGpuThreshold) {
+    const vramForKv = freeVramMb - modelVramMb
+    const ctx = calcContextFromMemory(vramForKv, KV_LAYERS, 0, 0, true)
+    return { nGpuLayers: 999, ctxSize: ctx, flashAttn: true, ...kvType }
+  }
+
+  // Hybrid: search for optimal GPU layer count that maximizes context.
+  // More GPU layers = faster inference but less VRAM left for KV cache.
+  // We try all meaningful layer counts (KV layer boundaries at every 4th layer)
+  // and pick the one giving the best context, preferring more GPU layers on ties.
+  let maxLayersOnGpu = Math.min(TOTAL_LAYERS, Math.max(0, Math.floor((freeVramMb - 2000) / perLayerVramMb)))
+
+  if (isLaptop) {
+    maxLayersOnGpu = Math.min(maxLayersOnGpu, Math.max(0, Math.floor((freeVramMb - 3500) / (perLayerVramMb * 1.2))))
+  }
+
+  let bestCtx = 0
+  let bestNGpu = 0
+
+  for (let nGpu = maxLayersOnGpu; nGpu >= 0; nGpu -= 4) {
+    const gpuCapped = Math.min(nGpu, TOTAL_LAYERS)
+    const cpuL = TOTAL_LAYERS - gpuCapped
+    const { kvOnGpu, kvOnCpu } = kvLayersSplit(gpuCapped)
+
+    const cpuModelRam = cpuL * perLayerCpuMb
+    const ramKv = ramTotalMb - RAM_OVERHEAD_MB - cpuModelRam
+    const vramKv = freeVramMb - (gpuCapped * perLayerVramMb)
+
+    const ctx = calcContextFromMemory(
+      Math.max(0, vramKv), kvOnGpu,
+      Math.max(0, ramKv), kvOnCpu,
+      true,
+    )
+
+    if (ctx > bestCtx || (ctx === bestCtx && nGpu > bestNGpu)) {
+      bestCtx = ctx
+      bestNGpu = nGpu
+    }
+  }
+
+  return {
+    nGpuLayers: bestNGpu,
+    ctxSize: bestCtx,
+    flashAttn: bestNGpu > 0,
+    ...kvType,
+  }
 }
 
 function selectPreset(ramTotalMb: number, freeVramMb: number, isLaptop: boolean): Preset {
-  const ramGb = ramTotalMb / 1024
-  const vramGb = freeVramMb / 1024
-
-  // CPU-only
-  if (freeVramMb < 500) {
-    const ramForModel = ramTotalMb - RAM_OVERHEAD_MB
-    if (ramForModel < MODEL_RAM_MB) {
-      return { nGpuLayers: 0, ctxSize: 4096, flashAttn: false }
-    }
-    const ramForKv = ramForModel - MODEL_RAM_MB
-    const ctx = ramForKv > 12000 ? 32768 : ramForKv > 6000 ? 16384 : ramForKv > 3000 ? 8192 : 4096
-    return { nGpuLayers: 0, ctxSize: ctx, flashAttn: false }
-  }
-
-  // Full GPU: модель целиком на видеокарте
-  if (freeVramMb >= 22000) {
-    const vramForKv = freeVramMb - MODEL_VRAM_MB
-    const ctx = vramForKv > 40000 ? 262144 : vramForKv > 25000 ? 131072 : vramForKv > 12000 ? 65536 : vramForKv > 5000 ? 32768 : 16384
-    return { nGpuLayers: 999, ctxSize: ctx, flashAttn: true }
-  }
-
-  // Hybrid: часть слоёв на GPU, остальное на CPU
-  const maxLayersOnGpu = Math.floor((freeVramMb - 2000) / LAYER_VRAM_MB)
-  const nGpuLayers = Math.min(999, Math.max(8, maxLayersOnGpu))
-
-  // Лэптопы: запас на интегрированную графику и thermal throttling
-  const effN = isLaptop ? Math.min(nGpuLayers, Math.max(12, Math.floor((freeVramMb - 3500) / 380))) : nGpuLayers
-
-  // CPU держит слои не на GPU: ~(52 - effN) * 400 MB. Оставшаяся RAM — для KV
-  const estCpuLayers = Math.max(0, 52 - Math.min(effN, 52))
-  const ramForCpuModel = estCpuLayers * 400
-  const ramForKv = ramTotalMb - RAM_OVERHEAD_MB - ramForCpuModel
-
-  let ctxFromRam: number
-  if (ramForKv > 10000) ctxFromRam = 16384
-  else if (ramForKv > 6000) ctxFromRam = 12288
-  else if (ramForKv > 3000) ctxFromRam = 8192
-  else if (ramForKv > 1000) ctxFromRam = 6144
-  else ctxFromRam = 4096
-
-  // Ограничение по VRAM для KV (если часть KV на GPU)
-  const vramForKv = freeVramMb - (effN * LAYER_VRAM_MB)
-  const ctxFromVram = vramForKv > 8000 ? 16384 : vramForKv > 4000 ? 8192 : 4096
-
-  const ctxSize = Math.min(ctxFromRam, ctxFromVram)
-
-  return {
-    nGpuLayers: effN,
-    ctxSize: Math.max(4096, ctxSize),
-    flashAttn: true,
-  }
+  const defaultVariant = MODEL_VARIANTS.find((v) => v.quant === 'UD-Q4_K_XL')!
+  const memMb = modelMemoryMb(defaultVariant)
+  const layMb = layerVramMb(defaultVariant)
+  return selectPresetForSize(ramTotalMb, freeVramMb, isLaptop, memMb, memMb, layMb)
 }
 
-export function computeOptimalArgs(res: SystemResources): ServerLaunchArgs {
+export function computeOptimalArgs(res: SystemResources, quant?: string): ServerLaunchArgs {
   const threads = Math.max(1, Math.floor(res.cpuThreads / 2))
   const freeVram = res.gpus.reduce((s, g) => s + g.vramFreeMb, 0)
   const isLaptop = res.gpus.some((g) => /laptop|mobile/i.test(g.name))
@@ -223,7 +365,19 @@ export function computeOptimalArgs(res: SystemResources): ServerLaunchArgs {
     }
   }
 
-  const preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
+  let preset: Preset
+  if (quant) {
+    const variant = MODEL_VARIANTS.find((v) => v.quant === quant)
+    if (variant) {
+      const memMb = modelMemoryMb(variant)
+      const layMb = layerVramMb(variant)
+      preset = selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layMb)
+    } else {
+      preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
+    }
+  } else {
+    preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
+  }
 
   return {
     nGpuLayers: preset.nGpuLayers,
@@ -231,5 +385,7 @@ export function computeOptimalArgs(res: SystemResources): ServerLaunchArgs {
     threads,
     tensorSplit,
     flashAttn: preset.flashAttn,
+    cacheTypeK: preset.cacheTypeK,
+    cacheTypeV: preset.cacheTypeV,
   }
 }

@@ -8,6 +8,7 @@ import { detect, computeOptimalArgs, pickBinaryVariant } from './resources'
 import type { ServerLaunchArgs } from './types'
 
 let lastServerLog: string[] = []
+let activeCtxSize = 0
 
 const LLAMA_HOST = '127.0.0.1'
 const LLAMA_PORT = 7863
@@ -321,13 +322,18 @@ export function getServerLog(): string[] {
   return lastServerLog
 }
 
-export function start(modelPath: string, win?: BrowserWindow, args?: ServerLaunchArgs): void {
+export function getCtxSize(): number {
+  return activeCtxSize
+}
+
+export function start(modelPath: string, win?: BrowserWindow, args?: ServerLaunchArgs, quant?: string): void {
   if (isRunning()) throw new Error('Server already running')
 
   const bin = findServerBin()
   if (!bin) throw new Error('llama-server not found — run ensureBinary first')
 
-  const la = args ?? computeOptimalArgs(detect())
+  const la = args ?? computeOptimalArgs(detect(), quant)
+  activeCtxSize = la.ctxSize
   const cmdArgs = [
     '--model', modelPath,
     '--host', LLAMA_HOST,
@@ -336,6 +342,8 @@ export function start(modelPath: string, win?: BrowserWindow, args?: ServerLaunc
     '--n-gpu-layers', String(la.nGpuLayers),
     '--ctx-size', String(la.ctxSize),
     '--threads', String(la.threads),
+    '--cache-type-k', la.cacheTypeK,
+    '--cache-type-v', la.cacheTypeV,
   ]
   if (la.tensorSplit) cmdArgs.push('--tensor-split', la.tensorSplit)
   if (la.flashAttn) cmdArgs.push('--flash-attn', 'on')
@@ -344,6 +352,7 @@ export function start(modelPath: string, win?: BrowserWindow, args?: ServerLaunc
   if (win) {
     emitBuild(win, `Запуск: ${path.basename(bin)}`)
     emitBuild(win, `GPU layers: ${la.nGpuLayers}, ctx: ${la.ctxSize}, threads: ${la.threads}` +
+      `, kv-cache: ${la.cacheTypeK}` +
       (la.tensorSplit ? `, tensor-split: ${la.tensorSplit}` : '') +
       (la.flashAttn ? ', flash-attn: on' : ''))
   }

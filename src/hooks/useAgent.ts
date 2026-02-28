@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import type { AgentEvent, DownloadProgress, AppStatus } from '../../electron/types'
+import type { SessionInfo } from '../../electron/agent'
 
 export interface ToolCall {
   name: string
@@ -18,7 +19,17 @@ export interface ChatMessage {
   done?: boolean
 }
 
+interface SessionState {
+  messages: ChatMessage[]
+  idCounter: number
+}
+
 export function useAgent() {
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+
+  const sessionStates = useRef(new Map<string, SessionState>())
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<AppStatus | null>(null)
@@ -29,6 +40,71 @@ export function useAgent() {
   const idCounter = useRef(0)
 
   const nextId = () => String(++idCounter.current)
+
+  function saveCurrentToMap() {
+    if (activeSessionId) {
+      sessionStates.current.set(activeSessionId, {
+        messages,
+        idCounter: idCounter.current,
+      })
+      window.api?.saveUiMessages(activeSessionId, messages).catch(() => {})
+    }
+  }
+
+  async function loadFromMap(sessionId: string) {
+    const state = sessionStates.current.get(sessionId)
+    if (state) {
+      idCounter.current = state.idCounter
+      setMessages(state.messages)
+    } else {
+      // Try loading persisted UI messages from disk
+      try {
+        const saved = await window.api.getUiMessages(sessionId)
+        if (saved && saved.length > 0) {
+          const maxId = saved.reduce((max: number, m: any) => Math.max(max, parseInt(m.id) || 0), 0)
+          idCounter.current = maxId
+          setMessages(saved)
+          sessionStates.current.set(sessionId, { messages: saved, idCounter: maxId })
+        } else {
+          idCounter.current = 0
+          setMessages([])
+        }
+      } catch {
+        idCounter.current = 0
+        setMessages([])
+      }
+    }
+    assistantRef.current = null
+  }
+
+  // Init: load sessions from backend, create first one if none exist
+  useEffect(() => {
+    if (!window.api) return
+    ;(async () => {
+      let list = await window.api.listSessions()
+      const activeId = await window.api.getActiveSessionId()
+
+      if (list.length === 0) {
+        await window.api.createSession()
+        list = await window.api.listSessions()
+      }
+
+      setSessions(list)
+
+      let targetId: string | null = null
+      if (activeId && list.some((s: SessionInfo) => s.id === activeId)) {
+        targetId = activeId
+      } else if (list.length > 0) {
+        targetId = list[0].id
+        await window.api.switchSession(list[0].id)
+      }
+
+      if (targetId) {
+        setActiveSessionId(targetId)
+        await loadFromMap(targetId)
+      }
+    })()
+  }, [])
 
   useEffect(() => {
     if (!window.api) return
@@ -58,6 +134,13 @@ export function useAgent() {
     } catch {}
   }
 
+  const refreshSessions = useCallback(async () => {
+    try {
+      const list = await window.api.listSessions()
+      setSessions(list)
+    } catch {}
+  }, [])
+
   const handleAgentEvent = useCallback((ev: AgentEvent) => {
     setMessages((prev) => {
       const msgs = [...prev]
@@ -83,7 +166,6 @@ export function useAgent() {
           ]
           break
         case 'command_approval': {
-          // Mark the last tool call as waiting for approval
           const calls = assistant.toolCalls ?? []
           if (calls.length > 0) {
             calls[calls.length - 1].approvalId = ev.approvalId
@@ -121,7 +203,6 @@ export function useAgent() {
 
   const respondApproval = useCallback((approvalId: string, approved: boolean) => {
     window.api.respondApproval(approvalId, approved)
-    // Update the tool call status in UI immediately
     setMessages((prev) =>
       prev.map((msg) => {
         if (msg.toolCalls) {
@@ -139,7 +220,12 @@ export function useAgent() {
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || busy) return
-    setMessages((prev) => [...prev, { id: nextId(), role: 'user', content: text }])
+    setMessages((prev) => {
+      const userMsg: ChatMessage = { id: nextId(), role: 'user', content: text }
+      const assistantMsg: ChatMessage = { id: nextId(), role: 'assistant', content: '', toolCalls: [] }
+      assistantRef.current = assistantMsg
+      return [...prev, userMsg, assistantMsg]
+    })
     setBusy(true)
     try {
       await window.api.sendMessage(text, workspace)
@@ -147,7 +233,15 @@ export function useAgent() {
       setMessages((prev) => [...prev, { id: nextId(), role: 'status', content: `⚠ ${e.message ?? e}` }])
       setBusy(false)
     }
-  }, [busy, workspace])
+    refreshSessions()
+  }, [busy, workspace, refreshSessions])
+
+  const cancel = useCallback(async () => {
+    try {
+      await window.api.cancelAgent()
+    } catch {}
+    setBusy(false)
+  }, [])
 
   const setWorkspace = useCallback((ws: string) => {
     setWorkspaceState(ws)
@@ -158,12 +252,95 @@ export function useAgent() {
   const resetChat = useCallback(() => {
     setMessages([])
     assistantRef.current = null
+    idCounter.current = 0
+    if (activeSessionId) {
+      sessionStates.current.set(activeSessionId, { messages: [], idCounter: 0 })
+      window.api.saveUiMessages(activeSessionId, []).catch(() => {})
+    }
     window.api.resetAgent()
-  }, [])
+    refreshSessions()
+  }, [activeSessionId, refreshSessions])
+
+  // ---------------------------------------------------------------------------
+  // Session actions
+  // ---------------------------------------------------------------------------
+
+  const newSession = useCallback(async () => {
+    if (busy) return
+    saveCurrentToMap()
+    const id = await window.api.createSession()
+    setActiveSessionId(id)
+    setMessages([])
+    assistantRef.current = null
+    idCounter.current = 0
+    await refreshSessions()
+  }, [busy, activeSessionId, messages, refreshSessions])
+
+  const switchToSession = useCallback(async (id: string) => {
+    if (busy || id === activeSessionId) return
+    saveCurrentToMap()
+    const ok = await window.api.switchSession(id)
+    if (ok) {
+      setActiveSessionId(id)
+      loadFromMap(id)
+    }
+  }, [busy, activeSessionId, messages])
+
+  const removeSession = useCallback(async (id: string) => {
+    if (busy) return
+    await window.api.deleteSession(id)
+    sessionStates.current.delete(id)
+
+    if (id === activeSessionId) {
+      const remaining = sessions.filter((s) => s.id !== id)
+      if (remaining.length > 0) {
+        const next = remaining[0]
+        await window.api.switchSession(next.id)
+        setActiveSessionId(next.id)
+        loadFromMap(next.id)
+      } else {
+        const newId = await window.api.createSession()
+        setActiveSessionId(newId)
+        setMessages([])
+        assistantRef.current = null
+        idCounter.current = 0
+      }
+    }
+    await refreshSessions()
+  }, [busy, activeSessionId, sessions, refreshSessions])
+
+  const renameActiveSession = useCallback(async (title: string) => {
+    if (!activeSessionId) return
+    await window.api.renameSession(activeSessionId, title)
+    await refreshSessions()
+  }, [activeSessionId, refreshSessions])
+
+  // Persist messages to map + debounced disk save
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (activeSessionId) {
+      sessionStates.current.set(activeSessionId, {
+        messages,
+        idCounter: idCounter.current,
+      })
+
+      // Debounced save to disk (500ms after last message change)
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = setTimeout(() => {
+        window.api?.saveUiMessages(activeSessionId, messages).catch(() => {})
+      }, 500)
+    }
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    }
+  }, [messages, activeSessionId])
 
   return {
     messages, busy, status, downloadProgress, buildStatus,
     workspace, setWorkspace,
-    sendMessage, resetChat, pollStatus, respondApproval,
+    sendMessage, resetChat, pollStatus, respondApproval, cancel,
+    // Session management
+    sessions, activeSessionId,
+    newSession, switchToSession, removeSession, renameActiveSession,
   }
 }

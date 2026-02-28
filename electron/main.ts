@@ -8,10 +8,16 @@ if (process.env.ELECTRON_NO_SANDBOX || process.argv.includes('--no-sandbox')) {
   app.commandLine.appendSwitch('disable-gpu-sandbox')
   app.disableHardwareAcceleration()
 }
-import { detect } from './resources'
+import { detect, evaluateVariants } from './resources'
 import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
-import { runAgent, resetAgent, setWorkspace } from './agent'
+import {
+  runAgent, resetAgent, setWorkspace, cancelAgent,
+  createSession, switchSession, listSessions, deleteSession,
+  renameSession, getActiveSessionId, initSessions,
+  saveUiMessages, getUiMessages,
+  type SessionInfo,
+} from './agent'
 import * as terminalManager from './terminal-manager'
 
 let mainWindow: BrowserWindow | null = null
@@ -39,6 +45,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  initSessions()
   registerIpcHandlers()
   createWindow()
 
@@ -55,6 +62,12 @@ app.on('window-all-closed', () => {
 
 function registerIpcHandlers() {
   ipcMain.handle('detect-resources', () => detect())
+
+  ipcMain.handle('get-model-variants', () => evaluateVariants(detect()))
+
+  ipcMain.handle('select-model-variant', (_e, quant: string) => {
+    modelManager.setSelectedQuant(quant)
+  })
 
   ipcMain.handle('get-status', async () => {
     const running = serverManager.isRunning()
@@ -81,7 +94,7 @@ function registerIpcHandlers() {
     const modelPath = modelManager.getModelPath()
     if (!modelPath) throw new Error('Модель не скачана')
     if (!serverManager.isReady()) throw new Error('llama-server не установлен')
-    serverManager.start(modelPath, mainWindow ?? undefined)
+    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant())
     await serverManager.waitReady(300, mainWindow ?? undefined)
   })
 
@@ -102,7 +115,7 @@ function registerIpcHandlers() {
     }
 
     if (!serverManager.isRunning()) {
-      serverManager.start(modelPath, mainWindow ?? undefined)
+      serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant())
       await serverManager.waitReady(300, mainWindow ?? undefined)
     }
   })
@@ -112,8 +125,20 @@ function registerIpcHandlers() {
     return runAgent(msg, workspace, mainWindow)
   })
 
+  ipcMain.handle('cancel-agent', () => cancelAgent())
+
   ipcMain.handle('reset-agent', () => resetAgent())
   ipcMain.handle('set-workspace', (_e, ws: string) => setWorkspace(ws))
+
+  // Session management
+  ipcMain.handle('create-session', () => createSession())
+  ipcMain.handle('switch-session', (_e, id: string) => switchSession(id))
+  ipcMain.handle('list-sessions', () => listSessions())
+  ipcMain.handle('delete-session', (_e, id: string) => deleteSession(id))
+  ipcMain.handle('rename-session', (_e, id: string, title: string) => renameSession(id, title))
+  ipcMain.handle('get-active-session-id', () => getActiveSessionId())
+  ipcMain.handle('save-ui-messages', (_e, id: string, msgs: any[]) => saveUiMessages(id, msgs))
+  ipcMain.handle('get-ui-messages', (_e, id: string) => getUiMessages(id))
 
   ipcMain.handle('pick-directory', async () => {
     if (!mainWindow) return null

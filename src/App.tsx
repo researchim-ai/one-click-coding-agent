@@ -8,13 +8,16 @@ import { Chat, type CodeReference } from './components/Chat'
 import { Terminal } from './components/Terminal'
 import { SetupWizard } from './components/SetupWizard'
 import { StatusBar } from './components/StatusBar'
+import { SessionTabs } from './components/SessionTabs'
 import { useState, useEffect, useCallback } from 'react'
 
 export function App() {
   const {
     messages, busy, status, downloadProgress, buildStatus,
     workspace, setWorkspace,
-    sendMessage, resetChat, pollStatus, respondApproval,
+    sendMessage, resetChat, pollStatus, respondApproval, cancel,
+    sessions, activeSessionId,
+    newSession, switchToSession, removeSession,
   } = useAgent()
 
   const {
@@ -224,21 +227,21 @@ export function App() {
                 style={{ width: chat.size }}
                 className="border-l border-zinc-800/60 flex flex-col shrink-0 overflow-hidden"
               >
-                <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-800/60 bg-[#010409] shrink-0">
-                  <span className="text-xs text-zinc-400 font-semibold">💬 Агент</span>
-                  <button
-                    onClick={() => chat.setCollapsed(true)}
-                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 cursor-pointer text-xs"
-                    title="Свернуть чат"
-                  >
-                    ▶
-                  </button>
-                </div>
+                <SessionTabs
+                  sessions={sessions}
+                  activeSessionId={activeSessionId}
+                  busy={busy}
+                  onNew={newSession}
+                  onSwitch={switchToSession}
+                  onDelete={removeSession}
+                  onCollapse={() => chat.setCollapsed(true)}
+                />
                 <Chat
                   messages={messages}
                   busy={busy}
                   workspace={workspace}
                   onSend={sendMessage}
+                  onCancel={cancel}
                   onApproval={(id, approved) => respondApproval(id, approved)}
                   codeRefs={codeRefs}
                   onRemoveCodeRef={removeCodeRef}
