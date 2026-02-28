@@ -242,6 +242,12 @@ export function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnlin
 
   useEffect(() => { loadTree() }, [loadTree])
 
+  useEffect(() => {
+    if (!window.api?.onWorkspaceFilesChanged || !workspace) return
+    const unsub = window.api.onWorkspaceFilesChanged(loadTree)
+    return unsub
+  }, [workspace, loadTree])
+
   const handlePickDir = async () => {
     const dir = await window.api.pickDirectory()
     if (dir) onWorkspaceChange(dir)

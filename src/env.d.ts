@@ -18,6 +18,7 @@ interface ElectronAPI {
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void
+  onWorkspaceFilesChanged(cb: () => void): () => void
 
   // File operations
   createFile(filePath: string): Promise<void>

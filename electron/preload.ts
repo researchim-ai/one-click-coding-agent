@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('build-status', listener)
     return () => { ipcRenderer.removeListener('build-status', listener) }
   },
+  onWorkspaceFilesChanged: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('workspace-files-changed', listener)
+    return () => { ipcRenderer.removeListener('workspace-files-changed', listener) }
+  },
   respondApproval: (approvalId: string, approved: boolean) => {
     ipcRenderer.send('command-approval-response', approvalId, approved)
   },

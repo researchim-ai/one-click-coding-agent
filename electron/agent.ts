@@ -291,6 +291,14 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         : result
       emit(win, { type: 'tool_result', name: toolName, result: uiResult })
 
+      // Notify renderer to refresh file tree when agent modifies filesystem
+      const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory'])
+      if (fsModTools.has(toolName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+        try {
+          win.webContents.send('workspace-files-changed')
+        } catch {}
+      }
+
       // Truncate for LLM context
       let llmResult = result
       if (llmResult.length > MAX_TOOL_RESULT_CHARS) {

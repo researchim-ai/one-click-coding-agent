@@ -19,7 +19,7 @@ export function App() {
 
   const {
     openFiles, activeFile, activeFilePath,
-    openFile, closeFile, closeAll, closeOthers, setActiveFilePath,
+    openFile, closeFile, closeAll, closeOthers, refreshFile, setActiveFilePath,
   } = useEditor()
 
   const [setupDone, setSetupDone] = useState(false)
@@ -105,6 +105,14 @@ export function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   })
+
+  useEffect(() => {
+    if (!window.api?.onWorkspaceFilesChanged) return
+    const unsub = window.api.onWorkspaceFilesChanged(() => {
+      openFiles.forEach((f) => refreshFile(f.path))
+    })
+    return unsub
+  }, [openFiles, refreshFile])
 
   return (
     <div className="h-screen flex flex-col bg-zinc-950 text-zinc-50">
