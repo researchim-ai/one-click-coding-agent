@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import type { FileTreeEntry } from './types'
@@ -12,6 +12,7 @@ import { detect } from './resources'
 import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
 import { runAgent, resetAgent, setWorkspace } from './agent'
+import * as terminalManager from './terminal-manager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -47,6 +48,7 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  terminalManager.killAll()
   serverManager.stop()
   if (process.platform !== 'darwin') app.quit()
 })
@@ -166,5 +168,65 @@ function registerIpcHandlers() {
     } catch (e: any) {
       throw new Error(`Cannot read file: ${e.message}`)
     }
+  })
+
+  // File creation
+  ipcMain.handle('create-file', (_e, filePath: string) => {
+    const dir = path.dirname(filePath)
+    fs.mkdirSync(dir, { recursive: true })
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, '', 'utf-8')
+    }
+  })
+
+  ipcMain.handle('create-directory', (_e, dirPath: string) => {
+    fs.mkdirSync(dirPath, { recursive: true })
+  })
+
+  // File operations
+  ipcMain.handle('rename-file', (_e, oldPath: string, newPath: string) => {
+    const dir = path.dirname(newPath)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.renameSync(oldPath, newPath)
+  })
+
+  ipcMain.handle('delete-path', (_e, targetPath: string) => {
+    const stat = fs.statSync(targetPath)
+    if (stat.isDirectory()) {
+      fs.rmSync(targetPath, { recursive: true, force: true })
+    } else {
+      fs.unlinkSync(targetPath)
+    }
+  })
+
+  ipcMain.handle('copy-to-clipboard', (_e, text: string) => {
+    clipboard.writeText(text)
+  })
+
+  ipcMain.handle('reveal-in-explorer', (_e, targetPath: string) => {
+    shell.showItemInFolder(targetPath)
+  })
+
+  ipcMain.handle('open-in-terminal-path', (_e, dirPath: string) => {
+    if (!mainWindow) throw new Error('No window')
+    return terminalManager.create(dirPath, mainWindow)
+  })
+
+  // Terminal IPC
+  ipcMain.handle('terminal-create', (_e, cwd: string) => {
+    if (!mainWindow) throw new Error('No window')
+    return terminalManager.create(cwd, mainWindow)
+  })
+
+  ipcMain.on('terminal-input', (_e, id: string, data: string) => {
+    terminalManager.write(id, data)
+  })
+
+  ipcMain.on('terminal-resize', (_e, id: string, cols: number, rows: number) => {
+    terminalManager.resize(id, cols, rows)
+  })
+
+  ipcMain.on('terminal-kill', (_e, id: string) => {
+    terminalManager.kill(id)
   })
 }

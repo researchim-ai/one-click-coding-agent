@@ -11,6 +11,8 @@ files:
   - dist-electron/**/*
 
 asar: true
+asarUnpack:
+  - "node_modules/node-pty/**"
 
 linux:
   target:
@@ -18,11 +20,9 @@ linux:
       arch: [x64, arm64]
     - target: deb
       arch: [x64, arm64]
-    - target: rpm
-      arch: [x64]
-  # NOTE: rpm requires rpmbuild on the build machine (sudo apt install rpm)
     - target: tar.gz
       arch: [x64, arm64]
+  maintainer: researchim-ai <noreply@researchim-ai.github.io>
   category: Development
   icon: build/icons
   synopsis: Local AI coding agent powered by Qwen3.5-35B

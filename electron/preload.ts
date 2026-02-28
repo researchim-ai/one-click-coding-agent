@@ -37,4 +37,29 @@ contextBridge.exposeInMainWorld('api', {
   respondApproval: (approvalId: string, approved: boolean) => {
     ipcRenderer.send('command-approval-response', approvalId, approved)
   },
+
+  // File operations
+  createFile: (filePath: string): Promise<void> => ipcRenderer.invoke('create-file', filePath),
+  createDirectory: (dirPath: string): Promise<void> => ipcRenderer.invoke('create-directory', dirPath),
+  renameFile: (oldPath: string, newPath: string): Promise<void> => ipcRenderer.invoke('rename-file', oldPath, newPath),
+  deletePath: (targetPath: string): Promise<void> => ipcRenderer.invoke('delete-path', targetPath),
+  copyToClipboard: (text: string): Promise<void> => ipcRenderer.invoke('copy-to-clipboard', text),
+  revealInExplorer: (targetPath: string): Promise<void> => ipcRenderer.invoke('reveal-in-explorer', targetPath),
+  openInTerminalPath: (dirPath: string): Promise<string> => ipcRenderer.invoke('open-in-terminal-path', dirPath),
+
+  // Terminal
+  terminalCreate: (cwd: string): Promise<string> => ipcRenderer.invoke('terminal-create', cwd),
+  terminalInput: (id: string, data: string) => ipcRenderer.send('terminal-input', id, data),
+  terminalResize: (id: string, cols: number, rows: number) => ipcRenderer.send('terminal-resize', id, cols, rows),
+  terminalKill: (id: string) => ipcRenderer.send('terminal-kill', id),
+  onTerminalData: (cb: (id: string, data: string) => void) => {
+    const listener = (_: any, id: string, data: string) => cb(id, data)
+    ipcRenderer.on('terminal-data', listener)
+    return () => { ipcRenderer.removeListener('terminal-data', listener) }
+  },
+  onTerminalExit: (cb: (id: string, exitCode: number) => void) => {
+    const listener = (_: any, id: string, exitCode: number) => cb(id, exitCode)
+    ipcRenderer.on('terminal-exit', listener)
+    return () => { ipcRenderer.removeListener('terminal-exit', listener) }
+  },
 })

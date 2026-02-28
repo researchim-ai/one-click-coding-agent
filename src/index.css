@@ -54,6 +54,34 @@
   background: rgba(59, 130, 246, 0.08);
 }
 
+/* Horizontal resize handle (for bottom panel) */
+.resize-handle-h {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+  z-index: 10;
+  transition: background 0.15s;
+}
+.resize-handle-h::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 1px;
+  height: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.resize-handle-h:hover::after,
+.resize-handle-h:active::after {
+  background: #3b82f6;
+}
+.resize-handle-h:active {
+  background: rgba(59, 130, 246, 0.08);
+}
+
 /* Agent response prose — refined typography */
 .agent-prose {
   font-size: 13.5px;

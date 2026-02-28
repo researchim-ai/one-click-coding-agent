@@ -11,6 +11,13 @@ export default defineConfig({
     electron([
       {
         entry: 'electron/main.ts',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: ['node-pty'],
+            },
+          },
+        },
       },
       {
         entry: 'electron/preload.ts',

@@ -1,13 +1,18 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 
+type Direction = 'left' | 'right' | 'up' | 'down'
+
 interface UseResizableOptions {
-  direction: 'left' | 'right'
+  direction: Direction
   initialSize: number
   minSize: number
   maxSize: number
   collapsedSize?: number
   collapseThreshold?: number
+  onDragStart?: () => void
 }
+
+const isHorizontal = (d: Direction) => d === 'left' || d === 'right'
 
 export function useResizable({
   direction,
@@ -16,31 +21,34 @@ export function useResizable({
   maxSize,
   collapsedSize = 0,
   collapseThreshold = 0,
+  onDragStart,
 }: UseResizableOptions) {
   const [size, setSize] = useState(initialSize)
   const [collapsed, setCollapsed] = useState(false)
   const dragging = useRef(false)
-  const startX = useRef(0)
+  const startPos = useRef(0)
   const startSize = useRef(0)
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault()
       dragging.current = true
-      startX.current = e.clientX
+      startPos.current = isHorizontal(direction) ? e.clientX : e.clientY
       startSize.current = collapsed ? minSize : size
-      document.body.style.cursor = 'col-resize'
+      document.body.style.cursor = isHorizontal(direction) ? 'col-resize' : 'row-resize'
       document.body.style.userSelect = 'none'
+      onDragStart?.()
     },
-    [size, collapsed, minSize],
+    [size, collapsed, minSize, direction, onDragStart],
   )
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       if (!dragging.current) return
-      const delta = direction === 'left'
-        ? e.clientX - startX.current
-        : startX.current - e.clientX
+      const pos = isHorizontal(direction) ? e.clientX : e.clientY
+      const delta = (direction === 'left' || direction === 'up')
+        ? pos - startPos.current
+        : startPos.current - pos
       const next = startSize.current + delta
 
       if (collapseThreshold > 0 && next < collapseThreshold) {

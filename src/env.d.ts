@@ -18,6 +18,23 @@ interface ElectronAPI {
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void
+
+  // File operations
+  createFile(filePath: string): Promise<void>
+  createDirectory(dirPath: string): Promise<void>
+  renameFile(oldPath: string, newPath: string): Promise<void>
+  deletePath(targetPath: string): Promise<void>
+  copyToClipboard(text: string): Promise<void>
+  revealInExplorer(targetPath: string): Promise<void>
+  openInTerminalPath(dirPath: string): Promise<string>
+
+  // Terminal
+  terminalCreate(cwd: string): Promise<string>
+  terminalInput(id: string, data: string): void
+  terminalResize(id: string, cols: number, rows: number): void
+  terminalKill(id: string): void
+  onTerminalData(cb: (id: string, data: string) => void): () => void
+  onTerminalExit(cb: (id: string, exitCode: number) => void): () => void
 }
 
 declare global {

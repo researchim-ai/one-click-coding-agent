@@ -1,6 +1,20 @@
-import { useRef, useEffect, useState, type KeyboardEvent } from 'react'
+import { useRef, useEffect, useState, useCallback, type KeyboardEvent } from 'react'
 import { MessageBubble } from './MessageBubble'
 import type { ChatMessage } from '../hooks/useAgent'
+
+interface AttachedFile {
+  path: string
+  name: string
+}
+
+export interface CodeReference {
+  filePath: string
+  relativePath: string
+  startLine: number
+  endLine: number
+  content: string
+  language: string
+}
 
 interface Props {
   messages: ChatMessage[]
@@ -8,10 +22,18 @@ interface Props {
   workspace: string
   onSend: (text: string) => void
   onApproval?: (id: string, approved: boolean) => void
+  codeRefs?: CodeReference[]
+  onRemoveCodeRef?: (index: number) => void
 }
 
-export function Chat({ messages, busy, workspace, onSend, onApproval }: Props) {
+export function Chat({ messages, busy, workspace, onSend, onApproval, codeRefs = [], onRemoveCodeRef }: Props) {
   const [input, setInput] = useState('')
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [showMention, setShowMention] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionFiles, setMentionFiles] = useState<{ path: string; name: string }[]>([])
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [expandedRef, setExpandedRef] = useState<number | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -19,19 +41,77 @@ export function Chat({ messages, busy, workspace, onSend, onApproval }: Props) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const handleSend = () => {
-    if (!input.trim() || busy) return
-    onSend(input.trim())
-    setInput('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
-  }
+  const handleSend = useCallback(async () => {
+    if (!input.trim() && attachedFiles.length === 0 && codeRefs.length === 0) return
+    if (busy) return
 
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
+    let fullMessage = ''
+
+    // Code references first (more specific context)
+    if (codeRefs.length > 0) {
+      const parts: string[] = []
+      for (const ref of codeRefs) {
+        parts.push(
+          `[${ref.relativePath}:${ref.startLine}-${ref.endLine}]\n\`\`\`${ref.language}\n${ref.content}\n\`\`\``
+        )
+      }
+      fullMessage = parts.join('\n\n') + '\n\n'
     }
-  }
+
+    // Then full files
+    if (attachedFiles.length > 0) {
+      const parts: string[] = []
+      for (const f of attachedFiles) {
+        try {
+          const { content } = await window.api.readFileContent(f.path)
+          const lines = content.split('\n').length
+          parts.push(`[File: ${f.name}] (${lines} lines)\n\`\`\`\n${content}\n\`\`\``)
+        } catch {
+          parts.push(`[File: ${f.name}] (failed to read)`)
+        }
+      }
+      fullMessage += parts.join('\n\n') + '\n\n'
+    }
+
+    fullMessage += input.trim()
+
+    onSend(fullMessage)
+    setInput('')
+    setAttachedFiles([])
+    setExpandedRef(null)
+    // Clear code refs via parent
+    if (onRemoveCodeRef) {
+      for (let i = codeRefs.length - 1; i >= 0; i--) onRemoveCodeRef(i)
+    }
+    setShowMention(false)
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  }, [input, attachedFiles, codeRefs, busy, onSend, onRemoveCodeRef])
+
+  const collectFiles = useCallback(async (query: string) => {
+    if (!workspace || !window.api) return
+    try {
+      const tree = await window.api.listFiles(workspace)
+      const results: { path: string; name: string }[] = []
+      const q = query.toLowerCase()
+
+      const walk = (entries: typeof tree, prefix: string) => {
+        for (const e of entries) {
+          const rel = prefix ? `${prefix}/${e.name}` : e.name
+          if (!e.isDir && rel.toLowerCase().includes(q)) {
+            results.push({ path: e.path, name: rel })
+            if (results.length >= 12) return
+          }
+          if (e.isDir && e.children) walk(e.children, rel)
+          if (results.length >= 12) return
+        }
+      }
+      walk(tree, '')
+      setMentionFiles(results)
+      setMentionIndex(0)
+    } catch {
+      setMentionFiles([])
+    }
+  }, [workspace])
 
   const handleInput = (val: string) => {
     setInput(val)
@@ -39,9 +119,72 @@ export function Chat({ messages, busy, workspace, onSend, onApproval }: Props) {
       textareaRef.current.style.height = 'auto'
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + 'px'
     }
+
+    const cursor = textareaRef.current?.selectionStart ?? val.length
+    const before = val.slice(0, cursor)
+    const atMatch = before.match(/@([^\s@]*)$/)
+
+    if (atMatch) {
+      setShowMention(true)
+      setMentionQuery(atMatch[1])
+      collectFiles(atMatch[1])
+    } else {
+      setShowMention(false)
+    }
+  }
+
+  const insertFile = (file: { path: string; name: string }) => {
+    if (attachedFiles.some((f) => f.path === file.path)) {
+      setShowMention(false)
+      return
+    }
+    setAttachedFiles((prev) => [...prev, { path: file.path, name: file.name }])
+
+    const cursor = textareaRef.current?.selectionStart ?? input.length
+    const before = input.slice(0, cursor)
+    const after = input.slice(cursor)
+    const cleaned = before.replace(/@[^\s@]*$/, '') + after
+    setInput(cleaned)
+    setShowMention(false)
+    textareaRef.current?.focus()
+  }
+
+  const removeFile = (path: string) => {
+    setAttachedFiles((prev) => prev.filter((f) => f.path !== path))
+  }
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (showMention && mentionFiles.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setMentionIndex((i) => Math.min(i + 1, mentionFiles.length - 1))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setMentionIndex((i) => Math.max(i - 1, 0))
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        insertFile(mentionFiles[mentionIndex])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setShowMention(false)
+        return
+      }
+    }
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
   const noWorkspace = !workspace
+  const hasAttachments = attachedFiles.length > 0 || codeRefs.length > 0
 
   return (
     <div className="flex flex-col h-full">
@@ -95,28 +238,126 @@ export function Chat({ messages, busy, workspace, onSend, onApproval }: Props) {
         </div>
       </div>
 
-      {/* Input */}
-      <div className="border-t border-zinc-800/60 bg-zinc-950/80 px-4 py-3">
-        <div className="flex gap-2 items-end">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => handleInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={busy || noWorkspace}
-            placeholder={noWorkspace ? 'Сначала выбери проект ←' : 'Опиши задачу… (Enter — отправить, Shift+Enter — новая строка)'}
-            rows={1}
-            className="flex-1 bg-zinc-900 border border-zinc-700/50 rounded-xl px-3.5 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none focus:border-blue-500/60 transition-colors disabled:opacity-50"
-          />
-          <button
-            onClick={handleSend}
-            disabled={busy || !input.trim() || noWorkspace}
-            className="w-9 h-9 flex items-center justify-center rounded-lg bg-blue-600/80 text-white hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0 cursor-pointer text-sm"
-          >
-            ➤
-          </button>
+      {/* Input area */}
+      <div className="border-t border-zinc-800/60 bg-[#010409]">
+        {/* Attached code references */}
+        {codeRefs.length > 0 && (
+          <div className="flex flex-col gap-1.5 px-3 pt-2.5 pb-1">
+            {codeRefs.map((ref, i) => (
+              <div key={`${ref.filePath}:${ref.startLine}:${ref.endLine}`} className="group">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setExpandedRef(expandedRef === i ? null : i)}
+                    className="flex-1 min-w-0 inline-flex items-center gap-1.5 px-2.5 py-1 bg-purple-500/8 border border-purple-500/25 rounded text-[11px] font-mono text-left hover:bg-purple-500/12 transition-colors cursor-pointer"
+                  >
+                    <span className="text-purple-400 text-[10px]">{'<>'}</span>
+                    <span className="text-purple-300 truncate">{ref.relativePath}</span>
+                    <span className="text-purple-400/50">:</span>
+                    <span className="text-purple-200/80">{ref.startLine === ref.endLine ? `L${ref.startLine}` : `L${ref.startLine}–${ref.endLine}`}</span>
+                    <span className="text-zinc-600 text-[10px] ml-auto shrink-0">
+                      {ref.endLine - ref.startLine + 1} {pluralLines(ref.endLine - ref.startLine + 1)}
+                    </span>
+                    <span className="text-zinc-600 text-[10px]">{expandedRef === i ? '▾' : '▸'}</span>
+                  </button>
+                  {onRemoveCodeRef && (
+                    <button
+                      onClick={() => onRemoveCodeRef(i)}
+                      className="w-5 h-5 flex items-center justify-center rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 cursor-pointer text-[10px] shrink-0 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                {expandedRef === i && (
+                  <div className="mt-1 ml-0.5 rounded border border-purple-500/15 bg-[#0d1117] overflow-hidden">
+                    <pre className="p-2 text-[11px] leading-[16px] font-mono text-zinc-400 overflow-x-auto max-h-[150px] overflow-y-auto">
+                      {ref.content.split('\n').map((line, li) => (
+                        <div key={li} className="flex">
+                          <span className="text-zinc-700 select-none w-8 text-right pr-2 shrink-0">{ref.startLine + li}</span>
+                          <span className="text-zinc-300">{line || '\u00A0'}</span>
+                        </div>
+                      ))}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Attached files */}
+        {attachedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+            {attachedFiles.map((f) => (
+              <span
+                key={f.path}
+                className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-500/10 border border-blue-500/30 rounded text-[11px] text-blue-300 font-mono"
+              >
+                <span className="text-blue-400/60">@</span>
+                <span className="max-w-[180px] truncate">{f.name}</span>
+                <button
+                  onClick={() => removeFile(f.path)}
+                  className="ml-0.5 text-blue-400/50 hover:text-blue-300 cursor-pointer text-[10px]"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Mention dropdown */}
+        <div className="relative">
+          {showMention && mentionFiles.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mx-3 mb-1 bg-zinc-900 border border-zinc-700/60 rounded-lg shadow-xl overflow-hidden z-50 max-h-[240px] overflow-y-auto">
+              <div className="px-2.5 py-1.5 text-[10px] text-zinc-500 uppercase tracking-wider border-b border-zinc-800/60">
+                Файлы проекта
+              </div>
+              {mentionFiles.map((f, i) => (
+                <button
+                  key={f.path}
+                  onMouseDown={(e) => { e.preventDefault(); insertFile(f) }}
+                  className={`w-full px-2.5 py-1.5 text-left text-[12px] font-mono flex items-center gap-2 cursor-pointer ${
+                    i === mentionIndex
+                      ? 'bg-blue-500/15 text-blue-300'
+                      : 'text-zinc-400 hover:bg-zinc-800/60'
+                  }`}
+                >
+                  <span className="text-zinc-600">@</span>
+                  <span className="truncate">{f.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Input row */}
+          <div className="flex items-end">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => handleInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={busy || noWorkspace}
+              placeholder={noWorkspace ? 'Сначала выбери проект ←' : hasAttachments ? 'Добавь описание задачи…' : 'Опиши задачу… @ — прикрепить файл'}
+              rows={1}
+              className="flex-1 bg-transparent px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={handleSend}
+              disabled={busy || (!input.trim() && !hasAttachments) || noWorkspace}
+              className="w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-blue-400 disabled:opacity-20 disabled:cursor-not-allowed transition-colors shrink-0 cursor-pointer text-sm mr-1.5 mb-1"
+            >
+              ➤
+            </button>
+          </div>
         </div>
       </div>
     </div>
   )
+}
+
+function pluralLines(n: number): string {
+  if (n % 10 === 1 && n % 100 !== 11) return 'строка'
+  if ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) return 'строки'
+  return 'строк'
 }
