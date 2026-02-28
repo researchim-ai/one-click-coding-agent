@@ -13,6 +13,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install setuptools
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -32,6 +36,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install setuptools
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -49,6 +57,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install setuptools
       - uses: actions/setup-node@v4
         with:
           node-version: 20
