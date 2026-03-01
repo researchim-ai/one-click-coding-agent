@@ -85,6 +85,18 @@
   background: rgba(59, 130, 246, 0.08);
 }
 
+/* Layout isolation — panels don't cause cross-reflow (like VS Code) */
+.panel-contain {
+  contain: layout style paint;
+  will-change: transform;
+}
+
+/* Off-screen messages skip rendering entirely (massive perf win) */
+.msg-auto-contain {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
+}
+
 /* Agent response prose — refined typography */
 .agent-prose {
   font-size: 13.5px;

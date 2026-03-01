@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import type { FileTreeEntry } from './types'
@@ -8,21 +8,132 @@ if (process.env.ELECTRON_NO_SANDBOX || process.argv.includes('--no-sandbox')) {
   app.commandLine.appendSwitch('disable-gpu-sandbox')
   app.disableHardwareAcceleration()
 }
-import { detect, evaluateVariants } from './resources'
+import { detect, evaluateVariants, loadModelArch, getArch } from './resources'
 import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
+import * as config from './config'
+import { TOOL_DEFINITIONS } from './tools'
 import {
   runAgent, resetAgent, setWorkspace, cancelAgent,
   createSession, switchSession, listSessions, deleteSession,
   renameSession, getActiveSessionId, initSessions,
   saveUiMessages, getUiMessages,
+  DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARIZE_PROMPT,
   type SessionInfo,
 } from './agent'
 import * as terminalManager from './terminal-manager'
+import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
 
+function sendMenuAction(action: string) {
+  mainWindow?.webContents.send('menu-action', action)
+}
+
+function buildAppMenu() {
+  const isMac = process.platform === 'darwin'
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: 'about' as const, label: 'О программе' },
+        { type: 'separator' as const },
+        { role: 'hide' as const },
+        { role: 'hideOthers' as const },
+        { role: 'unhide' as const },
+        { type: 'separator' as const },
+        { role: 'quit' as const, label: 'Выход' },
+      ],
+    }] : []),
+    {
+      label: 'Агент',
+      submenu: [
+        { label: 'Новый чат', accelerator: 'CmdOrCtrl+N', click: () => sendMenuAction('new-chat') },
+        { type: 'separator' },
+        { label: 'Остановить запрос', accelerator: 'Escape', click: () => cancelAgent() },
+        { label: 'Сброс контекста', accelerator: 'CmdOrCtrl+Shift+Delete', click: () => sendMenuAction('reset-context') },
+        { type: 'separator' },
+        ...(!isMac ? [
+          { role: 'quit' as const, label: 'Выход', accelerator: 'CmdOrCtrl+Q' },
+        ] : []),
+      ],
+    },
+    {
+      label: 'Настройки',
+      submenu: [
+        { label: 'Модель и контекст…', click: () => sendMenuAction('settings-model') },
+        { label: 'Инструменты…', click: () => sendMenuAction('settings-tools') },
+        { label: 'Промпты агента…', click: () => sendMenuAction('settings-prompts') },
+        { type: 'separator' },
+        {
+          label: 'Сбросить всё по умолчанию',
+          click: async () => {
+            const result = await dialog.showMessageBox(mainWindow!, {
+              type: 'warning',
+              buttons: ['Отмена', 'Сбросить'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Сброс настроек',
+              message: 'Все настройки будут сброшены к значениям по умолчанию: квантизация, контекст, промпты, пользовательские инструменты.',
+            })
+            if (result.response === 1) {
+              config.resetToDefaults()
+              sendMenuAction('defaults-reset')
+            }
+          },
+        },
+      ],
+    },
+    {
+      label: 'Правка',
+      submenu: [
+        { role: 'undo', label: 'Отменить' },
+        { role: 'redo', label: 'Повторить' },
+        { type: 'separator' },
+        { role: 'cut', label: 'Вырезать' },
+        { role: 'copy', label: 'Копировать' },
+        { role: 'paste', label: 'Вставить' },
+        { role: 'selectAll', label: 'Выделить всё' },
+      ],
+    },
+    {
+      label: 'Вид',
+      submenu: [
+        { label: 'Терминал', accelerator: 'Ctrl+`', click: () => sendMenuAction('toggle-terminal') },
+        { label: 'Боковая панель', accelerator: 'CmdOrCtrl+B', click: () => sendMenuAction('toggle-sidebar') },
+        { type: 'separator' },
+        { role: 'reload', label: 'Перезагрузить' },
+        { role: 'toggleDevTools', label: 'Инструменты разработчика' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: 'Сбросить масштаб' },
+        { role: 'zoomIn', label: 'Увеличить' },
+        { role: 'zoomOut', label: 'Уменьшить' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: 'Полноэкранный режим' },
+      ],
+    },
+    {
+      label: 'Помощь',
+      submenu: [
+        {
+          label: 'GitHub репозиторий',
+          click: () => shell.openExternal('https://github.com'),
+        },
+        { type: 'separator' },
+        ...(!isMac ? [
+          { role: 'about' as const, label: 'О программе' },
+        ] : []),
+      ],
+    },
+  ]
+
+  const menu = Menu.buildFromTemplate(template)
+  Menu.setApplicationMenu(menu)
+}
+
 function createWindow() {
+  buildAppMenu()
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -63,10 +174,82 @@ app.on('window-all-closed', () => {
 function registerIpcHandlers() {
   ipcMain.handle('detect-resources', () => detect())
 
-  ipcMain.handle('get-model-variants', () => evaluateVariants(detect()))
+  ipcMain.handle('get-model-variants', () => {
+    const modelPath = modelManager.getModelPath()
+    if (modelPath) loadModelArch(modelPath)
+    return evaluateVariants(detect())
+  })
 
   ipcMain.handle('select-model-variant', (_e, quant: string) => {
     modelManager.setSelectedQuant(quant)
+  })
+
+  ipcMain.handle('get-config', () => config.load())
+
+  ipcMain.handle('save-config', (_e, partial: Partial<config.AppConfig>) => {
+    return config.save(partial)
+  })
+
+  ipcMain.handle('get-tools', (): ToolInfo[] => {
+    const builtins: ToolInfo[] = TOOL_DEFINITIONS.map((t: any) => ({
+      name: t.function.name,
+      description: t.function.description,
+      builtin: true,
+      enabled: true,
+    }))
+    const custom: ToolInfo[] = config.get('customTools').map((ct) => ({
+      name: ct.name,
+      description: ct.description,
+      builtin: false,
+      enabled: ct.enabled,
+      id: ct.id,
+      command: ct.command,
+      parameters: ct.parameters,
+    }))
+    return [...builtins, ...custom]
+  })
+
+  ipcMain.handle('save-custom-tool', (_e, tool: config.CustomTool) => {
+    const tools = config.get('customTools')
+    const idx = tools.findIndex((t) => t.id === tool.id)
+    if (idx >= 0) tools[idx] = tool
+    else tools.push(tool)
+    config.set('customTools', tools)
+    return tools
+  })
+
+  ipcMain.handle('delete-custom-tool', (_e, toolId: string) => {
+    const tools = config.get('customTools').filter((t) => t.id !== toolId)
+    config.set('customTools', tools)
+    return tools
+  })
+
+  ipcMain.handle('get-prompts', () => ({
+    systemPrompt: config.get('systemPrompt'),
+    summarizePrompt: config.get('summarizePrompt'),
+    defaultSystemPrompt: DEFAULT_SYSTEM_PROMPT,
+    defaultSummarizePrompt: DEFAULT_SUMMARIZE_PROMPT,
+  }))
+
+  ipcMain.handle('save-prompts', (_e, prompts: { systemPrompt?: string | null; summarizePrompt?: string | null }) => {
+    if (prompts.systemPrompt !== undefined) config.set('systemPrompt', prompts.systemPrompt)
+    if (prompts.summarizePrompt !== undefined) config.set('summarizePrompt', prompts.summarizePrompt)
+  })
+
+  ipcMain.handle('reset-all-defaults', () => {
+    config.resetToDefaults()
+  })
+
+  ipcMain.handle('restart-server', async (_e) => {
+    serverManager.stop()
+    await new Promise((r) => setTimeout(r, 1500))
+    const modelPath = modelManager.getModelPath()
+    if (!modelPath) throw new Error('Модель не скачана')
+    if (!serverManager.isReady()) throw new Error('llama-server не установлен')
+    loadModelArch(modelPath)
+    const ctxSize = config.get('ctxSize')
+    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
+    await serverManager.waitReady(300, mainWindow ?? undefined)
   })
 
   ipcMain.handle('get-status', async () => {
@@ -94,7 +277,9 @@ function registerIpcHandlers() {
     const modelPath = modelManager.getModelPath()
     if (!modelPath) throw new Error('Модель не скачана')
     if (!serverManager.isReady()) throw new Error('llama-server не установлен')
-    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant())
+    loadModelArch(modelPath)
+    const ctxSize = config.get('ctxSize')
+    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
     await serverManager.waitReady(300, mainWindow ?? undefined)
   })
 
@@ -115,7 +300,9 @@ function registerIpcHandlers() {
     }
 
     if (!serverManager.isRunning()) {
-      serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant())
+      loadModelArch(modelPath)
+      const ctxSize = config.get('ctxSize')
+      serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
       await serverManager.waitReady(300, mainWindow ?? undefined)
     }
   })

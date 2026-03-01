@@ -16,6 +16,13 @@ export interface CodeReference {
   language: string
 }
 
+interface ContextUsage {
+  usedTokens: number
+  budgetTokens: number
+  maxContextTokens: number
+  percent: number
+}
+
 interface Props {
   messages: ChatMessage[]
   busy: boolean
@@ -25,6 +32,7 @@ interface Props {
   onApproval?: (id: string, approved: boolean) => void
   codeRefs?: CodeReference[]
   onRemoveCodeRef?: (index: number) => void
+  contextUsage?: ContextUsage | null
 }
 
 export function Chat({
@@ -36,6 +44,7 @@ export function Chat({
   onApproval,
   codeRefs = [],
   onRemoveCodeRef,
+  contextUsage,
 }: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
@@ -237,19 +246,51 @@ export function Chat({
               )}
             </div>
           )}
-          {messages.map((msg) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              onApprove={onApproval ? (id) => onApproval(id, true) : undefined}
-              onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
-              pending={busy && msg.role === 'user' && msg.id === lastUserId}
-              onCancel={busy && msg.role === 'user' && msg.id === lastUserId ? onCancel : undefined}
-            />
-          ))}
+          {messages.map((msg) => {
+            const isLastUser = busy && msg.role === 'user' && msg.id === lastUserId
+            const isDone = msg.role === 'status' || msg.done === true || (msg.role === 'user' && !isLastUser)
+            return (
+              <div key={msg.id} className={isDone ? 'msg-auto-contain' : undefined}>
+                <MessageBubble
+                  message={msg}
+                  onApprove={onApproval ? (id) => onApproval(id, true) : undefined}
+                  onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
+                  pending={isLastUser}
+                  onCancel={isLastUser ? onCancel : undefined}
+                />
+              </div>
+            )
+          })}
           <div ref={bottomRef} />
         </div>
       </div>
+
+      {/* Context usage bar */}
+      {contextUsage && (
+        <div className="border-t border-zinc-800/40 bg-[#010409] px-3 py-1 flex items-center gap-2">
+          <span className="text-[10px] text-zinc-600 shrink-0">Контекст</span>
+          <div className="flex-1 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${
+                contextUsage.percent > 85 ? 'bg-red-500' :
+                contextUsage.percent > 60 ? 'bg-amber-500' :
+                'bg-emerald-500'
+              }`}
+              style={{ width: `${Math.min(contextUsage.percent, 100)}%` }}
+            />
+          </div>
+          <span className={`text-[10px] font-mono tabular-nums shrink-0 ${
+            contextUsage.percent > 85 ? 'text-red-400' :
+            contextUsage.percent > 60 ? 'text-amber-400' :
+            'text-zinc-500'
+          }`}>
+            {contextUsage.percent}%
+          </span>
+          <span className="text-[9px] text-zinc-700 shrink-0">
+            {Math.round(contextUsage.usedTokens / 1024)}K / {Math.round(contextUsage.maxContextTokens / 1024)}K
+          </span>
+        </div>
+      )}
 
       {/* Input area */}
       <div className="border-t border-zinc-800/60 bg-[#010409]">

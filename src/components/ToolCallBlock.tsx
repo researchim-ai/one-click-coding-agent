@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 
 interface Props {
   name: string
@@ -42,7 +42,7 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
   }
 }
 
-export function ToolCallBlock({ name, args, result, approvalId, approvalStatus, onApprove, onDeny }: Props) {
+export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, approvalId, approvalStatus, onApprove, onDeny }: Props) {
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[name] ?? '◦'
   const brief = formatArgs(name, args)
@@ -110,4 +110,4 @@ export function ToolCallBlock({ name, args, result, approvalId, approvalStatus, 
       )}
     </div>
   )
-}
+})

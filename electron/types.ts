@@ -45,13 +45,19 @@ export interface DownloadProgress {
 }
 
 export interface AgentEvent {
-  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval'
+  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage'
   content?: string
   name?: string
   args?: Record<string, unknown>
   result?: string
   done?: boolean
   approvalId?: string
+  contextUsage?: {
+    usedTokens: number
+    budgetTokens: number
+    maxContextTokens: number
+    percent: number
+  }
 }
 
 export interface AppStatus {
@@ -82,4 +88,14 @@ export interface ModelVariantInfo extends ModelVariant {
   maxCtx: number
   mode: 'cpu' | 'hybrid' | 'full_gpu'
   recommended: boolean
+}
+
+export interface ToolInfo {
+  name: string
+  description: string
+  builtin: boolean
+  enabled: boolean
+  id?: string
+  command?: string
+  parameters?: { name: string; description: string; required: boolean }[]
 }

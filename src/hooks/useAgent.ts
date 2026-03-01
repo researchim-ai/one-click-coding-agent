@@ -36,6 +36,7 @@ export function useAgent() {
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [buildStatus, setBuildStatus] = useState<string | null>(null)
   const [workspace, setWorkspaceState] = useState(() => localStorage.getItem('workspace') || '')
+  const [contextUsage, setContextUsage] = useState<{ usedTokens: number; budgetTokens: number; maxContextTokens: number; percent: number } | null>(null)
   const assistantRef = useRef<ChatMessage | null>(null)
   const idCounter = useRef(0)
 
@@ -141,7 +142,42 @@ export function useAgent() {
     } catch {}
   }, [])
 
+  // Streaming events (thinking/response) are very frequent — batch them
+  const pendingUpdateRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null)
+  const dirtyRef = useRef(false)
+
+  const flushMessages = useCallback(() => {
+    if (!dirtyRef.current) return
+    dirtyRef.current = false
+    setMessages((prev) => [...prev])
+  }, [])
+
   const handleAgentEvent = useCallback((ev: AgentEvent) => {
+    // High-frequency events: mutate in place, batch React updates via rAF
+    if (ev.type === 'thinking' || (ev.type === 'response' && !ev.done)) {
+      const assistant = assistantRef.current
+      if (!assistant) return
+      if (ev.type === 'thinking') {
+        assistant.thinking = (assistant.thinking ?? '') + ev.content
+      } else {
+        if (ev.content) assistant.content = ev.content
+      }
+      dirtyRef.current = true
+      if (!pendingUpdateRef.current) {
+        pendingUpdateRef.current = requestAnimationFrame(() => {
+          pendingUpdateRef.current = null
+          flushMessages()
+        })
+      }
+      return
+    }
+
+    if (ev.type === 'context_usage') {
+      if (ev.contextUsage) setContextUsage(ev.contextUsage)
+      return
+    }
+
+    // All other events: immediate state update
     setMessages((prev) => {
       const msgs = [...prev]
       let assistant = msgs.find((m) => m.id === assistantRef.current?.id)
@@ -155,9 +191,6 @@ export function useAgent() {
       switch (ev.type) {
         case 'status':
           msgs.push({ id: nextId(), role: 'status', content: ev.content ?? '' })
-          break
-        case 'thinking':
-          assistant.thinking = (assistant.thinking ?? '') + ev.content
           break
         case 'tool_call':
           assistant.toolCalls = [
@@ -199,7 +232,7 @@ export function useAgent() {
 
       return msgs
     })
-  }, [])
+  }, [flushMessages])
 
   const respondApproval = useCallback((approvalId: string, approved: boolean) => {
     window.api.respondApproval(approvalId, approved)
@@ -337,9 +370,8 @@ export function useAgent() {
 
   return {
     messages, busy, status, downloadProgress, buildStatus,
-    workspace, setWorkspace,
+    workspace, setWorkspace, contextUsage,
     sendMessage, resetChat, pollStatus, respondApproval, cancel,
-    // Session management
     sessions, activeSessionId,
     newSession, switchToSession, removeSession, renameActiveSession,
   }

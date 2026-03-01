@@ -1,6 +1,7 @@
 import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
+import type { CustomTool } from './config'
 
 export const TOOL_DEFINITIONS = [
   {
@@ -345,6 +346,13 @@ function execCommand(command: string, cwd: string | undefined, workspace: string
   const workDir = cwd ? resolvePath(cwd, workspace) : workspace
   assertInWorkspace(workDir, workspace)
 
+  // Intercept cat/head/tail — redirect to read_file for efficiency
+  const catMatch = command.match(/^\s*cat\s+(.+?)\s*$/)
+  if (catMatch) {
+    const filePath = catMatch[1].replace(/^['"]|['"]$/g, '')
+    return `[Hint: use read_file tool instead of cat for better context efficiency]\n` + readFile(filePath, workspace)
+  }
+
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
       return `Error: command blocked — matches dangerous pattern. Command: ${command}`
@@ -384,4 +392,39 @@ function deleteFile(filePath: string, workspace: string): string {
   if (stat.isDirectory()) return `Error: ${filePath} is a directory. Use execute_command with "rm -r" instead.`
   fs.unlinkSync(p)
   return `Deleted: ${filePath}`
+}
+
+export function executeCustomTool(
+  tool: CustomTool, args: Record<string, any>, workspace: string,
+): string {
+  if (!workspace) return 'Error: workspace not set.'
+  try {
+    let cmd = tool.command
+    for (const [key, val] of Object.entries(args)) {
+      cmd = cmd.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(val))
+    }
+
+    for (const pattern of DANGEROUS_PATTERNS) {
+      if (pattern.test(cmd)) {
+        return `Error: command blocked — matches dangerous pattern. Command: ${cmd}`
+      }
+    }
+
+    const out = execSync(cmd, {
+      cwd: workspace,
+      timeout: 120000,
+      encoding: 'utf-8',
+      maxBuffer: 1024 * 1024 * 10,
+      env: { ...process.env, FORCE_COLOR: '0', ...Object.fromEntries(
+        Object.entries(args).map(([k, v]) => [`TOOL_${k.toUpperCase()}`, String(v)]),
+      )},
+    })
+    let result = out
+    if (result.length > 80000) result = result.slice(0, 80000) + '\n… [truncated]'
+    return `Exit code: 0\n${result}`
+  } catch (e: any) {
+    const out = ((e.stdout ?? '') + '\n' + (e.stderr ?? '')).trim()
+    const result = out.length > 80000 ? out.slice(0, 80000) + '\n… [truncated]' : out
+    return `Exit code: ${e.status ?? -1}\n${result}`
+  }
 }

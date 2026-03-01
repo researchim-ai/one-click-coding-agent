@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react'
 import Markdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -12,7 +13,13 @@ interface Props {
   onCancel?: () => void
 }
 
-export function MessageBubble({ message, onApprove, onDeny, pending, onCancel }: Props) {
+const rehypePlugins = [rehypeHighlight] as any[]
+
+const MemoMarkdown = memo(function MemoMarkdown({ content }: { content: string }) {
+  return <Markdown rehypePlugins={rehypePlugins}>{content}</Markdown>
+})
+
+export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, pending, onCancel }: Props) {
   if (message.role === 'status') {
     return (
       <div className="text-center text-zinc-600 text-[11px] py-0.5 animate-[fadeIn_0.2s] font-mono">
@@ -78,9 +85,7 @@ export function MessageBubble({ message, onApprove, onDeny, pending, onCancel }:
 
       {hasContent && (
         <div className="agent-prose mt-1">
-          <Markdown rehypePlugins={[rehypeHighlight]}>
-            {message.content}
-          </Markdown>
+          <MemoMarkdown content={message.content} />
         </div>
       )}
 
@@ -93,4 +98,4 @@ export function MessageBubble({ message, onApprove, onDeny, pending, onCancel }:
       )}
     </div>
   )
-}
+})

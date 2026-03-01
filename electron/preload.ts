@@ -6,6 +6,15 @@ contextBridge.exposeInMainWorld('api', {
   detectResources: (): Promise<SystemResources> => ipcRenderer.invoke('detect-resources'),
   getModelVariants: (): Promise<any[]> => ipcRenderer.invoke('get-model-variants'),
   selectModelVariant: (quant: string): Promise<void> => ipcRenderer.invoke('select-model-variant', quant),
+  getConfig: (): Promise<any> => ipcRenderer.invoke('get-config'),
+  saveConfig: (partial: any): Promise<any> => ipcRenderer.invoke('save-config', partial),
+  getTools: (): Promise<any[]> => ipcRenderer.invoke('get-tools'),
+  saveCustomTool: (tool: any): Promise<any[]> => ipcRenderer.invoke('save-custom-tool', tool),
+  deleteCustomTool: (toolId: string): Promise<any[]> => ipcRenderer.invoke('delete-custom-tool', toolId),
+  getPrompts: (): Promise<any> => ipcRenderer.invoke('get-prompts'),
+  savePrompts: (prompts: any): Promise<void> => ipcRenderer.invoke('save-prompts', prompts),
+  resetAllDefaults: (): Promise<void> => ipcRenderer.invoke('reset-all-defaults'),
+  restartServer: (): Promise<void> => ipcRenderer.invoke('restart-server'),
   autoSetup: (): Promise<void> => ipcRenderer.invoke('auto-setup'),
   downloadModel: (): Promise<string> => ipcRenderer.invoke('download-model'),
   ensureLlama: (): Promise<void> => ipcRenderer.invoke('ensure-llama'),
@@ -36,6 +45,11 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_: any, data: string) => cb(data)
     ipcRenderer.on('build-status', listener)
     return () => { ipcRenderer.removeListener('build-status', listener) }
+  },
+  onMenuAction: (cb: (action: string) => void) => {
+    const listener = (_: any, action: string) => cb(action)
+    ipcRenderer.on('menu-action', listener)
+    return () => { ipcRenderer.removeListener('menu-action', listener) }
   },
   onWorkspaceFilesChanged: (cb: () => void) => {
     const listener = () => cb()

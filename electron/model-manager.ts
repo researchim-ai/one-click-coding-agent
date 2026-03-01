@@ -4,13 +4,14 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import type { DownloadProgress } from './types'
+import * as config from './config'
 
 const REPO_ID = 'unsloth/Qwen3.5-35B-A3B-GGUF'
 const DEFAULT_QUANT = 'UD-Q4_K_XL'
 const MAX_RETRIES = 3
 const RETRY_BASE_MS = 2000
 
-let selectedQuant: string = DEFAULT_QUANT
+let selectedQuant: string = config.get('lastQuant') || DEFAULT_QUANT
 
 export function getSelectedQuant(): string {
   return selectedQuant
@@ -18,6 +19,7 @@ export function getSelectedQuant(): string {
 
 export function setSelectedQuant(q: string) {
   selectedQuant = q
+  config.set('lastQuant', q)
 }
 
 export function dataDir(): string {

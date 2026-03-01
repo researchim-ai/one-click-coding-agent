@@ -5,6 +5,20 @@ interface ElectronAPI {
   detectResources(): Promise<import('../electron/types').SystemResources>
   getModelVariants(): Promise<import('../electron/types').ModelVariantInfo[]>
   selectModelVariant(quant: string): Promise<void>
+  getConfig(): Promise<import('../electron/config').AppConfig>
+  saveConfig(partial: Partial<import('../electron/config').AppConfig>): Promise<import('../electron/config').AppConfig>
+  getTools(): Promise<import('../electron/types').ToolInfo[]>
+  saveCustomTool(tool: import('../electron/config').CustomTool): Promise<import('../electron/config').CustomTool[]>
+  deleteCustomTool(toolId: string): Promise<import('../electron/config').CustomTool[]>
+  getPrompts(): Promise<{
+    systemPrompt: string | null
+    summarizePrompt: string | null
+    defaultSystemPrompt: string
+    defaultSummarizePrompt: string
+  }>
+  savePrompts(prompts: { systemPrompt?: string | null; summarizePrompt?: string | null }): Promise<void>
+  resetAllDefaults(): Promise<void>
+  restartServer(): Promise<void>
   autoSetup(): Promise<void>
   downloadModel(): Promise<string>
   ensureLlama(): Promise<void>
@@ -32,6 +46,7 @@ interface ElectronAPI {
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void
+  onMenuAction(cb: (action: string) => void): () => void
   onWorkspaceFilesChanged(cb: () => void): () => void
 
   // File operations

@@ -326,13 +326,16 @@ export function getCtxSize(): number {
   return activeCtxSize
 }
 
-export function start(modelPath: string, win?: BrowserWindow, args?: ServerLaunchArgs, quant?: string): void {
+export function start(
+  modelPath: string, win?: BrowserWindow, args?: ServerLaunchArgs,
+  quant?: string, userCtxSize?: number | null,
+): void {
   if (isRunning()) throw new Error('Server already running')
 
   const bin = findServerBin()
   if (!bin) throw new Error('llama-server not found — run ensureBinary first')
 
-  const la = args ?? computeOptimalArgs(detect(), quant)
+  const la = args ?? computeOptimalArgs(detect(), quant, userCtxSize)
   activeCtxSize = la.ctxSize
   const cmdArgs = [
     '--model', modelPath,

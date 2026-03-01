@@ -12,6 +12,16 @@ type Phase = 'idle' | 'installing' | 'downloading' | 'starting' | 'done' | 'erro
 
 const DEFAULT_QUANT = 'UD-Q4_K_XL'
 
+const CTX_OPTIONS = [
+  { value: 262144, label: '262K' },
+  { value: 131072, label: '131K' },
+  { value: 65536,  label: '65K' },
+  { value: 32768,  label: '32K' },
+  { value: 16384,  label: '16K' },
+  { value: 8192,   label: '8K' },
+  { value: 4096,   label: '4K' },
+]
+
 function formatSize(mb: number): string {
   return (mb / 1024).toFixed(1) + ' ГБ'
 }
@@ -39,17 +49,42 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
 
   const [variants, setVariants] = useState<ModelVariantInfo[]>([])
   const [selectedQuant, setSelectedQuant] = useState(DEFAULT_QUANT)
+  const [selectedCtx, setSelectedCtx] = useState<number>(32768)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [ctxDropdownOpen, setCtxDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const ctxDropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    window.api.getModelVariants().then(setVariants).catch(() => {})
+    Promise.all([
+      window.api.getModelVariants(),
+      window.api.getConfig(),
+    ]).then(([v, cfg]) => {
+      setVariants(v)
+      let quant = DEFAULT_QUANT
+      if (cfg.lastQuant && v.some((vi: ModelVariantInfo) => vi.quant === cfg.lastQuant && vi.fits)) {
+        quant = cfg.lastQuant
+        setSelectedQuant(quant)
+        window.api.selectModelVariant(quant).catch(() => {})
+      }
+      const variant = v.find((vi: ModelVariantInfo) => vi.quant === quant)
+      const max = variant?.maxCtx ?? 32768
+      if (cfg.ctxSize && cfg.ctxSize > 0) {
+        setSelectedCtx(Math.min(cfg.ctxSize, max))
+      } else {
+        setSelectedCtx(max)
+        window.api.saveConfig({ ctxSize: max }).catch(() => {})
+      }
+    }).catch(() => {})
   }, [])
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setDropdownOpen(false)
+      }
+      if (ctxDropdownRef.current && !ctxDropdownRef.current.contains(e.target as Node)) {
+        setCtxDropdownOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
@@ -61,7 +96,18 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const handleSelectVariant = async (quant: string) => {
     setSelectedQuant(quant)
     setDropdownOpen(false)
+    const v = variants.find((vi) => vi.quant === quant)
+    const newMax = v?.maxCtx ?? 32768
+    const newCtx = Math.min(selectedCtx, newMax)
+    setSelectedCtx(newCtx)
     await window.api.selectModelVariant(quant).catch(() => {})
+    await window.api.saveConfig({ lastQuant: quant, ctxSize: newCtx }).catch(() => {})
+  }
+
+  const handleSelectCtx = async (value: number) => {
+    setSelectedCtx(value)
+    setCtxDropdownOpen(false)
+    await window.api.saveConfig({ ctxSize: value }).catch(() => {})
   }
 
   const addLog = (msg: string) => {
@@ -128,7 +174,9 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const elapsedStr = elapsed > 0 ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}` : ''
 
   const selectedSize = selected ? formatSize(selected.sizeMb) : '~20 ГБ'
-  const selectedCtx = selected ? formatCtx(selected.maxCtx) : '?'
+  const maxCtx = selected?.maxCtx ?? 262144
+  const displayCtx = formatCtx(selectedCtx)
+  const availableCtxOptions = CTX_OPTIONS.filter((o) => o.value <= maxCtx)
 
   const steps = [
     {
@@ -142,7 +190,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     {
       key: 'download',
       label: 'Скачивание модели',
-      desc: `Qwen3.5-35B-A3B — ${selectedQuant} (~${selectedSize})`,
+      desc: `Qwen3.5-35B-A3B — ${selectedQuant} (~${selectedSize}) · ctx ${displayCtx}`,
       active: phase === 'downloading',
       done: ['starting', 'done'].includes(phase),
       detail: phase === 'downloading' ? downloadProgress?.status : null,
@@ -170,6 +218,8 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
           <p className="text-zinc-400">
             Qwen3.5-35B-A3B <span className="text-zinc-500">{'·'}</span>{' '}
             <span className="text-zinc-300">{selectedQuant}</span>{' '}
+            <span className="text-zinc-500">{'·'}</span>{' '}
+            ctx {displayCtx}{' '}
             <span className="text-zinc-500">{'·'}</span> llama.cpp
           </p>
         </div>
@@ -289,12 +339,12 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
               <div ref={dropdownRef} className="relative">
                 <button
                   onClick={() => setDropdownOpen((o) => !o)}
-                  className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[220px]"
+                  className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[180px]"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-zinc-200 font-medium truncate">{selectedQuant.replace('UD-', '')}</div>
                     <div className="text-[11px] text-zinc-500 leading-tight">
-                      {selectedSize} {'\u00b7'} ctx {selectedCtx}
+                      {selectedSize}
                     </div>
                   </div>
                   <svg className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -349,6 +399,42 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                         </button>
                       )
                     })}
+                  </div>
+                )}
+              </div>
+
+              {/* Context selector */}
+              <div ref={ctxDropdownRef} className="relative">
+                <button
+                  onClick={() => setCtxDropdownOpen((o) => !o)}
+                  className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[100px]"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-zinc-200 font-medium">{displayCtx}</div>
+                    <div className="text-[11px] text-zinc-500 leading-tight">контекст</div>
+                  </div>
+                  <svg className={`w-3.5 h-3.5 text-zinc-500 shrink-0 transition-transform ${ctxDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {ctxDropdownOpen && (
+                  <div className="absolute bottom-full left-0 mb-2 w-[160px] rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50 z-50">
+                    <div className="px-3 py-2 border-b border-zinc-800">
+                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Контекст</span>
+                    </div>
+                    {availableCtxOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => handleSelectCtx(opt.value)}
+                        className={`w-full text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
+                          selectedCtx === opt.value ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-300 hover:bg-zinc-800'
+                        }`}
+                      >
+                        {opt.label}
+                        {selectedCtx === opt.value && <span className="ml-2 text-blue-400">{'\u2713'}</span>}
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>

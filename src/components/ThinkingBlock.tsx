@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 
 interface Props {
   content: string
   live?: boolean
 }
 
-export function ThinkingBlock({ content, live }: Props) {
+export const ThinkingBlock = memo(function ThinkingBlock({ content, live }: Props) {
   const [manualToggle, setManualToggle] = useState<boolean | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -64,4 +64,4 @@ export function ThinkingBlock({ content, live }: Props) {
       )}
     </div>
   )
-}
+})
