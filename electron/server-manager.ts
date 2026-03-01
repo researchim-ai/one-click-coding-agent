@@ -326,11 +326,37 @@ export function getCtxSize(): number {
   return activeCtxSize
 }
 
+export function setCtxSize(size: number): void {
+  if (size > 0) activeCtxSize = size
+}
+
+export async function queryActualCtxSize(): Promise<number | null> {
+  try {
+    const r = await fetch(`${llamaApiUrl()}/props`, { signal: AbortSignal.timeout(5000) })
+    if (!r.ok) return null
+    const json = await r.json() as any
+    const realCtx = json.default_generation_settings?.n_ctx
+    if (realCtx && realCtx > 0) {
+      if (realCtx !== activeCtxSize) {
+        console.log(`[server-manager] Server actual n_ctx=${realCtx}, was tracking ${activeCtxSize} — correcting`)
+        activeCtxSize = realCtx
+      }
+      return realCtx
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 export function start(
   modelPath: string, win?: BrowserWindow, args?: ServerLaunchArgs,
   quant?: string, userCtxSize?: number | null,
 ): void {
   if (isRunning()) throw new Error('Server already running')
+
+  // Kill any orphan llama-server processes from previous app sessions
+  killOrphanServers()
 
   const bin = findServerBin()
   if (!bin) throw new Error('llama-server not found — run ensureBinary first')
@@ -389,6 +415,23 @@ export function stop(): void {
     }, 10000)
   }
   serverProcess = null
+  killOrphanServers()
+}
+
+function killOrphanServers(): void {
+  try {
+    if (process.platform === 'win32') {
+      execSync(`for /f "tokens=5" %a in ('netstat -aon ^| findstr :${LLAMA_PORT} ^| findstr LISTENING') do taskkill /F /PID %a`, { timeout: 5000, stdio: 'ignore' })
+    } else {
+      const out = execSync(`lsof -ti :${LLAMA_PORT} 2>/dev/null || true`, { timeout: 5000, encoding: 'utf-8' }).trim()
+      if (out) {
+        for (const pid of out.split('\n').filter(Boolean)) {
+          try { process.kill(parseInt(pid), 'SIGKILL') } catch {}
+        }
+        console.log(`[server-manager] Killed orphan processes on port ${LLAMA_PORT}: ${out.replace(/\n/g, ', ')}`)
+      }
+    }
+  } catch {}
 }
 
 export async function waitReady(timeoutSecs = 300, win?: BrowserWindow): Promise<boolean> {
@@ -406,7 +449,10 @@ export async function waitReady(timeoutSecs = 300, win?: BrowserWindow): Promise
     try {
       const r = await fetch(`${llamaApiUrl()}/health`, { signal: AbortSignal.timeout(3000) })
       const body = await r.json() as any
-      if (body.status === 'ok') return true
+      if (body.status === 'ok') {
+        await queryActualCtxSize()
+        return true
+      }
       if (body.status === 'loading model' && win) {
         const now = Date.now()
         if (now - lastReport > 3000) {

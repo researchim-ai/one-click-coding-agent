@@ -62,6 +62,9 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
   const isLoading = !message.done && !hasContent && !hasTools && !hasThinking
   const thinkingLive = hasThinking && !message.done && !hasContent
 
+  // Skip completely empty completed turns (no content, no tools, no thinking)
+  if (message.done && !hasContent && !hasTools && !hasThinking) return null
+
   return (
     <div className="self-start max-w-full animate-[fadeIn_0.2s]">
       {hasThinking && <ThinkingBlock content={message.thinking!} live={thinkingLive} />}

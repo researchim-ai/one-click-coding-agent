@@ -122,8 +122,11 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
     try {
       await window.api.saveConfig({ lastQuant: selectedQuant, ctxSize: selectedCtx })
       await window.api.selectModelVariant(selectedQuant)
-      await window.api.restartServer()
+      const result = await window.api.restartServer()
       setDirty(false)
+      if (result?.actualCtx && result.actualCtx < selectedCtx) {
+        alert(`Сервер запущен, но контекст уменьшен: ${Math.round(result.actualCtx / 1024)}K вместо ${Math.round(selectedCtx / 1024)}K (не хватает памяти)`)
+      }
       onClose()
     } catch (e: any) {
       alert('Ошибка: ' + (e.message ?? e))
@@ -271,15 +274,8 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
         {tab === 'model' && dirty && (
           <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
             <span className="text-xs text-zinc-500 flex-1">
-              Изменения вступят в силу после перезапуска сервера
+              Сервер будет перезапущен с новыми настройками
             </span>
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 text-sm rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors disabled:opacity-50"
-            >
-              Сохранить
-            </button>
             <button
               onClick={handleApplyRestart}
               disabled={saving}

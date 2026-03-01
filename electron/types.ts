@@ -45,7 +45,7 @@ export interface DownloadProgress {
 }
 
 export interface AgentEvent {
-  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage'
+  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn'
   content?: string
   name?: string
   args?: Record<string, unknown>

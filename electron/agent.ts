@@ -1,5 +1,5 @@
 import { BrowserWindow, ipcMain } from 'electron'
-import { llamaApiUrl, getCtxSize } from './server-manager'
+import { llamaApiUrl, getCtxSize, setCtxSize, queryActualCtxSize } from './server-manager'
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool } from './tools'
 import * as config from './config'
 import type { AgentEvent } from './types'
@@ -23,12 +23,12 @@ function debugLog(category: string, ...args: any[]) {
   } catch {}
 }
 
-const NEEDS_APPROVAL = new Set(['execute_command', 'write_file', 'edit_file', 'delete_file'])
+const NEEDS_APPROVAL = new Set(['execute_command', 'write_file', 'edit_file', 'delete_file', 'append_file'])
 
 const MAX_ITERATIONS = 30
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
-const MAX_EMPTY_RETRIES = 2
+const MAX_EMPTY_RETRIES = 3
 
 // Graduated compression thresholds (fraction of message budget)
 const COMPRESS_TOOL_RESULTS_AT = 0.35
@@ -106,6 +106,16 @@ export const DEFAULT_SYSTEM_PROMPT = `You are an expert software engineer workin
 - **create_directory**: Creates nested directories. Use before write_file if the parent dir might not exist.
 - **delete_file**: Removes a file. Use with care — verify the path first.
 
+## File writing limits
+
+- **write_file**: Keep content under 80 lines per call. For larger files:
+  1. Write the skeleton first (imports, structure, empty function bodies)
+  2. Then use edit_file to fill in each section incrementally
+  3. Or use append_file to add content to the end of an existing file
+- NEVER put an entire large application (HTML+CSS+JS) into a single write_file call
+- Break large applications into multiple files/modules when possible
+- If a file needs 200+ lines, always split across multiple tool calls
+
 ## Code quality
 
 - Match existing code style exactly (indentation, quotes, semicolons, naming)
@@ -153,7 +163,9 @@ const COMPACT_SYSTEM_PROMPT = `You are an expert autonomous coding agent with ac
 - Keep changes minimal and focused
 - Think step by step in <think>...</think> tags
 - Be concise. Respond in the user's language
-- Use tools efficiently — prefer read_file over execute_command cat`
+- Use tools efficiently — prefer read_file over execute_command cat
+- write_file: max 80 lines per call. For larger files: write skeleton first, then edit_file to fill sections
+- Use append_file to add content to existing files incrementally`
 
 function getSystemPrompt(): string {
   const custom = config.get('systemPrompt')
@@ -474,6 +486,8 @@ function parseAccumulatedThinking(content: string): { thinking: string; visible:
 interface StreamResult {
   content: string
   toolCalls: any[] | undefined
+  rawToolCalls: any[] | undefined
+  finishReason: string | null
 }
 
 async function streamLlmResponse(
@@ -529,6 +543,7 @@ async function streamLlmResponse(
   let sseBuffer = ''
   let lastEmitMs = 0
   const EMIT_INTERVAL_MS = 150 // max ~7 UI updates per second
+  let finishReason: string | null = null
 
   // Idle timeout: abort if no data received for 60s (server stalled)
   const IDLE_TIMEOUT_MS = 60000
@@ -563,7 +578,9 @@ async function streamLlmResponse(
         chunk = JSON.parse(trimmed.slice(6))
       } catch { continue }
 
-      const delta = chunk.choices?.[0]?.delta
+      const choice = chunk.choices?.[0]
+      if (choice?.finish_reason) finishReason = choice.finish_reason
+      const delta = choice?.delta
       if (!delta) continue
 
       // Accumulate content tokens
@@ -636,26 +653,38 @@ async function streamLlmResponse(
 
   const elapsedMs = Date.now() - startMs
   const tcNames = toolCalls?.map((tc: any) => tc.function?.name).join(', ') ?? 'none'
-  debugLog('STREAM', `Completed: ${elapsedMs}ms, content=${accContent.length}chars, toolCalls=${tcNames}, rawTC=${rawToolCalls?.length ?? 0}, validTC=${toolCalls?.length ?? 0}`)
+  const contentPreview = accContent.length > 200 ? accContent.slice(0, 200) + '…' : accContent
+  debugLog('STREAM', `Completed: ${elapsedMs}ms, ${chunkCount} chunks, content=${accContent.length}chars, rawTC=${rawToolCalls?.length ?? 0}, validTC=${toolCalls?.length ?? 0}, tools=[${tcNames}], finish=${finishReason}`)
+  if (accContent.length === 0 && !rawToolCalls) {
+    debugLog('STREAM', `WARNING: Completely empty response! ${chunkCount} SSE chunks received but no content or tool calls extracted`)
+  }
+  if (rawToolCalls && (!toolCalls || toolCalls.length === 0)) {
+    const rawName = rawToolCalls[0]?.function?.name ?? '?'
+    const rawArgsLen = rawToolCalls[0]?.function?.arguments?.length ?? 0
+    debugLog('STREAM', `WARNING: All ${rawToolCalls.length} tool calls invalid! fn=${rawName}, argsLen=${rawArgsLen}, finish=${finishReason}, first300: ${rawToolCalls[0]?.function?.arguments?.slice(0, 300)}`)
+  }
+  debugLog('STREAM', `Content preview: ${contentPreview || '(empty)'}`)
 
-  return { content: accContent, toolCalls }
+  return { content: accContent, toolCalls, rawToolCalls, finishReason }
 }
 
 // ---------------------------------------------------------------------------
 // Token estimation — heuristic with calibration from /tokenize
 // ---------------------------------------------------------------------------
 
+// Correction factor for heuristic: calibrated from first accurate count.
+// Default 1.5 because chat templates add ~50% overhead (role tokens, <|im_start|>, etc.)
+let heuristicCorrectionFactor = 1.5
+
 function estimateTokens(text: string): number {
   if (!text) return 0
-  // Use calibrated ratio (updated by calibrateTokenRatio if server available)
   const base = Math.ceil(text.length / calibratedRatio)
-  // Extra overhead for structured content (JSON, code) which tokenizes denser
   const jsonBrackets = (text.match(/[{}\[\]":,]/g) || []).length
   const structureBonus = Math.ceil(jsonBrackets * 0.1)
   return base + structureBonus + 4
 }
 
-function estimateContextTokens(msgs: Message[]): number {
+function estimateContextTokensRaw(msgs: Message[]): number {
   let total = 4
   for (const m of msgs) {
     total += 4
@@ -663,6 +692,10 @@ function estimateContextTokens(msgs: Message[]): number {
     if (m.tool_calls) total += estimateTokens(JSON.stringify(m.tool_calls))
   }
   return total
+}
+
+function estimateContextTokens(msgs: Message[]): number {
+  return Math.ceil(estimateContextTokensRaw(msgs) * heuristicCorrectionFactor)
 }
 
 async function countContextTokensAccurate(msgs: Message[]): Promise<number> {
@@ -675,8 +708,17 @@ async function countContextTokensAccurate(msgs: Message[]): Promise<number> {
   if (serverCount !== null) {
     const overhead = msgs.length * 4 + 4
     const total = serverCount + overhead
-    const heuristic = estimateContextTokens(msgs)
-    debugLog('TOKENS', `Accurate: ${total} (server=${serverCount}+overhead=${overhead}), heuristic=${heuristic}, diff=${((total-heuristic)/heuristic*100).toFixed(0)}%`)
+
+    // Calibrate heuristic correction factor from real data
+    const rawHeuristic = estimateContextTokensRaw(msgs)
+    if (rawHeuristic > 50) {
+      const newFactor = total / rawHeuristic
+      // Smooth update (moving average) to avoid jumps
+      heuristicCorrectionFactor = heuristicCorrectionFactor * 0.3 + newFactor * 0.7
+    }
+
+    const correctedHeuristic = estimateContextTokens(msgs)
+    debugLog('TOKENS', `Accurate: ${total} (server=${serverCount}+overhead=${overhead}), heuristic=${correctedHeuristic}, correction=${heuristicCorrectionFactor.toFixed(2)}`)
     return total
   }
   return estimateContextTokens(msgs)
@@ -871,12 +913,10 @@ function sanitizeMessages(msgs: Message[]): Message[] {
   }
 
   // Pass 4: Fix ending — server rejects 2+ trailing assistant messages
-  // Keep at most one trailing assistant if it has tool_calls (expecting tool results next)
   while (merged.length > 1) {
     const last = merged[merged.length - 1]
     const prev = merged[merged.length - 2]
     if (last.role === 'assistant' && prev.role === 'assistant') {
-      // Two assistant messages at the end — remove the older one (merge content into last)
       const combinedContent = [prev.content, last.content].filter(Boolean).join('\n\n')
       const keepCalls = last.tool_calls || prev.tool_calls
       merged.splice(merged.length - 2, 2, {
@@ -887,6 +927,26 @@ function sanitizeMessages(msgs: Message[]): Message[] {
     } else {
       break
     }
+  }
+
+  // Pass 5: Trailing assistant without tool_calls → "response prefill" error with enable_thinking.
+  // Convert it to user context so the model can continue without prefill conflict.
+  if (merged.length > 0) {
+    const last = merged[merged.length - 1]
+    if (last.role === 'assistant' && !last.tool_calls) {
+      merged.pop()
+      if (last.content) {
+        merged.push({ role: 'user', content: `[Previous assistant work summary]\n${last.content}\n\nPlease continue the task.` })
+      }
+    }
+  }
+
+  // Pass 6: Ensure at least one user message exists (Qwen template hard requirement)
+  const hasUser = merged.some((m) => m.role === 'user')
+  if (!hasUser) {
+    const sysIdx = merged.findIndex((m) => m.role === 'system')
+    merged.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, { role: 'user', content: 'Continue with the current task.' })
+    debugLog('SANITIZE', 'Injected synthetic user message — template requires at least one')
   }
 
   return merged
@@ -904,6 +964,68 @@ function validateAndFixToolCalls(toolCalls: any[] | undefined): any[] | undefine
     }
   }
   return valid.length > 0 ? valid : undefined
+}
+
+// ---------------------------------------------------------------------------
+// Truncated tool call repair — salvage partial write_file / edit_file content
+// ---------------------------------------------------------------------------
+
+function tryRepairTruncatedToolCall(tc: any): { name: string; args: Record<string, any>; truncated: boolean } | null {
+  const fnName = tc.function?.name
+  const argsStr = tc.function?.arguments
+  if (!fnName || !argsStr || typeof argsStr !== 'string') return null
+  if (argsStr.length < 20) return null
+
+  // Only repair write_file and edit_file — the tools that carry large content
+  if (fnName !== 'write_file' && fnName !== 'edit_file' && fnName !== 'append_file') return null
+
+  // First try: maybe it's already valid
+  try {
+    const parsed = JSON.parse(argsStr)
+    return { name: fnName, args: parsed, truncated: false }
+  } catch {}
+
+  // The JSON is truncated mid-string. Strategy: trim trailing bytes and try closing
+  for (let trim = 0; trim < 20; trim++) {
+    const base = trim > 0 ? argsStr.slice(0, -trim) : argsStr
+    // Try closing with just quote + brace (most common: truncated inside a string value)
+    for (const suffix of ['"}', '\\n"}', '"}}\n']) {
+      try {
+        const parsed = JSON.parse(base + suffix)
+        if (parsed.path) {
+          debugLog('REPAIR', `Repaired ${fnName}: trimmed ${trim} chars, path=${parsed.path}, content=${(parsed.content ?? '').length} chars`)
+          return { name: fnName, args: parsed, truncated: true }
+        }
+      } catch {}
+    }
+  }
+
+  // Aggressive: find the last complete JSON key-value and build from there
+  const pathMatch = argsStr.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+  if (pathMatch && fnName === 'write_file') {
+    const contentMatch = argsStr.match(/"content"\s*:\s*"/)
+    if (contentMatch) {
+      const contentStart = argsStr.indexOf(contentMatch[0]) + contentMatch[0].length
+      let rawContent = argsStr.slice(contentStart)
+      // Strip trailing incomplete escape
+      rawContent = rawContent.replace(/\\[^"\\\/bfnrtu]?$/, '')
+      // Unescape the content we have
+      try {
+        const fakeJson = `{"v":"${rawContent}"}`
+        const parsed = JSON.parse(fakeJson)
+        debugLog('REPAIR', `Aggressive repair ${fnName}: path=${pathMatch[1]}, content=${parsed.v.length} chars`)
+        return { name: fnName, args: { path: pathMatch[1], content: parsed.v }, truncated: true }
+      } catch {}
+      // Last resort: raw content without JSON unescaping
+      const plainContent = rawContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+      if (plainContent.length > 50) {
+        debugLog('REPAIR', `Raw repair ${fnName}: path=${pathMatch[1]}, content=${plainContent.length} chars`)
+        return { name: fnName, args: { path: pathMatch[1], content: plainContent }, truncated: true }
+      }
+    }
+  }
+
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -973,8 +1095,11 @@ function extractWorkingMemory(msgs: Message[]): WorkingMemory {
         try {
           const args = typeof tc.function.arguments === 'string'
             ? JSON.parse(tc.function.arguments) : tc.function.arguments
-          if ((name === 'write_file' || name === 'edit_file') && args.path) {
+          if ((name === 'write_file' || name === 'edit_file' || name === 'append_file') && args.path) {
             modifiedFiles.add(args.path)
+          }
+          if (name === 'create_directory' && args.path) {
+            modifiedFiles.add(args.path + '/')
           }
         } catch {}
       }
@@ -1000,7 +1125,7 @@ function formatWorkingMemory(mem: WorkingMemory): string {
     parts.push(`**Current task:** ${mem.currentTask}`)
   }
   if (mem.filesModified.length > 0) {
-    parts.push(`**Files modified:** ${mem.filesModified.join(', ')}`)
+    parts.push(`**Files already created/modified (do NOT re-read these):** ${mem.filesModified.join(', ')}`)
   }
   if (mem.keyFacts.length > 0) {
     parts.push(`**Key context:**\n${mem.keyFacts.map((f) => `- ${f}`).join('\n')}`)
@@ -1278,19 +1403,35 @@ function tier4EmergencyPrune(msgs: Message[]): Message[] {
   let tokens = estimateContextTokens(result)
   if (tokens <= budget) return result
 
-  // Step 3: Drop messages from the front (keep system + last N)
+  // Step 3: Drop messages from the front (keep system + last user + last N)
   const system = result.find((m) => m.role === 'system')
   const rest = result.filter((m) => m.role !== 'system')
+
+  // Always preserve the last user message to satisfy chat template requirements
+  let lastUserIdx = -1
+  for (let j = rest.length - 1; j >= 0; j--) {
+    if (rest[j].role === 'user') { lastUserIdx = j; break }
+  }
 
   let keep = rest.length
   while (keep > 2) {
     keep--
-    const candidate = system ? [system, ...rest.slice(rest.length - keep)] : rest.slice(rest.length - keep)
+    let kept = rest.slice(rest.length - keep)
+    // Ensure the last user message is always included
+    if (lastUserIdx >= 0 && rest.length - keep > lastUserIdx) {
+      const userMsg = rest[lastUserIdx]
+      if (!kept.some((m) => m.role === 'user')) {
+        kept = [userMsg, ...kept]
+      }
+    }
+    const candidate = system ? [system, ...kept] : kept
     if (estimateContextTokens(candidate) <= budget) return candidate
   }
 
   // Step 4: Hard truncate system prompt to fit
-  const lastMsgs = rest.slice(-2)
+  const lastMsgs = lastUserIdx >= 0
+    ? [rest[lastUserIdx], ...rest.slice(-2).filter((m) => m !== rest[lastUserIdx])].slice(0, 3)
+    : rest.slice(-2)
   const restTokens = estimateContextTokens(lastMsgs)
   const sysTokenBudget = Math.max(100, budget - restTokens - 50)
   const sysCharBudget = Math.floor(sysTokenBudget * calibratedRatio)
@@ -1301,6 +1442,31 @@ function tier4EmergencyPrune(msgs: Message[]): Message[] {
   }
 
   return system ? [system, ...lastMsgs] : lastMsgs
+}
+
+// ---------------------------------------------------------------------------
+// Inject working memory into system prompt — survives compression
+// ---------------------------------------------------------------------------
+
+function injectWorkingMemory(msgs: Message[], originalMsgs: Message[]): Message[] {
+  const mem = extractWorkingMemory(originalMsgs)
+  const memBlock = formatWorkingMemory(mem)
+  if (!memBlock) return msgs
+
+  const sysIdx = msgs.findIndex((m) => m.role === 'system')
+  if (sysIdx < 0) return msgs
+
+  let sysTxt = msgs[sysIdx].content ?? ''
+  const memMark = sysTxt.indexOf('\n\n## Working memory\n')
+  if (memMark >= 0) sysTxt = sysTxt.slice(0, memMark)
+
+  // Budget: working memory shouldn't exceed 15% of message budget
+  const maxChars = Math.floor(getMessageBudget() * calibratedRatio * 0.15)
+  const memTrimmed = memBlock.length > maxChars ? memBlock.slice(0, maxChars - 10) + '\n…' : memBlock
+
+  sysTxt += '\n\n## Working memory\n' + memTrimmed
+  msgs[sysIdx] = { ...msgs[sysIdx], content: sysTxt }
+  return msgs
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1487,8 @@ async function manageContext(
   // Under threshold — no compression needed
   if (tokens <= budget * COMPRESS_TOOL_RESULTS_AT) return msgs
 
+  // Preserve original messages for working memory extraction before compression
+  const originalMsgs = [...msgs]
   let current = msgs
 
   // Tier 1: Compress old tool results
@@ -1328,7 +1496,9 @@ async function manageContext(
     const { msgs: compressed } = tier1CompressOldToolResults(current)
     current = compressed
     tokens = estimateContextTokens(current)
-    if (tokens <= budget * SUMMARIZE_AT) return current
+    if (tokens <= budget * SUMMARIZE_AT) {
+      return injectWorkingMemory(current, originalMsgs)
+    }
   }
 
   // Tier 2: Collapse old tool-call chains
@@ -1338,7 +1508,9 @@ async function manageContext(
       const { msgs: collapsed } = tier2CollapseOldChains(current)
       current = collapsed
       tokens = estimateContextTokens(current)
-      if (tokens <= budget * AGGRESSIVE_PRUNE_AT) return current
+      if (tokens <= budget * AGGRESSIVE_PRUNE_AT) {
+        return injectWorkingMemory(current, originalMsgs)
+      }
     }
   }
 
@@ -1465,12 +1637,19 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
   // Calibrate token ratio from server (non-blocking, happens once)
   calibrateTokenRatio().catch(() => {})
 
+  // Verify actual server ctx size (catches mismatches from server auto-reducing ctx)
+  queryActualCtxSize().catch(() => {})
+
   // Summarize/prune context if approaching limit
   messages = await manageContext(messages, apiUrl, win)
   session.messages = messages
   emitContextUsage(win, messages)
   let fullResponse = ''
   let emptyRetries = 0
+
+  // Track files created this turn to detect pointless re-reads after compression
+  const filesCreatedThisTurn = new Set<string>()
+  let consecutiveReReads = 0
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (cancelRequested) {
@@ -1480,26 +1659,34 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       return 'Canceled'
     }
 
+    // Signal the UI to start a new assistant "bubble" for each iteration
+    if (i > 0) {
+      emit(win, { type: 'new_turn' })
+    }
+
     // Pre-flight: sanitize structure + ensure messages fit in context budget
     messages = sanitizeMessages(messages)
-    let preflightTokens: number
-    const accurateCount = await countContextTokensAccurate(messages)
-    preflightTokens = accurateCount
+    const accurateTokens = await countContextTokensAccurate(messages)
     const preflightBudget = getMessageBudget()
-    debugLog('PREFLIGHT', `iter=${i}, msgs=${messages.length}, tokens=${preflightTokens}, budget=${preflightBudget}, ratio=${(preflightTokens/preflightBudget*100).toFixed(0)}%, maxResp=${getMaxResponseTokens()}`)
-    if (preflightTokens > preflightBudget * EMERGENCY_AT) {
+    const serverCtx = ctxTokens()
+    debugLog('PREFLIGHT', `iter=${i}, msgs=${messages.length}, tokens=${accurateTokens}, budget=${preflightBudget}, ctx=${serverCtx}, ratio=${(accurateTokens/preflightBudget*100).toFixed(0)}%, maxResp=${getMaxResponseTokens()}`)
+
+    if (accurateTokens > preflightBudget * EMERGENCY_AT) {
       emit(win, { type: 'status', content: '🗜️ Обрезка контекста перед запросом…' })
       messages = tier4EmergencyPrune(messages)
       messages = sanitizeMessages(messages)
       session.messages = messages
-      preflightTokens = estimateContextTokens(messages)
     }
 
-    // Final safety: if still over budget after all pruning, adjust max_tokens down
-    const overBudgetRatio = preflightTokens / preflightBudget
-    const effectiveMaxTokens = overBudgetRatio > 1.0
-      ? Math.max(256, Math.floor(getMaxResponseTokens() * (1.0 / overBudgetRatio)))
-      : 0 // 0 means use default
+    // Hard clamp: max_tokens must NEVER exceed (server ctx - prompt tokens)
+    // This prevents HTTP 400 "exceeds available context size" errors
+    const postPruneTokens = await countContextTokensAccurate(messages)
+    const desiredMaxTokens = getMaxResponseTokens()
+    const hardLimit = Math.max(256, serverCtx - postPruneTokens - 50)
+    const effectiveMaxTokens = Math.min(desiredMaxTokens, hardLimit)
+    if (effectiveMaxTokens < desiredMaxTokens) {
+      debugLog('PREFLIGHT', `Clamped max_tokens: ${desiredMaxTokens} → ${effectiveMaxTokens} (ctx=${serverCtx}, prompt=${postPruneTokens})`)
+    }
 
     let streamResult: StreamResult
     try {
@@ -1524,14 +1711,25 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       if (isAbort && !isContextError) {
         // Idle timeout or network abort — not user-initiated
-        emit(win, { type: 'error', content: 'Соединение с моделью прервано (сервер не отвечал 2 минуты). Попробуйте ещё раз.' })
+        emit(win, { type: 'error', content: 'Соединение с моделью прервано (сервер не отвечал 60 секунд). Попробуйте ещё раз.' })
         session.updatedAt = Date.now()
         saveSession(session)
         return 'Error: connection lost'
       }
 
       if (isContextError) {
-        emit(win, { type: 'status', content: '🔧 Ошибка контекста — очищаю и повторяю…' })
+        // Extract real n_ctx from server error and auto-correct our tracking
+        const ctxMatch = errMsg.match(/n_ctx[":=\s]*(\d+)/)
+        if (ctxMatch) {
+          const realCtx = parseInt(ctxMatch[1])
+          if (realCtx > 0 && realCtx !== ctxTokens()) {
+            debugLog('CTX_FIX', `Server reports n_ctx=${realCtx}, we tracked ${ctxTokens()} — correcting!`)
+            setCtxSize(realCtx)
+            emitContextUsage(win, messages)
+          }
+        }
+
+        emit(win, { type: 'status', content: `🔧 Ошибка контекста (реальный ctx=${ctxTokens()}) — очищаю и повторяю…` })
         messages = sanitizeMessages(messages)
         messages = tier4EmergencyPrune(messages)
         session.messages = messages
@@ -1556,18 +1754,97 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
     const content = streamResult.content
     const toolCalls = streamResult.toolCalls
+    const rawToolCalls = streamResult.rawToolCalls
+    const finishReason = streamResult.finishReason
 
-    if (!content && !toolCalls) {
-      debugLog('EMPTY', `Empty response, retry ${emptyRetries + 1}/${MAX_EMPTY_RETRIES}, msgs=${messages.length}, tokens=${estimateContextTokens(messages)}`)
-      emptyRetries++
-      if (emptyRetries <= MAX_EMPTY_RETRIES) {
-        emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — обрезаю контекст и повторяю (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
-        messages = tier4EmergencyPrune(messages)
+    // --- Truncated tool call handling ---
+    // Model tried to call a tool but JSON was too large and got cut off
+    if (!toolCalls && rawToolCalls && rawToolCalls.length > 0) {
+      debugLog('TRUNCATED', `Detected truncated tool call(s): ${rawToolCalls.length}, finish=${finishReason}`)
+
+      let repaired = false
+      for (const rawTc of rawToolCalls) {
+        const repair = tryRepairTruncatedToolCall(rawTc)
+        if (repair && repair.truncated) {
+          const { name: repairName, args: repairArgs } = repair
+          debugLog('TRUNCATED', `Repaired ${repairName}: path=${repairArgs.path}, chars=${(repairArgs.content ?? '').length}`)
+          emit(win, { type: 'status', content: `🔧 Tool call обрезался — спасаю частичный контент (${(repairArgs.content ?? '').length} символов)…` })
+          emit(win, { type: 'tool_call', name: repairName, args: repairArgs })
+
+          const needsApproval = NEEDS_APPROVAL.has(repairName)
+          const approved = needsApproval ? await requestApproval(win, repairName, repairArgs) : true
+
+          if (approved) {
+            const result = executeTool(repairName, repairArgs, workspace)
+            const uiResult = result.length > 5000 ? result.slice(0, 5000) : result
+            emit(win, { type: 'tool_result', name: repairName, result: uiResult })
+
+            const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
+            if (fsModTools.has(repairName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+              try { win.webContents.send('workspace-files-changed') } catch {}
+            }
+
+            const tcId = rawTc.id || `repair-${Date.now()}`
+            messages.push({
+              role: 'assistant',
+              tool_calls: [{ id: tcId, type: 'function', function: { name: repairName, arguments: JSON.stringify(repairArgs) } }],
+            })
+            messages.push({ role: 'tool' as any, tool_call_id: tcId, content: result.slice(0, dynamicToolResultLimit()) })
+
+            // Self-correction: tell model what happened and how to continue
+            const contentLen = (repairArgs.content ?? '').length
+            messages.push({
+              role: 'user',
+              content: `⚠️ Your ${repairName} call was truncated by the generation limit — the file was saved with partial content (${contentLen} chars). The file is INCOMPLETE. Please:\n1. read_file to see what was saved\n2. Use edit_file or append_file to add the remaining content in small chunks (under 100 lines per call)\nDo NOT rewrite the entire file — continue from where it was cut off.`,
+            })
+            repaired = true
+          } else {
+            messages.push({ role: 'assistant', content: `Tried to ${repairName} but approval was denied.` })
+          }
+        }
+      }
+
+      if (repaired) {
         session.messages = messages
+        saveSession(session)
+        emitContextUsage(win, messages)
+        continue
+      }
+
+      // Could not repair — give self-correction feedback without executing
+      const rawName = rawToolCalls[0]?.function?.name ?? 'unknown'
+      debugLog('TRUNCATED', `Could not repair ${rawName}, giving feedback`)
+      emit(win, { type: 'status', content: `⚠️ Tool call "${rawName}" обрезался — прошу модель разбить на части…` })
+      messages.push({ role: 'assistant', content: `I tried to call ${rawName} but the content was too large and the JSON was truncated.` })
+      messages.push({
+        role: 'user',
+        content: `Your ${rawName} tool call failed — the JSON arguments were truncated because the content was too large for a single generation. IMPORTANT: Break large file writes into smaller steps:\n1. First write_file with just the skeleton/structure (imports, basic HTML structure, empty function bodies) — under 80 lines\n2. Then use edit_file to fill in each section one at a time\n3. Or use append_file to add content incrementally\nNever put more than 100 lines of content in a single tool call.`,
+      })
+      session.messages = messages
+      saveSession(session)
+      continue
+    }
+
+    // --- Truly empty response handling ---
+    if (!content && !toolCalls) {
+      const usedTokens = estimateContextTokens(messages)
+      const budgetNow = getMessageBudget()
+      const usageRatio = usedTokens / budgetNow
+      debugLog('EMPTY', `Empty response #${emptyRetries + 1}, msgs=${messages.length}, tokens=${usedTokens}, budget=${budgetNow}, usage=${(usageRatio * 100).toFixed(0)}%`)
+      emptyRetries++
+
+      if (emptyRetries <= MAX_EMPTY_RETRIES) {
+        if (usageRatio > 0.5) {
+          emit(win, { type: 'status', content: `⚠️ Пустой ответ — обрезаю контекст и повторяю (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
+          messages = tier4EmergencyPrune(messages)
+          session.messages = messages
+        } else {
+          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю запрос (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
+        }
         saveSession(session)
         continue
       }
-      emit(win, { type: 'error', content: 'Модель не может ответить — контекст слишком большой или повреждён. Попробуйте начать новый чат.' })
+      emit(win, { type: 'error', content: 'Модель вернула пустой ответ после нескольких попыток. Попробуйте переформулировать запрос или начать новый чат.' })
       session.updatedAt = Date.now()
       saveSession(session)
       return 'Empty response after retries'
@@ -1630,6 +1907,25 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       emit(win, { type: 'tool_call', name: toolName, args: toolArgs })
 
+      // Track files created this turn
+      if ((toolName === 'write_file' || toolName === 'append_file' || toolName === 'create_directory') && toolArgs.path) {
+        filesCreatedThisTurn.add(toolArgs.path)
+      }
+
+      // Detect pointless re-reads of files we JUST created
+      if (toolName === 'read_file' && toolArgs.path && filesCreatedThisTurn.has(toolArgs.path)) {
+        consecutiveReReads++
+        debugLog('LOOP', `Re-read of just-created file: ${toolArgs.path} (consecutive: ${consecutiveReReads})`)
+        if (consecutiveReReads >= 3) {
+          const skipMsg = `You just created ${toolArgs.path} in this session — its contents are exactly what you wrote. Instead of re-reading files you just created, continue with the next step of the task. What files still need to be created or modified?`
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: skipMsg })
+          emit(win, { type: 'tool_result', name: toolName, result: skipMsg })
+          continue
+        }
+      } else {
+        consecutiveReReads = 0
+      }
+
       // Request user approval for destructive operations or custom tools
       let result: string
       const customTools = config.get('customTools')
@@ -1658,7 +1954,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       emit(win, { type: 'tool_result', name: toolName, result: uiResult })
 
       // Notify renderer to refresh file tree when agent modifies filesystem
-      const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory'])
+      const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
       if (fsModTools.has(toolName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
         try {
           win.webContents.send('workspace-files-changed')

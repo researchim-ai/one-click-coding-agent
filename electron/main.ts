@@ -171,6 +171,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+app.on('before-quit', () => {
+  serverManager.stop()
+})
+
 function registerIpcHandlers() {
   ipcMain.handle('detect-resources', () => detect())
 
@@ -242,14 +246,18 @@ function registerIpcHandlers() {
 
   ipcMain.handle('restart-server', async (_e) => {
     serverManager.stop()
-    await new Promise((r) => setTimeout(r, 1500))
+    await new Promise((r) => setTimeout(r, 2000))
     const modelPath = modelManager.getModelPath()
     if (!modelPath) throw new Error('Модель не скачана')
     if (!serverManager.isReady()) throw new Error('llama-server не установлен')
     loadModelArch(modelPath)
     const ctxSize = config.get('ctxSize')
+    console.log(`[restart-server] Requested ctx=${ctxSize}, quant=${modelManager.getSelectedQuant()}`)
     serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
     await serverManager.waitReady(300, mainWindow ?? undefined)
+    const actualCtx = serverManager.getCtxSize()
+    console.log(`[restart-server] Server ready, actual ctx=${actualCtx}`)
+    return { requestedCtx: ctxSize, actualCtx }
   })
 
   ipcMain.handle('get-status', async () => {
@@ -302,8 +310,13 @@ function registerIpcHandlers() {
     if (!serverManager.isRunning()) {
       loadModelArch(modelPath)
       const ctxSize = config.get('ctxSize')
-      serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
+      const quant = modelManager.getSelectedQuant()
+      console.log(`[auto-setup] Starting server: quant=${quant}, ctx=${ctxSize}`)
+      serverManager.start(modelPath, mainWindow ?? undefined, undefined, quant, ctxSize)
       await serverManager.waitReady(300, mainWindow ?? undefined)
+      console.log(`[auto-setup] Server ready, actual ctx=${serverManager.getCtxSize()}`)
+    } else {
+      console.log(`[auto-setup] Server already running, ctx=${serverManager.getCtxSize()}`)
     }
   })
 

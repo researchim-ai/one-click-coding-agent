@@ -385,8 +385,10 @@ export function computeOptimalArgs(
     preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
   }
 
+  // Respect user's explicit choice — don't silently clamp to preset.
+  // If the server can't handle it, queryActualCtxSize() will detect the real n_ctx.
   const ctxSize = (userCtxSize && userCtxSize > 0)
-    ? Math.min(userCtxSize, preset.ctxSize)
+    ? userCtxSize
     : preset.ctxSize
 
   return {

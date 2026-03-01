@@ -18,7 +18,7 @@ interface ElectronAPI {
   }>
   savePrompts(prompts: { systemPrompt?: string | null; summarizePrompt?: string | null }): Promise<void>
   resetAllDefaults(): Promise<void>
-  restartServer(): Promise<void>
+  restartServer(): Promise<{ requestedCtx: number; actualCtx: number } | void>
   autoSetup(): Promise<void>
   downloadModel(): Promise<string>
   ensureLlama(): Promise<void>

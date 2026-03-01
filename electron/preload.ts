@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   getPrompts: (): Promise<any> => ipcRenderer.invoke('get-prompts'),
   savePrompts: (prompts: any): Promise<void> => ipcRenderer.invoke('save-prompts', prompts),
   resetAllDefaults: (): Promise<void> => ipcRenderer.invoke('reset-all-defaults'),
-  restartServer: (): Promise<void> => ipcRenderer.invoke('restart-server'),
+  restartServer: (): Promise<{ requestedCtx: number; actualCtx: number } | void> => ipcRenderer.invoke('restart-server'),
   autoSetup: (): Promise<void> => ipcRenderer.invoke('auto-setup'),
   downloadModel: (): Promise<string> => ipcRenderer.invoke('download-model'),
   ensureLlama: (): Promise<void> => ipcRenderer.invoke('ensure-llama'),

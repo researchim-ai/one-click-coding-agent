@@ -128,6 +128,24 @@ export const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'append_file',
+      description:
+        'Append content to the end of an existing file. Use this to build large files incrementally: ' +
+        'first create the file skeleton with write_file, then append sections with this tool. ' +
+        'If the file does not exist, it will be created.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path.' },
+          content: { type: 'string', description: 'Content to append.' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'delete_file',
       description: 'Delete a single file. Cannot delete directories — use execute_command with rm -r for that.',
       parameters: {
@@ -170,6 +188,8 @@ export function executeTool(name: string, args: Record<string, any>, workspace: 
         return writeFile(args.path, args.content, workspace)
       case 'edit_file':
         return editFile(args.path, args.old_string, args.new_string, workspace)
+      case 'append_file':
+        return appendFile(args.path, args.content, workspace)
       case 'list_directory':
         return listDir(args.path, workspace, args.depth ?? 3)
       case 'find_files':
@@ -248,6 +268,20 @@ function editFile(filePath: string, oldStr: string, newStr: string, workspace: s
   const oldLines = oldStr.split('\n').length
   const newLines = newStr.split('\n').length
   return `Edited ${filePath}: replaced ${oldLines} lines with ${newLines} lines`
+}
+
+function appendFile(filePath: string, content: string, workspace: string): string {
+  const p = resolvePath(filePath, workspace)
+  assertInWorkspace(p, workspace)
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  const existed = fs.existsSync(p)
+  fs.appendFileSync(p, content)
+  const totalContent = fs.readFileSync(p, 'utf-8')
+  const totalLines = totalContent.split('\n').length
+  const appendedLines = content.split('\n').length
+  return existed
+    ? `Appended to ${filePath}: +${appendedLines} lines (total: ${totalLines} lines, ${totalContent.length} bytes)`
+    : `Created ${filePath} with ${appendedLines} lines (${content.length} bytes)`
 }
 
 function listDir(dirPath: string | undefined, workspace: string, maxDepth: number): string {

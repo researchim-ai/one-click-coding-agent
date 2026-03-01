@@ -182,6 +182,17 @@ export function useAgent() {
       const msgs = [...prev]
       let assistant = msgs.find((m) => m.id === assistantRef.current?.id)
 
+      if (ev.type === 'new_turn') {
+        // Finalize the current assistant message and start a fresh one
+        if (assistant) {
+          assistant.done = true
+        }
+        const newMsg: ChatMessage = { id: nextId(), role: 'assistant', content: '', toolCalls: [] }
+        assistantRef.current = newMsg
+        msgs.push(newMsg)
+        return msgs
+      }
+
       if (!assistant) {
         assistant = { id: nextId(), role: 'assistant', content: '', toolCalls: [] }
         assistantRef.current = assistant
