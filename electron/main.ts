@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, nativeTheme } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import { Worker } from 'worker_threads'
 import type { FileTreeEntry } from './types'
 
 nativeTheme.themeSource = 'dark'
@@ -30,13 +31,91 @@ import {
   createSession, switchSession, listSessions, deleteSession,
   renameSession, getActiveSessionId, initSessions,
   saveUiMessages, getUiMessages,
+  getActiveSession, saveSession as persistSession, isCancelRequested,
+  updateSessionFromWorker,
   DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARIZE_PROMPT,
-  type SessionInfo,
+  type SessionInfo, type AgentBridge,
 } from './agent'
 import * as terminalManager from './terminal-manager'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
+let agentWorker: Worker | null = null
+let pendingSendResolve: ((result: string) => void) | null = null
+
+function getAgentWorker(): Worker {
+  if (!agentWorker) {
+    const workerPath = path.join(__dirname, 'agent-worker.js')
+    agentWorker = new Worker(workerPath, { stdout: true, stderr: true })
+    agentWorker.on('message', (msg: any) => {
+      if (msg.type === 'emit' && mainWindow) {
+        try { mainWindow.webContents.send('agent-event', msg.event) } catch {}
+      } else if (msg.type === 'approval' && mainWindow) {
+        const handler = (_: any, responseId: string, approved: boolean) => {
+          if (responseId === msg.approvalId) {
+            ipcMain.removeListener('command-approval-response', handler)
+            agentWorker?.postMessage({ type: 'approval-result', approvalId: msg.approvalId, approved })
+          }
+        }
+        ipcMain.on('command-approval-response', handler)
+        try { mainWindow.webContents.send('agent-event', { type: 'command_approval', name: msg.name, args: msg.args, approvalId: msg.approvalId }) } catch {}
+      } else if (msg.type === 'workspace-changed' && mainWindow) {
+        try { mainWindow.webContents.send('workspace-files-changed') } catch {}
+      } else if (msg.type === 'session-update') {
+        updateSessionFromWorker(msg.session)
+      } else if (msg.type === 'query-ctx') {
+        serverManager.queryActualCtxSize().then(() => {
+          agentWorker?.postMessage({ type: 'query-ctx-result', id: msg.id, ctxSize: serverManager.getCtxSize() })
+        }).catch(() => {
+          agentWorker?.postMessage({ type: 'query-ctx-result', id: msg.id, ctxSize: serverManager.getCtxSize() })
+        })
+      } else if (msg.type === 'done') {
+        if (msg.session) updateSessionFromWorker(msg.session)
+        if (pendingSendResolve) {
+          pendingSendResolve(msg.result ?? '')
+          pendingSendResolve = null
+        }
+      }
+    })
+    agentWorker.on('error', (err) => {
+      if (pendingSendResolve) {
+        pendingSendResolve(`Error: ${err.message}`)
+        pendingSendResolve = null
+      }
+    })
+  }
+  return agentWorker
+}
+
+function createMainBridge(win: BrowserWindow): AgentBridge {
+  return {
+    emit(e) {
+      try { win.webContents.send('agent-event', e) } catch {}
+    },
+    requestApproval(name: string, args: Record<string, any>) {
+      return new Promise((resolve) => {
+        const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        const handler = (_: any, responseId: string, approved: boolean) => {
+          if (responseId === id) {
+            ipcMain.removeListener('command-approval-response', handler)
+            resolve(approved)
+          }
+        }
+        ipcMain.on('command-approval-response', handler)
+        try { win.webContents.send('agent-event', { type: 'command_approval', name, args, approvalId: id }) } catch {}
+      })
+    },
+    getConfig() { return config.load() },
+    getSession() { return getActiveSession() },
+    saveSession(s) { persistSession(s) },
+    getApiUrl() { return serverManager.llamaApiUrl() },
+    getCtxSize() { return serverManager.getCtxSize() },
+    setCtxSize(n) { serverManager.setCtxSize(n) },
+    async queryActualCtxSize() { await serverManager.queryActualCtxSize() },
+    isCancelRequested() { return isCancelRequested() },
+    notifyWorkspaceChanged() { try { win.webContents.send('workspace-files-changed') } catch {} },
+  }
+}
 
 function sendMenuAction(action: string) {
   mainWindow?.webContents.send('menu-action', action)
@@ -345,10 +424,25 @@ function registerIpcHandlers() {
 
   ipcMain.handle('send-message', async (_e, msg: string, workspace: string) => {
     if (!mainWindow) throw new Error('No window')
-    return runAgent(msg, workspace, mainWindow)
+    return new Promise<string>((resolve) => {
+      pendingSendResolve = resolve
+      const session = getActiveSession()
+      const payload = {
+        message: msg,
+        workspace,
+        config: config.load(),
+        session: { ...session, messages: [...session.messages], uiMessages: [...(session.uiMessages || [])] },
+        apiUrl: serverManager.llamaApiUrl(),
+        ctxSize: serverManager.getCtxSize() || 32768,
+      }
+      getAgentWorker().postMessage({ type: 'run', payload })
+    })
   })
 
-  ipcMain.handle('cancel-agent', () => cancelAgent())
+  ipcMain.handle('cancel-agent', () => {
+    cancelAgent()
+    if (agentWorker && pendingSendResolve) agentWorker.postMessage({ type: 'cancel' })
+  })
 
   ipcMain.handle('reset-agent', () => resetAgent())
   ipcMain.handle('set-workspace', (_e, ws: string) => setWorkspace(ws))

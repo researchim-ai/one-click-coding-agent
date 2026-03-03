@@ -1,11 +1,24 @@
-import { BrowserWindow, ipcMain } from 'electron'
-import { llamaApiUrl, getCtxSize, setCtxSize, queryActualCtxSize } from './server-manager'
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool } from './tools'
-import * as config from './config'
 import type { AgentEvent } from './types'
+import type { AppConfig } from './config'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+
+// Bridge: main process implements with Electron/win; worker implements with postMessage.
+export interface AgentBridge {
+  emit(event: AgentEvent): void
+  requestApproval(toolName: string, args: Record<string, any>): Promise<boolean>
+  getConfig(): AppConfig
+  getSession(): Session
+  saveSession(session: Session): void
+  getApiUrl(): string
+  getCtxSize(): number
+  setCtxSize(n: number): void
+  queryActualCtxSize(): Promise<void>
+  isCancelRequested(): boolean
+  notifyWorkspaceChanged(): void
+}
 
 // ---------------------------------------------------------------------------
 // Debug logging — writes to ~/.one-click-agent/agent-debug.log
@@ -28,11 +41,24 @@ const NEEDS_APPROVAL = new Set(['execute_command', 'write_file', 'edit_file', 'd
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
 
-function getMaxIterations(): number { return config.get('maxIterations') || 200 }
-function getBaseTemperature(): number { return config.get('temperature') ?? 0.3 }
-function getIdleTimeoutMs(): number { return (config.get('idleTimeoutSec') || 60) * 1000 }
-function getMaxEmptyRetries(): number { return config.get('maxEmptyRetries') || 3 }
-function isApprovalRequired(): boolean { return config.get('approvalRequired') ?? true }
+let currentBridge: AgentBridge | null = null
+
+function doEmit(e: AgentEvent): void { currentBridge!.emit(e) }
+function doRequestApproval(name: string, args: Record<string, any>): Promise<boolean> { return currentBridge!.requestApproval(name, args) }
+function doGetConfig(): AppConfig { return currentBridge!.getConfig() }
+function doGetSession(): Session { return currentBridge!.getSession() }
+function doSaveSession(s: Session): void { currentBridge!.saveSession(s) }
+function doGetApiUrl(): string { return currentBridge!.getApiUrl() }
+function doGetCtxSize(): number { return currentBridge!.getCtxSize() }
+function doSetCtxSize(n: number): void { currentBridge!.setCtxSize(n) }
+function doQueryActualCtxSize(): Promise<void> { return currentBridge!.queryActualCtxSize() }
+function doIsCancelRequested(): boolean { return currentBridge!.isCancelRequested() }
+
+function getMaxIterations(): number { return doGetConfig().maxIterations || 200 }
+function getBaseTemperature(): number { return doGetConfig().temperature ?? 0.3 }
+function getIdleTimeoutMs(): number { return (doGetConfig().idleTimeoutSec || 60) * 1000 }
+function getMaxEmptyRetries(): number { return doGetConfig().maxEmptyRetries || 3 }
+function isApprovalRequired(): boolean { return doGetConfig().approvalRequired ?? true }
 
 // Graduated compression thresholds (fraction of message budget)
 const COMPRESS_TOOL_RESULTS_AT = 0.35
@@ -56,7 +82,7 @@ let tokenizeAvailable: boolean | null = null
 async function countTokensViaServer(text: string): Promise<number | null> {
   if (tokenizeAvailable === false) return null
   try {
-    const r = await fetch(`${llamaApiUrl()}/tokenize`, {
+    const r = await fetch(`${doGetApiUrl()}/tokenize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: text }),
@@ -188,13 +214,13 @@ function getOsInfo(): string {
 }
 
 function getSystemPrompt(): string {
-  const custom = config.get('systemPrompt')
+  const custom = doGetConfig().systemPrompt
   const base = custom || (ctxTokens() < 16384 ? COMPACT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT)
   return base + getOsInfo()
 }
 
 function getSummarizePrompt(): string {
-  return config.get('summarizePrompt') || DEFAULT_SUMMARIZE_PROMPT
+  return doGetConfig().summarizePrompt || DEFAULT_SUMMARIZE_PROMPT
 }
 
 function compactToolDefs(tools: any[]): any[] {
@@ -217,7 +243,7 @@ function compactToolDefs(tools: any[]): any[] {
 }
 
 function getAllTools(): any[] {
-  const customTools = config.get('customTools').filter((t) => t.enabled)
+  const customTools = doGetConfig().customTools.filter((t) => t.enabled)
   const customDefs = customTools.map((ct) => ({
     type: 'function',
     function: {
@@ -252,7 +278,7 @@ export interface SessionInfo {
   messageCount: number
 }
 
-interface Session {
+export interface Session {
   id: string
   title: string
   messages: Message[]
@@ -287,7 +313,7 @@ function sessionFilePath(id: string): string {
   return path.join(sessionsDir(), `${id}.json`)
 }
 
-function saveSession(session: Session): void {
+export function saveSession(session: Session): void {
   const fs = require('fs')
   try {
     fs.writeFileSync(sessionFilePath(session.id), JSON.stringify({
@@ -343,7 +369,7 @@ function titleFromMessage(text: string): string {
   return firstLine.length > 50 ? firstLine.slice(0, 47) + '…' : firstLine || 'Новый чат'
 }
 
-function getActiveSession(): Session {
+export function getActiveSession(): Session {
   if (activeSessionId && sessions.has(activeSessionId)) {
     return sessions.get(activeSessionId)!
   }
@@ -422,6 +448,12 @@ export function getActiveSessionId(): string | null {
   return activeSessionId
 }
 
+/** Called from main process when worker sends session-update (so main stays in sync and persists). */
+export function updateSessionFromWorker(session: Session): void {
+  sessions.set(session.id, session)
+  saveSession(session)
+}
+
 export function saveUiMessages(id: string, uiMsgs: any[]): void {
   const session = sessions.get(id)
   if (session) {
@@ -438,34 +470,14 @@ export function initSessions(): void {
   loadAllSessions()
 }
 
-function emit(win: BrowserWindow, event: AgentEvent) {
-  try {
-    win.webContents.send('agent-event', event)
-  } catch {}
-}
-
-function emitContextUsage(win: BrowserWindow, msgs: Message[]) {
+function emitContextUsage(msgs: Message[]) {
   const used = estimateContextTokens(msgs)
   const budget = getMessageBudget()
   const maxCtx = ctxTokens()
   const pct = Math.round((used / budget) * 100)
-  emit(win, {
+  doEmit({
     type: 'context_usage',
     contextUsage: { usedTokens: used, budgetTokens: budget, maxContextTokens: maxCtx, percent: Math.min(pct, 100) },
-  })
-}
-
-function requestApproval(win: BrowserWindow, toolName: string, args: Record<string, any>): Promise<boolean> {
-  return new Promise((resolve) => {
-    const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    const handler = (_event: any, responseId: string, approved: boolean) => {
-      if (responseId === id) {
-        ipcMain.removeListener('command-approval-response', handler)
-        resolve(approved)
-      }
-    }
-    ipcMain.on('command-approval-response', handler)
-    emit(win, { type: 'command_approval', name: toolName, args, approvalId: id })
   })
 }
 
@@ -594,7 +606,6 @@ interface StreamResult {
 async function streamLlmResponse(
   apiUrl: string,
   msgs: Message[],
-  win: BrowserWindow,
   fullResponseSoFar: string,
   signal: AbortSignal,
   maxTokensOverride?: number,
@@ -698,7 +709,7 @@ async function streamLlmResponse(
         accContent += accContent.includes('<think>') ? rc : `<think>${rc}`
         const { thinking } = parseAccumulatedThinking(accContent)
         if (thinking.length > lastThinkLen) {
-          emit(win, { type: 'thinking', content: thinking.slice(lastThinkLen) })
+          doEmit( { type: 'thinking', content: thinking.slice(lastThinkLen) })
           lastThinkLen = thinking.length
         }
         wasThinkingDone = false
@@ -710,7 +721,7 @@ async function streamLlmResponse(
         if (!wasThinkingDone && !delta.content.includes('<think>')) {
           accContent += '</think>'
           wasThinkingDone = true
-          emit(win, { type: 'status', content: '' })
+          doEmit( { type: 'status', content: '' })
         }
         accContent += delta.content
 
@@ -718,13 +729,13 @@ async function streamLlmResponse(
 
         // Emit thinking-done transition
         if (thinkingDone && !wasThinkingDone) {
-          emit(win, { type: 'status', content: '' })
+          doEmit( { type: 'status', content: '' })
         }
         wasThinkingDone = thinkingDone
 
         // Emit thinking delta
         if (thinking.length > lastThinkLen) {
-          emit(win, { type: 'thinking', content: thinking.slice(lastThinkLen) })
+          doEmit( { type: 'thinking', content: thinking.slice(lastThinkLen) })
           lastThinkLen = thinking.length
         }
 
@@ -736,7 +747,7 @@ async function streamLlmResponse(
             const fullNow = fullResponseSoFar
               ? fullResponseSoFar + '\n\n' + visible
               : visible
-            emit(win, { type: 'response', content: fullNow, done: false })
+            doEmit( { type: 'response', content: fullNow, done: false })
           }
           lastVisibleLen = visible.length
         }
@@ -771,7 +782,7 @@ async function streamLlmResponse(
               lastToolStreamMs = now
               const partial = extractPartialFileContent(entry.function.arguments, toolName)
               if (partial) {
-                emit(win, {
+                doEmit( {
                   type: 'tool_streaming',
                   name: toolName,
                   toolStreamPath: partial.path,
@@ -791,7 +802,7 @@ async function streamLlmResponse(
     const fullNow = fullResponseSoFar
       ? fullResponseSoFar + '\n\n' + finalVisible
       : finalVisible
-    emit(win, { type: 'response', content: fullNow, done: false })
+    doEmit( { type: 'response', content: fullNow, done: false })
   }
 
   // Final tool streaming emission (ensure UI gets the complete content)
@@ -799,7 +810,7 @@ async function streamLlmResponse(
     if (FILE_CONTENT_TOOLS.has(entry.function.name)) {
       const partial = extractPartialFileContent(entry.function.arguments, entry.function.name)
       if (partial) {
-        emit(win, {
+        doEmit( {
           type: 'tool_streaming',
           name: entry.function.name,
           toolStreamPath: partial.path,
@@ -895,7 +906,7 @@ function toolsOverheadTokens(): number {
 // ---------------------------------------------------------------------------
 
 function ctxTokens(): number {
-  const ctx = getCtxSize()
+  const ctx = doGetCtxSize()
   return ctx > 0 ? ctx : FALLBACK_CTX_TOKENS
 }
 
@@ -1490,7 +1501,6 @@ function tier2CollapseOldChains(msgs: Message[]): { msgs: Message[]; saved: numb
 async function tier3Summarize(
   msgs: Message[],
   apiUrl: string,
-  win: BrowserWindow,
   signal?: AbortSignal,
 ): Promise<Message[]> {
   const systemMsg = msgs.find((m) => m.role === 'system')
@@ -1618,7 +1628,7 @@ async function tier3Summarize(
 
     const newTokens = estimateContextTokens(compacted)
     const pctUsed = Math.round((newTokens / budget) * 100)
-    emit(win, {
+    doEmit( {
       type: 'status',
       content: `✅ Контекст сжат: ${oldMessages.length} сообщений → саммари. ~${pctUsed}% бюджета`,
     })
@@ -1658,8 +1668,8 @@ function tier4EmergencyPrune(msgs: Message[]): Message[] {
   if (tokens <= budget) return result
 
   // Step 3: Drop messages from the front (keep system + last user + last N)
-  const system = result.find((m) => m.role === 'system')
-  const rest = result.filter((m) => m.role !== 'system')
+    const system = result.find((m) => m.role === 'system')
+    const rest = result.filter((m) => m.role !== 'system')
 
   // Always preserve the last user message to satisfy chat template requirements
   let lastUserIdx = -1
@@ -1775,7 +1785,6 @@ let lastTier3Iteration = -10
 async function manageContext(
   msgs: Message[],
   apiUrl: string,
-  win: BrowserWindow,
   signal?: AbortSignal,
   iteration?: number,
 ): Promise<Message[]> {
@@ -1822,7 +1831,7 @@ async function manageContext(
   if (tokens > budget * SUMMARIZE_AT && tier3Ready) {
     const nonSystem = current.filter((m) => m.role !== 'system')
     if (nonSystem.length >= 4) {
-      current = await tier3Summarize(current, apiUrl, win, signal)
+      current = await tier3Summarize(current, apiUrl, signal)
       lastTier3Iteration = iter
       tokens = estimateContextTokens(current)
       current = injectRehydrationHint(current, originalMsgs)
@@ -1832,7 +1841,7 @@ async function manageContext(
 
   // Tier 4: Emergency prune
   if (tokens > budget * EMERGENCY_AT) {
-    emit(win, { type: 'status', content: '⚠️ Экстренная обрезка контекста' })
+    doEmit( { type: 'status', content: '⚠️ Экстренная обрезка контекста' })
     current = tier4EmergencyPrune(current)
     current = injectRehydrationHint(current, originalMsgs)
   }
@@ -1925,6 +1934,10 @@ export function resetAgent() {
   saveSession(session)
 }
 
+export function isCancelRequested(): boolean {
+  return cancelRequested
+}
+
 export function cancelAgent() {
   cancelRequested = true
   if (currentAbort) {
@@ -1936,12 +1949,14 @@ export function cancelAgent() {
   }
 }
 
-export async function runAgent(userMessage: string, ws: string, win: BrowserWindow): Promise<string> {
+export async function runAgent(userMessage: string, ws: string, bridge: AgentBridge): Promise<string> {
+  currentBridge = bridge
+  try {
   workspace = ws
   cancelRequested = false
   lastTier3Iteration = -10
 
-  const session = getActiveSession()
+  const session = doGetSession()
   let { messages } = session
 
   // Auto-title from first user message
@@ -1970,18 +1985,18 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
   messages.push({ role: 'user', content: userMessage })
   session.messages = messages
 
-  const apiUrl = `${llamaApiUrl()}/v1/chat/completions`
+  const apiUrl = `${doGetApiUrl()}/v1/chat/completions`
 
   // Calibrate token ratio from server (non-blocking, happens once)
   calibrateTokenRatio().catch(() => {})
 
   // Verify actual server ctx size (catches mismatches from server auto-reducing ctx)
-  queryActualCtxSize().catch(() => {})
+  doQueryActualCtxSize().catch(() => {})
 
   // Summarize/prune context if approaching limit
-  messages = await manageContext(messages, apiUrl, win)
+  messages = await manageContext(messages, apiUrl)
   session.messages = messages
-  emitContextUsage(win, messages)
+  emitContextUsage( messages)
   let fullResponse = ''
   let emptyRetries = 0
 
@@ -1994,16 +2009,16 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
   let sameToolRepeatCount = 0
 
   for (let i = 0; i < getMaxIterations(); i++) {
-    if (cancelRequested) {
-      emit(win, { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
+    if (doIsCancelRequested()) {
+      doEmit( { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
       session.updatedAt = Date.now()
-      saveSession(session)
+      doSaveSession(session)
       return 'Canceled'
     }
 
     // Signal the UI to start a new assistant "bubble" for each iteration
     if (i > 0) {
-      emit(win, { type: 'new_turn' })
+      doEmit( { type: 'new_turn' })
       fullResponse = ''
     }
 
@@ -2015,7 +2030,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
     debugLog('PREFLIGHT', `iter=${i}, msgs=${messages.length}, tokens=${accurateTokens}, budget=${preflightBudget}, ctx=${serverCtx}, ratio=${(accurateTokens/preflightBudget*100).toFixed(0)}%, maxResp=${getMaxResponseTokens()}`)
 
     if (accurateTokens > preflightBudget * EMERGENCY_AT) {
-      emit(win, { type: 'status', content: '🗜️ Обрезка контекста перед запросом…' })
+      doEmit( { type: 'status', content: '🗜️ Обрезка контекста перед запросом…' })
       messages = tier4EmergencyPrune(messages)
       messages = sanitizeMessages(messages)
       session.messages = messages
@@ -2039,13 +2054,13 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       // Only abort on user cancel or server idle (120s no data)
 
       const retryTemp = emptyRetries > 0 ? getBaseTemperature() + emptyRetries * 0.2 : undefined
-      streamResult = await streamLlmResponse(apiUrl, messages, win, fullResponse, controller.signal, effectiveMaxTokens, retryTemp)
+      streamResult = await streamLlmResponse(apiUrl, messages, fullResponse, controller.signal, effectiveMaxTokens, retryTemp)
     } catch (e: any) {
       debugLog('ERROR', `Catch in runAgent: name=${e?.name}, message=${e?.message}, cancelRequested=${cancelRequested}, stack=${(e?.stack ?? '').slice(0, 500)}`)
-      if (cancelRequested) {
-        emit(win, { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
+      if (doIsCancelRequested()) {
+        doEmit( { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
         session.updatedAt = Date.now()
-        saveSession(session)
+        doSaveSession(session)
         return 'Canceled'
       }
 
@@ -2055,9 +2070,9 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       if (isAbort && !isContextError) {
         // Idle timeout or network abort — not user-initiated
-        emit(win, { type: 'error', content: 'Соединение с моделью прервано (сервер не отвечал 60 секунд). Попробуйте ещё раз.' })
+        doEmit( { type: 'error', content: 'Соединение с моделью прервано (сервер не отвечал 60 секунд). Попробуйте ещё раз.' })
         session.updatedAt = Date.now()
-        saveSession(session)
+        doSaveSession(session)
         return 'Error: connection lost'
       }
 
@@ -2068,30 +2083,30 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
           const realCtx = parseInt(ctxMatch[1])
           if (realCtx > 0 && realCtx !== ctxTokens()) {
             debugLog('CTX_FIX', `Server reports n_ctx=${realCtx}, we tracked ${ctxTokens()} — correcting!`)
-            setCtxSize(realCtx)
-            emitContextUsage(win, messages)
+            doSetCtxSize(realCtx)
+            emitContextUsage(messages)
           }
         }
 
-        emit(win, { type: 'status', content: `🔧 Ошибка контекста (реальный ctx=${ctxTokens()}) — очищаю и повторяю…` })
+        doEmit( { type: 'status', content: `🔧 Ошибка контекста (реальный ctx=${ctxTokens()}) — очищаю и повторяю…` })
         messages = sanitizeMessages(messages)
         messages = tier4EmergencyPrune(messages)
         session.messages = messages
-        saveSession(session)
+        doSaveSession(session)
         try {
           const retryController = new AbortController()
           currentAbort = retryController
-          streamResult = await streamLlmResponse(apiUrl, messages, win, fullResponse, retryController.signal)
+          streamResult = await streamLlmResponse(apiUrl, messages, fullResponse, retryController.signal)
         } catch (retryErr: any) {
-          emit(win, { type: 'error', content: `LLM request failed after recovery: ${retryErr.message}` })
+          doEmit( { type: 'error', content: `LLM request failed after recovery: ${retryErr.message}` })
           session.updatedAt = Date.now()
-          saveSession(session)
+          doSaveSession(session)
           return `Error: ${retryErr.message}`
         }
       } else {
-        emit(win, { type: 'error', content: `LLM request failed: ${errMsg}` })
+        doEmit( { type: 'error', content: `LLM request failed: ${errMsg}` })
         session.updatedAt = Date.now()
-        saveSession(session)
+        doSaveSession(session)
         return `Error: ${errMsg}`
       }
     }
@@ -2112,20 +2127,20 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         if (repair && repair.truncated) {
           const { name: repairName, args: repairArgs } = repair
           debugLog('TRUNCATED', `Repaired ${repairName}: path=${repairArgs.path}, chars=${(repairArgs.content ?? '').length}`)
-          emit(win, { type: 'status', content: `🔧 Tool call обрезался — спасаю частичный контент (${(repairArgs.content ?? '').length} символов)…` })
-          emit(win, { type: 'tool_call', name: repairName, args: repairArgs })
+          doEmit( { type: 'status', content: `🔧 Tool call обрезался — спасаю частичный контент (${(repairArgs.content ?? '').length} символов)…` })
+          doEmit( { type: 'tool_call', name: repairName, args: repairArgs })
 
           const needsApproval = NEEDS_APPROVAL.has(repairName)
-          const approved = needsApproval ? await requestApproval(win, repairName, repairArgs) : true
+          const approved = needsApproval ? await doRequestApproval( repairName, repairArgs) : true
 
           if (approved) {
             const result = executeTool(repairName, repairArgs, workspace)
             const uiResult = result.length > 5000 ? result.slice(0, 5000) : result
-            emit(win, { type: 'tool_result', name: repairName, result: uiResult })
+            doEmit( { type: 'tool_result', name: repairName, result: uiResult })
 
             const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
             if (fsModTools.has(repairName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
-              try { win.webContents.send('workspace-files-changed') } catch {}
+              try { currentBridge!.notifyWorkspaceChanged() } catch {}
             }
 
             const tcId = rawTc.id || `repair-${Date.now()}`
@@ -2150,22 +2165,22 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       if (repaired) {
         session.messages = messages
-        saveSession(session)
-        emitContextUsage(win, messages)
+        doSaveSession(session)
+        emitContextUsage( messages)
         continue
       }
 
       // Could not repair — give self-correction feedback without executing
       const rawName = rawToolCalls[0]?.function?.name ?? 'unknown'
       debugLog('TRUNCATED', `Could not repair ${rawName}, giving feedback`)
-      emit(win, { type: 'status', content: `⚠️ Tool call "${rawName}" обрезался — прошу модель разбить на части…` })
+      doEmit( { type: 'status', content: `⚠️ Tool call "${rawName}" обрезался — прошу модель разбить на части…` })
       messages.push({ role: 'assistant', content: `I tried to call ${rawName} but the content was too large and the JSON was truncated.` })
       messages.push({
         role: 'user',
         content: `Your ${rawName} tool call failed — the JSON arguments were truncated because the content was too large for a single generation. IMPORTANT: Break large file writes into smaller steps:\n1. First write_file with just the skeleton/structure (imports, basic HTML structure, empty function bodies) — under 80 lines\n2. Then use edit_file to fill in each section one at a time\n3. Or use append_file to add content incrementally\nNever put more than 100 lines of content in a single tool call.`,
       })
       session.messages = messages
-      saveSession(session)
+      doSaveSession(session)
       continue
     }
 
@@ -2177,19 +2192,19 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         debugLog('TEXT_TOOL', `Recovered ${textCalls.length} text-based tool call(s): ${textCalls.map((t) => t.name).join(', ')}`)
         const [thinking] = extractThinking(content)
         if (thinking) {
-          emit(win, { type: 'thinking', content: thinking })
+          doEmit( { type: 'thinking', content: thinking })
         }
 
-        const recoveredCustomTools = config.get('customTools')
+        const recoveredCustomTools = doGetConfig().customTools
         for (const tc of textCalls) {
-          emit(win, { type: 'tool_call', name: tc.name, args: tc.args })
+          doEmit( { type: 'tool_call', name: tc.name, args: tc.args })
 
           const isCustom = recoveredCustomTools.some((ct: any) => ct.name === tc.name)
           if (isCustom || NEEDS_APPROVAL.has(tc.name)) {
-            const approved = await requestApproval(win, tc.name, tc.args)
+            const approved = await doRequestApproval( tc.name, tc.args)
             if (!approved) {
               const deniedResult = `[Denied by user] Operation "${tc.name}" was not approved.`
-              emit(win, { type: 'tool_result', name: tc.name, result: deniedResult })
+              doEmit( { type: 'tool_result', name: tc.name, result: deniedResult })
               messages.push({ role: 'assistant', content: stripThinking(content) })
               messages.push({ role: 'user', content: deniedResult })
               break
@@ -2205,7 +2220,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
           }
 
           const uiResult = result.length > 5000 ? result.slice(0, 5000) + '\n… [truncated]' : result
-          emit(win, { type: 'tool_result', name: tc.name, result: uiResult })
+          doEmit( { type: 'tool_result', name: tc.name, result: uiResult })
 
           // Build proper tool_calls message format
           const callId = `text_tc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -2218,8 +2233,8 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         }
 
         session.messages = messages
-        saveSession(session)
-        emitContextUsage(win, messages)
+        doSaveSession(session)
+        emitContextUsage( messages)
         continue
       }
     }
@@ -2237,7 +2252,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       if (emptyRetries <= getMaxEmptyRetries()) {
         if (usageRatio > 0.5) {
-          emit(win, { type: 'status', content: `⚠️ Пустой ответ — обрезаю контекст и повторяю (${emptyRetries}/${getMaxEmptyRetries()})…` })
+          doEmit( { type: 'status', content: `⚠️ Пустой ответ — обрезаю контекст и повторяю (${emptyRetries}/${getMaxEmptyRetries()})…` })
           messages = tier4EmergencyPrune(messages)
           session.messages = messages
         } else {
@@ -2249,14 +2264,14 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
             : 'Please respond to the user\'s request. Think step by step and use tools as needed.'
           messages.push({ role: 'user', content: `[System: empty response detected, retry ${emptyRetries}/${getMaxEmptyRetries()}] ${nudge}` })
           debugLog('EMPTY', `Added nudge message (afterTool=${afterTool})`)
-          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${getMaxEmptyRetries()})…` })
+          doEmit( { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${getMaxEmptyRetries()})…` })
         }
-        saveSession(session)
+        doSaveSession(session)
         continue
       }
-      emit(win, { type: 'error', content: 'Модель вернула пустой ответ после нескольких попыток. Попробуйте переформулировать запрос или начать новый чат.' })
+      doEmit( { type: 'error', content: 'Модель вернула пустой ответ после нескольких попыток. Попробуйте переформулировать запрос или начать новый чат.' })
       session.updatedAt = Date.now()
-      saveSession(session)
+      doSaveSession(session)
       return 'Empty response after retries'
     }
     emptyRetries = 0
@@ -2267,12 +2282,12 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
     if (!toolCalls || toolCalls.length === 0) {
       const finalText = visible || content
       fullResponse += (fullResponse ? '\n\n' : '') + finalText
-      emit(win, { type: 'response', content: fullResponse, done: true })
+      doEmit( { type: 'response', content: fullResponse, done: true })
       // Store without <think> blocks to save context
       messages.push({ role: 'assistant', content: stripThinking(content) })
       session.messages = messages
       session.updatedAt = Date.now()
-      saveSession(session)
+      doSaveSession(session)
       return fullResponse
     }
 
@@ -2296,11 +2311,11 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         fullResponse += (fullResponse ? '\n\n' : '') + brokenText
       }
       const notice = 'Модель попыталась выполнить действие, но ответ был обрезан. Попробую ещё раз.'
-      emit(win, { type: 'status', content: `⚠️ ${notice}` })
+      doEmit( { type: 'status', content: `⚠️ ${notice}` })
       messages.push({ role: 'assistant', content: brokenText || notice })
       messages.push({ role: 'user', content: 'Your previous tool call was truncated and could not be parsed. Please try again, but break large file writes into smaller parts or use a shorter approach.' })
       session.messages = messages
-      saveSession(session)
+      doSaveSession(session)
       continue
     }
 
@@ -2315,7 +2330,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         toolArgs = {}
       }
 
-      emit(win, { type: 'tool_call', name: toolName, args: toolArgs })
+      doEmit( { type: 'tool_call', name: toolName, args: toolArgs })
 
       // Track files created this turn
       if ((toolName === 'write_file' || toolName === 'append_file' || toolName === 'create_directory') && toolArgs.path) {
@@ -2331,7 +2346,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         if (sameToolRepeatCount >= 2) {
           const skipMsg = `You already called ${toolName} with these exact arguments ${sameToolRepeatCount + 1} times. The result hasn't changed. Stop re-reading and proceed with the actual task. If you need to modify a file, use edit_file. If you're stuck, explain what you're trying to do.`
           messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: skipMsg })
-          emit(win, { type: 'tool_result', name: toolName, result: skipMsg })
+          doEmit( { type: 'tool_result', name: toolName, result: skipMsg })
           continue
         }
       } else {
@@ -2346,7 +2361,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         if (consecutiveReReads >= 3) {
           const skipMsg = `You just created ${toolArgs.path} in this session — its contents are exactly what you wrote. Instead of re-reading files you just created, continue with the next step of the task. What files still need to be created or modified?`
           messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: skipMsg })
-          emit(win, { type: 'tool_result', name: toolName, result: skipMsg })
+          doEmit( { type: 'tool_result', name: toolName, result: skipMsg })
           continue
         }
       } else {
@@ -2355,18 +2370,18 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
 
       // Request user approval for destructive operations or custom tools
       let result: string
-      const customTools = config.get('customTools')
+      const customTools = doGetConfig().customTools
       const isCustom = customTools.some((ct) => ct.name === toolName)
 
       const needsApproval = isApprovalRequired() && (isCustom || NEEDS_APPROVAL.has(toolName))
       if (needsApproval) {
-        const approved = await requestApproval(win, toolName, toolArgs)
+        const approved = await doRequestApproval( toolName, toolArgs)
         if (approved) {
           if (isCustom) {
             const ct = customTools.find((t) => t.name === toolName)!
             result = executeCustomTool(ct, toolArgs, workspace)
           } else {
-            result = executeTool(toolName, toolArgs, workspace)
+          result = executeTool(toolName, toolArgs, workspace)
           }
         } else {
           result = `[Denied by user] Operation "${toolName}" was not approved.`
@@ -2379,14 +2394,14 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       const uiResult = result.length > 5000
         ? result.slice(0, 5000) + `\n… [${Math.round(result.length / 1024)}KB total]`
         : result
-      emit(win, { type: 'tool_result', name: toolName, result: uiResult })
+      doEmit( { type: 'tool_result', name: toolName, result: uiResult })
 
       // Notify renderer to refresh file tree when agent modifies filesystem
       const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
       if (fsModTools.has(toolName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
         invalidateProjectContextCache()
         try {
-          win.webContents.send('workspace-files-changed')
+          try { currentBridge!.notifyWorkspaceChanged() } catch {}
         } catch {}
       }
 
@@ -2398,15 +2413,18 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
     }
 
     // Summarize/prune after each iteration to stay within budget
-    messages = await manageContext(messages, apiUrl, win, undefined, i)
+    messages = await manageContext(messages, apiUrl, undefined, i)
     session.messages = messages
-    emitContextUsage(win, messages)
+    emitContextUsage( messages)
   }
 
   const msg = 'Reached maximum iterations. Stopping.'
   fullResponse += (fullResponse ? '\n\n' : '') + msg
-  emit(win, { type: 'response', content: fullResponse, done: true })
+  doEmit( { type: 'response', content: fullResponse, done: true })
   session.updatedAt = Date.now()
-  saveSession(session)
+  doSaveSession(session)
   return fullResponse
+  } finally {
+    currentBridge = null
+  }
 }

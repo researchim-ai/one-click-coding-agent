@@ -20,6 +20,17 @@ export default defineConfig({
         },
       },
       {
+        entry: 'electron/agent-worker.ts',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: ['node-pty'],
+              output: { format: 'cjs' },
+            },
+          },
+        },
+      },
+      {
         entry: 'electron/preload.ts',
         onstart({ reload }) {
           reload()
