@@ -448,10 +448,32 @@ export function getActiveSessionId(): string | null {
   return activeSessionId
 }
 
-/** Called from main process when worker sends session-update (so main stays in sync and persists). */
-export function updateSessionFromWorker(session: Session): void {
+// Debounced session persist so main process doesn't block on every tool call
+let pendingSessionPersist: Session | null = null
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+const PERSIST_DEBOUNCE_MS = 1000
+
+function flushSessionPersist(): void {
+  if (pendingSessionPersist) {
+    const s = pendingSessionPersist
+    pendingSessionPersist = null
+    saveSession(s)
+  }
+  persistTimer = null
+}
+
+/** Called from main when worker sends session-update. In-memory update + debounced disk write. */
+export function updateSessionFromWorker(session: Session, immediate = false): void {
   sessions.set(session.id, session)
-  saveSession(session)
+  if (immediate) {
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = null
+    pendingSessionPersist = session
+    flushSessionPersist()
+  } else {
+    pendingSessionPersist = session
+    if (!persistTimer) persistTimer = setTimeout(flushSessionPersist, PERSIST_DEBOUNCE_MS)
+  }
 }
 
 export function saveUiMessages(id: string, uiMsgs: any[]): void {

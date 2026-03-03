@@ -313,6 +313,7 @@ function selectPresetForSize(
   perLayerVramMb: number,
 ): Preset {
   const arch = getArch()
+  // q8_0 KV cache: good balance of memory vs speed; recommended for long context (less VRAM/RAM for cache, still accurate)
   const kvType = { cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' }
   // mmap: only hot pages need physical RAM. For MoE only active experts are
   // accessed, but we use 85% to ensure stable performance without page thrashing.

@@ -374,6 +374,16 @@ export function start(
     '--cache-type-k', la.cacheTypeK,
     '--cache-type-v', la.cacheTypeV,
   ]
+  // Large context: bigger batch speeds up prompt ingestion (fewer steps). Default -b 2048, -ub 512.
+  if (la.ctxSize >= 131072) {
+    cmdArgs.push('--batch-size', '4096', '--ubatch-size', '1024')
+  } else if (la.ctxSize >= 65536) {
+    cmdArgs.push('--batch-size', '4096')
+  } else if (la.ctxSize >= 32768) {
+    cmdArgs.push('--batch-size', '2048')
+  }
+  // Lock model in RAM to avoid swap (consistent speed on local machine)
+  if (process.platform !== 'win32') cmdArgs.push('--mlock')
   if (la.tensorSplit) cmdArgs.push('--tensor-split', la.tensorSplit)
   if (la.flashAttn) cmdArgs.push('--flash-attn', 'on')
 

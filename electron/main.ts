@@ -1,8 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, nativeTheme } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import { Worker } from 'worker_threads'
 import type { FileTreeEntry } from './types'
+
+const SESSIONS_DIR = path.join(os.homedir(), '.one-click-agent', 'sessions')
+const SESSION_WRITE_YIELD_EVERY = 12 // yield to event loop every N messages (avoids "app not responding" with huge context)
 
 nativeTheme.themeSource = 'dark'
 
@@ -70,7 +74,7 @@ function getAgentWorker(): Worker {
           agentWorker?.postMessage({ type: 'query-ctx-result', id: msg.id, ctxSize: serverManager.getCtxSize() })
         })
       } else if (msg.type === 'done') {
-        if (msg.session) updateSessionFromWorker(msg.session)
+        if (msg.session) updateSessionFromWorker(msg.session, true)
         if (pendingSendResolve) {
           pendingSendResolve(msg.result ?? '')
           pendingSendResolve = null
@@ -252,6 +256,8 @@ app.whenReady().then(() => {
   initSessions()
   registerIpcHandlers()
   createWindow()
+  // Pre-create agent worker so first send-message doesn't block on Worker load
+  setImmediate(() => { try { getAgentWorker() } catch {} })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -426,16 +432,41 @@ function registerIpcHandlers() {
     if (!mainWindow) throw new Error('No window')
     return new Promise<string>((resolve) => {
       pendingSendResolve = resolve
-      const session = getActiveSession()
-      const payload = {
-        message: msg,
-        workspace,
-        config: config.load(),
-        session: { ...session, messages: [...session.messages], uiMessages: [...(session.uiMessages || [])] },
-        apiUrl: serverManager.llamaApiUrl(),
-        ctxSize: serverManager.getCtxSize() || 32768,
-      }
-      getAgentWorker().postMessage({ type: 'run', payload })
+      setImmediate(async () => {
+        const session = getActiveSession()
+        const configVal = config.load()
+        const apiUrl = serverManager.llamaApiUrl()
+        const ctxSize = serverManager.getCtxSize() || 32768
+        // With 262K context the session can be huge; postMessage(structured clone) would block main for seconds.
+        // Write session to disk with periodic yields, then pass path so worker loads it (main stays responsive).
+        fs.mkdirSync(SESSIONS_DIR, { recursive: true })
+        const sessionPath = path.join(SESSIONS_DIR, `${session.id}.json`)
+        const stream = fs.createWriteStream(sessionPath, { encoding: 'utf-8' })
+        const write = (s: string) => stream.write(s)
+        write('{"id":')
+        write(JSON.stringify(session.id))
+        write(',"title":')
+        write(JSON.stringify(session.title))
+        write(',"messages":[')
+        for (let i = 0; i < session.messages.length; i++) {
+          write((i ? ',' : '') + JSON.stringify(session.messages[i]))
+          if (i > 0 && i % SESSION_WRITE_YIELD_EVERY === 0) await new Promise<void>(r => setImmediate(r))
+        }
+        write('],"uiMessages":')
+        write(JSON.stringify(session.uiMessages || []))
+        write(',"projectContextAdded":')
+        write(String(session.projectContextAdded))
+        write(',"createdAt":')
+        write(String(session.createdAt))
+        write(',"updatedAt":')
+        write(String(session.updatedAt))
+        write('}')
+        await new Promise<void>((res, rej) => { stream.once('finish', res); stream.once('error', rej); stream.end() })
+        getAgentWorker().postMessage({
+          type: 'run',
+          payload: { message: msg, workspace, config: configVal, apiUrl, ctxSize, sessionPath },
+        })
+      })
     })
   })
 
@@ -473,39 +504,44 @@ function registerIpcHandlers() {
     'dist-electron', '.one-click-agent',
   ])
 
-  function readTree(dir: string, depth: number): FileTreeEntry[] {
+  async function readTree(dir: string, depth: number): Promise<FileTreeEntry[]> {
     if (depth <= 0) return []
     let entries: fs.Dirent[]
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
+      entries = await fs.promises.readdir(dir, { withFileTypes: true })
     } catch {
       return []
     }
-    return entries
+    const filtered = entries
       .filter((e) => !IGNORED.has(e.name) && !e.name.startsWith('.'))
       .sort((a, b) => {
         if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
         return a.name.localeCompare(b.name)
       })
-      .map((e) => {
-        const fullPath = path.join(dir, e.name)
-        if (e.isDirectory()) {
-          return { name: e.name, path: fullPath, isDir: true, children: readTree(fullPath, depth - 1) }
-        }
-        return { name: e.name, path: fullPath, isDir: false }
-      })
+    const out: FileTreeEntry[] = []
+    for (const e of filtered) {
+      const fullPath = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        out.push({ name: e.name, path: fullPath, isDir: true, children: await readTree(fullPath, depth - 1) })
+      } else {
+        out.push({ name: e.name, path: fullPath, isDir: false })
+      }
+    }
+    return out
   }
 
-  ipcMain.handle('list-files', (_e, workspace: string, dirPath?: string) => {
+  ipcMain.handle('list-files', async (_e, workspace: string, dirPath?: string) => {
     const target = dirPath ?? workspace
     if (!target) return []
     return readTree(target, 4)
   })
 
-  ipcMain.handle('read-file-content', (_e, filePath: string) => {
+  ipcMain.handle('read-file-content', async (_e, filePath: string) => {
     try {
-      const content = fs.readFileSync(filePath, 'utf-8')
-      const stat = fs.statSync(filePath)
+      const [content, stat] = await Promise.all([
+        fs.promises.readFile(filePath, 'utf-8'),
+        fs.promises.stat(filePath),
+      ])
       return { content, size: stat.size, lines: content.split('\n').length }
     } catch (e: any) {
       throw new Error(`Cannot read file: ${e.message}`)

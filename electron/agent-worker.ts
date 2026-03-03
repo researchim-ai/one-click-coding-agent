@@ -1,9 +1,11 @@
 /**
  * Agent worker: runs runAgent in a separate thread so the main process stays responsive.
  * Main posts { type: 'run', payload } and receives { type: 'emit'|'approval'|'session-update'|'done' }.
+ * When payload.sessionPath is set, session is loaded from disk (avoids huge postMessage with 262K context).
  */
 
 import { parentPort } from 'worker_threads'
+import fs from 'fs'
 import { runAgent, type AgentBridge, type Session } from './agent'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
@@ -96,7 +98,14 @@ parentPort.on('message', async (msg: any) => {
   }
   if (msg.type === 'run') {
     workerCancelRequested = false
-    const { message, workspace, config, session, apiUrl, ctxSize } = msg.payload
+    const { message, workspace, config, session: payloadSession, apiUrl, ctxSize, sessionPath } = msg.payload
+    let session: Session
+    if (sessionPath) {
+      const raw = await fs.promises.readFile(sessionPath, 'utf-8')
+      session = JSON.parse(raw) as Session
+    } else {
+      session = payloadSession
+    }
     const bridge = createWorkerBridge({ message, workspace, config, session, apiUrl, ctxSize })
     try {
       const result = await runAgent(message, workspace, bridge)
