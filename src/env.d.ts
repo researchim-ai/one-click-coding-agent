@@ -49,6 +49,12 @@ interface ElectronAPI {
   onMenuAction(cb: (action: string) => void): () => void
   onWorkspaceFilesChanged(cb: () => void): () => void
 
+  // Window controls
+  winMinimize(): void
+  winMaximize(): void
+  winClose(): void
+  winIsMaximized(): Promise<boolean>
+
   // File operations
   createFile(filePath: string): Promise<void>
   createDirectory(dirPath: string): Promise<void>

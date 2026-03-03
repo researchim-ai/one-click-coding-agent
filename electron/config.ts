@@ -17,6 +17,11 @@ export interface AppConfig {
   customTools: CustomTool[]
   systemPrompt: string | null
   summarizePrompt: string | null
+  maxIterations: number
+  temperature: number
+  idleTimeoutSec: number
+  maxEmptyRetries: number
+  approvalRequired: boolean
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -25,6 +30,11 @@ const DEFAULT_CONFIG: AppConfig = {
   customTools: [],
   systemPrompt: null,
   summarizePrompt: null,
+  maxIterations: 200,
+  temperature: 0.3,
+  idleTimeoutSec: 60,
+  maxEmptyRetries: 3,
+  approvalRequired: true,
 }
 
 export function resetToDefaults(): AppConfig {

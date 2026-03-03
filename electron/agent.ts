@@ -25,10 +25,14 @@ function debugLog(category: string, ...args: any[]) {
 
 const NEEDS_APPROVAL = new Set(['execute_command', 'write_file', 'edit_file', 'delete_file', 'append_file'])
 
-const MAX_ITERATIONS = 30
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
-const MAX_EMPTY_RETRIES = 3
+
+function getMaxIterations(): number { return config.get('maxIterations') || 200 }
+function getBaseTemperature(): number { return config.get('temperature') ?? 0.3 }
+function getIdleTimeoutMs(): number { return (config.get('idleTimeoutSec') || 60) * 1000 }
+function getMaxEmptyRetries(): number { return config.get('maxEmptyRetries') || 3 }
+function isApprovalRequired(): boolean { return config.get('approvalRequired') ?? true }
 
 // Graduated compression thresholds (fraction of message budget)
 const COMPRESS_TOOL_RESULTS_AT = 0.35
@@ -598,7 +602,7 @@ async function streamLlmResponse(
 ): Promise<StreamResult> {
   const cleanMsgs = sanitizeMessages(msgs)
   const maxTok = (maxTokensOverride && maxTokensOverride > 0) ? maxTokensOverride : getMaxResponseTokens()
-  const temp = temperatureOverride ?? 0.3
+  const temp = temperatureOverride ?? getBaseTemperature()
   const msgRoles = cleanMsgs.map((m) => m.role + (m.tool_calls ? `(${m.tool_calls.length}tc)` : '')).join(', ')
   debugLog('STREAM', `Sending request: ${cleanMsgs.length} msgs [${msgRoles}], max_tokens=${maxTok}, temp=${temp}, ctx=${ctxTokens()}, budget=${getMessageBudget()}, used=${estimateContextTokens(cleanMsgs)}`)
 
@@ -646,7 +650,7 @@ async function streamLlmResponse(
   let finishReason: string | null = null
 
   // Idle timeout: abort if no data received for 60s (server stalled)
-  const IDLE_TIMEOUT_MS = 60000
+  const IDLE_TIMEOUT_MS = getIdleTimeoutMs()
   let idleTimer: ReturnType<typeof setTimeout> | null = null
   let chunkCount = 0
   const resetIdle = () => {
@@ -1989,7 +1993,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
   let lastToolSig = ''
   let sameToolRepeatCount = 0
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
+  for (let i = 0; i < getMaxIterations(); i++) {
     if (cancelRequested) {
       emit(win, { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
       session.updatedAt = Date.now()
@@ -2034,7 +2038,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       // No fixed total timeout — idle timeout inside streamLlmResponse handles stalls
       // Only abort on user cancel or server idle (120s no data)
 
-      const retryTemp = emptyRetries > 0 ? 0.3 + emptyRetries * 0.2 : undefined
+      const retryTemp = emptyRetries > 0 ? getBaseTemperature() + emptyRetries * 0.2 : undefined
       streamResult = await streamLlmResponse(apiUrl, messages, win, fullResponse, controller.signal, effectiveMaxTokens, retryTemp)
     } catch (e: any) {
       debugLog('ERROR', `Catch in runAgent: name=${e?.name}, message=${e?.message}, cancelRequested=${cancelRequested}, stack=${(e?.stack ?? '').slice(0, 500)}`)
@@ -2231,9 +2235,9 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       debugLog('EMPTY', `Empty response #${emptyRetries + 1}, msgs=${messages.length}, tokens=${usedTokens}, budget=${budgetNow}, usage=${(usageRatio * 100).toFixed(0)}%`)
       emptyRetries++
 
-      if (emptyRetries <= MAX_EMPTY_RETRIES) {
+      if (emptyRetries <= getMaxEmptyRetries()) {
         if (usageRatio > 0.5) {
-          emit(win, { type: 'status', content: `⚠️ Пустой ответ — обрезаю контекст и повторяю (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
+          emit(win, { type: 'status', content: `⚠️ Пустой ответ — обрезаю контекст и повторяю (${emptyRetries}/${getMaxEmptyRetries()})…` })
           messages = tier4EmergencyPrune(messages)
           session.messages = messages
         } else {
@@ -2243,9 +2247,9 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
           const nudge = afterTool
             ? 'The tool above returned a result. Please analyze it and continue with the task. Respond in the user\'s language.'
             : 'Please respond to the user\'s request. Think step by step and use tools as needed.'
-          messages.push({ role: 'user', content: `[System: empty response detected, retry ${emptyRetries}/${MAX_EMPTY_RETRIES}] ${nudge}` })
+          messages.push({ role: 'user', content: `[System: empty response detected, retry ${emptyRetries}/${getMaxEmptyRetries()}] ${nudge}` })
           debugLog('EMPTY', `Added nudge message (afterTool=${afterTool})`)
-          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
+          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${getMaxEmptyRetries()})…` })
         }
         saveSession(session)
         continue
@@ -2354,7 +2358,8 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       const customTools = config.get('customTools')
       const isCustom = customTools.some((ct) => ct.name === toolName)
 
-      if (isCustom || NEEDS_APPROVAL.has(toolName)) {
+      const needsApproval = isApprovalRequired() && (isCustom || NEEDS_APPROVAL.has(toolName))
+      if (needsApproval) {
         const approved = await requestApproval(win, toolName, toolArgs)
         if (approved) {
           if (isCustom) {

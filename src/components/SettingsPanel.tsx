@@ -8,7 +8,7 @@ interface Props {
   initialTab?: string
 }
 
-type Tab = 'model' | 'tools' | 'prompts'
+type Tab = 'model' | 'agent' | 'tools' | 'prompts'
 
 const CTX_OPTIONS = [
   { value: 262144, label: '262K' },
@@ -52,6 +52,14 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
   const [editingTool, setEditingTool] = useState<CustomTool | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
+  // Agent params state
+  const [maxIterations, setMaxIterations] = useState(200)
+  const [temperature, setTemperature] = useState(0.3)
+  const [idleTimeoutSec, setIdleTimeoutSec] = useState(60)
+  const [maxEmptyRetries, setMaxEmptyRetries] = useState(3)
+  const [approvalRequired, setApprovalRequired] = useState(true)
+  const [agentDirty, setAgentDirty] = useState(false)
+
   // Prompts state
   const [sysPrompt, setSysPrompt] = useState('')
   const [sumPrompt, setSumPrompt] = useState('')
@@ -61,7 +69,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
 
   useEffect(() => {
     if (initialTab) {
-      const mapped = initialTab === 'prompts' ? 'prompts' : initialTab === 'tools' ? 'tools' : 'model'
+      const mapped = initialTab === 'prompts' ? 'prompts' : initialTab === 'tools' ? 'tools' : initialTab === 'agent' ? 'agent' : 'model'
       setTab(mapped)
     }
   }, [initialTab, open])
@@ -84,6 +92,13 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       const max = variant?.maxCtx ?? 32768
       setSelectedCtx((c.ctxSize && c.ctxSize > 0) ? Math.min(c.ctxSize, max) : max)
       setDirty(false)
+
+      setMaxIterations(c.maxIterations ?? 200)
+      setTemperature(c.temperature ?? 0.3)
+      setIdleTimeoutSec(c.idleTimeoutSec ?? 60)
+      setMaxEmptyRetries(c.maxEmptyRetries ?? 3)
+      setApprovalRequired(c.approvalRequired ?? true)
+      setAgentDirty(false)
 
       setSysPrompt(p.systemPrompt ?? p.defaultSystemPrompt)
       setSumPrompt(p.summarizePrompt ?? p.defaultSummarizePrompt)
@@ -195,7 +210,8 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
   }
 
   const tabs: { key: Tab; label: string }[] = [
-    { key: 'model', label: 'Модель и контекст' },
+    { key: 'model', label: 'Модель' },
+    { key: 'agent', label: 'Агент' },
     { key: 'tools', label: 'Инструменты' },
     { key: 'prompts', label: 'Промпты' },
   ]
@@ -247,6 +263,23 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               onCtxChange={(c: number) => { setSelectedCtx(c); setDirty(true) }}
             />
           )}
+          {tab === 'agent' && (
+            <AgentTab
+              maxIterations={maxIterations}
+              temperature={temperature}
+              idleTimeoutSec={idleTimeoutSec}
+              maxEmptyRetries={maxEmptyRetries}
+              approvalRequired={approvalRequired}
+              onChange={(field, value) => {
+                if (field === 'maxIterations') setMaxIterations(value as number)
+                else if (field === 'temperature') setTemperature(value as number)
+                else if (field === 'idleTimeoutSec') setIdleTimeoutSec(value as number)
+                else if (field === 'maxEmptyRetries') setMaxEmptyRetries(value as number)
+                else if (field === 'approvalRequired') setApprovalRequired(value as boolean)
+                setAgentDirty(true)
+              }}
+            />
+          )}
           {tab === 'tools' && (
             <ToolsTab
               tools={tools}
@@ -283,6 +316,23 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors disabled:opacity-50"
             >
               {saving ? 'Перезапуск…' : 'Применить и перезапустить'}
+            </button>
+          </div>
+        )}
+
+        {tab === 'agent' && agentDirty && (
+          <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
+            <span className="text-xs text-zinc-500 flex-1">
+              Изменения применяются сразу к следующему сообщению
+            </span>
+            <button
+              onClick={async () => {
+                await window.api.saveConfig({ maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalRequired })
+                setAgentDirty(false)
+              }}
+              className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors"
+            >
+              Сохранить
             </button>
           </div>
         )}
@@ -421,6 +471,103 @@ function ModelTab({
             </button>
           ))}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Agent tab
+// ---------------------------------------------------------------------------
+
+function AgentTab({
+  maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalRequired, onChange,
+}: {
+  maxIterations: number
+  temperature: number
+  idleTimeoutSec: number
+  maxEmptyRetries: number
+  approvalRequired: boolean
+  onChange: (field: string, value: number | boolean) => void
+}) {
+  return (
+    <div className="space-y-5">
+      {/* Max iterations */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-sm text-zinc-300">Макс. итераций агента</label>
+          <span className="text-sm font-mono text-zinc-400">{maxIterations}</span>
+        </div>
+        <input
+          type="range" min={10} max={500} step={10} value={maxIterations}
+          onChange={(e) => onChange('maxIterations', parseInt(e.target.value))}
+          className="w-full accent-blue-500"
+        />
+        <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
+          <span>10</span><span>Сколько шагов агент может сделать за один запрос</span><span>500</span>
+        </div>
+      </div>
+
+      {/* Temperature */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-sm text-zinc-300">Температура</label>
+          <span className="text-sm font-mono text-zinc-400">{temperature.toFixed(2)}</span>
+        </div>
+        <input
+          type="range" min={0} max={1.5} step={0.05} value={temperature}
+          onChange={(e) => onChange('temperature', parseFloat(e.target.value))}
+          className="w-full accent-blue-500"
+        />
+        <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
+          <span>0 (точно)</span><span>Креативность модели</span><span>1.5 (хаотично)</span>
+        </div>
+      </div>
+
+      {/* Idle timeout */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-sm text-zinc-300">Таймаут бездействия (сек)</label>
+          <span className="text-sm font-mono text-zinc-400">{idleTimeoutSec}с</span>
+        </div>
+        <input
+          type="range" min={15} max={300} step={5} value={idleTimeoutSec}
+          onChange={(e) => onChange('idleTimeoutSec', parseInt(e.target.value))}
+          className="w-full accent-blue-500"
+        />
+        <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
+          <span>15с</span><span>Сколько ждать ответа модели без данных</span><span>300с</span>
+        </div>
+      </div>
+
+      {/* Max empty retries */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-sm text-zinc-300">Ретраи при пустом ответе</label>
+          <span className="text-sm font-mono text-zinc-400">{maxEmptyRetries}</span>
+        </div>
+        <input
+          type="range" min={1} max={10} step={1} value={maxEmptyRetries}
+          onChange={(e) => onChange('maxEmptyRetries', parseInt(e.target.value))}
+          className="w-full accent-blue-500"
+        />
+        <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
+          <span>1</span><span>Сколько раз повторять при пустом ответе</span><span>10</span>
+        </div>
+      </div>
+
+      {/* Approval toggle */}
+      <div className="flex items-center justify-between py-2 border-t border-zinc-800">
+        <div>
+          <div className="text-sm text-zinc-300">Подтверждение действий</div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на запись файлов и команды</div>
+        </div>
+        <button
+          onClick={() => onChange('approvalRequired', !approvalRequired)}
+          className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${approvalRequired ? 'bg-blue-600' : 'bg-zinc-700'}`}
+        >
+          <div className={`w-4.5 h-4.5 rounded-full bg-white absolute top-[3px] transition-transform ${approvalRequired ? 'translate-x-[22px]' : 'translate-x-[3px]'}`} />
+        </button>
       </div>
     </div>
   )

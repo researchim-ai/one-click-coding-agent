@@ -79,6 +79,12 @@ contextBridge.exposeInMainWorld('api', {
   revealInExplorer: (targetPath: string): Promise<void> => ipcRenderer.invoke('reveal-in-explorer', targetPath),
   openInTerminalPath: (dirPath: string): Promise<string> => ipcRenderer.invoke('open-in-terminal-path', dirPath),
 
+  // Window controls (frameless)
+  winMinimize: () => ipcRenderer.send('win-minimize'),
+  winMaximize: () => ipcRenderer.send('win-maximize'),
+  winClose: () => ipcRenderer.send('win-close'),
+  winIsMaximized: (): Promise<boolean> => ipcRenderer.invoke('win-is-maximized'),
+
   // Terminal
   terminalCreate: (cwd: string): Promise<string> => ipcRenderer.invoke('terminal-create', cwd),
   terminalInput: (id: string, data: string) => ipcRenderer.send('terminal-input', id, data),

@@ -10,6 +10,7 @@ import { SetupWizard } from './components/SetupWizard'
 import { StatusBar } from './components/StatusBar'
 import { SessionTabs } from './components/SessionTabs'
 import { SettingsPanel } from './components/SettingsPanel'
+import { TitleBar } from './components/TitleBar'
 import { useState, useEffect, useCallback } from 'react'
 
 export function App() {
@@ -158,13 +159,18 @@ export function App() {
 
   return (
     <div className="h-screen flex flex-col bg-zinc-950 text-zinc-50">
-      {/* Global top bar */}
-      {!showSetup && (
-        <div className="h-9 bg-[#010409] border-b border-zinc-800/60 flex items-center px-3 shrink-0 gap-3 select-none" style={{ WebkitAppRegion: 'drag' } as any}>
-          <span className="text-[11px] font-semibold text-zinc-500 tracking-wide" style={{ WebkitAppRegion: 'no-drag' } as any}>
+      {/* Title bar with window controls */}
+      {showSetup ? (
+        <TitleBar>
+          <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
             ⚡ One-Click Agent
           </span>
-          <div className="flex-1" />
+        </TitleBar>
+      ) : (
+        <TitleBar>
+          <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
+            ⚡ One-Click Agent
+          </span>
           <button
             onClick={() => { setSettingsTab('model'); setSettingsOpen(true) }}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/80 cursor-pointer transition-colors"
@@ -177,7 +183,7 @@ export function App() {
             </svg>
             Настройки
           </button>
-        </div>
+        </TitleBar>
       )}
 
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} initialTab={settingsTab} />

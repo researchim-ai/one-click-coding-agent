@@ -1,7 +1,19 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, nativeTheme } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import type { FileTreeEntry } from './types'
+
+nativeTheme.themeSource = 'dark'
+
+// Force dark GTK theme for native menu bar on Linux
+if (process.platform === 'linux') {
+  process.env.GTK_THEME = 'Adwaita:dark'
+  app.commandLine.appendSwitch('force-dark-mode')
+}
+// Force dark title bar on Windows
+if (process.platform === 'win32') {
+  app.commandLine.appendSwitch('force-dark-mode')
+}
 
 if (process.env.ELECTRON_NO_SANDBOX || process.argv.includes('--no-sandbox')) {
   app.commandLine.appendSwitch('no-sandbox')
@@ -141,6 +153,8 @@ function createWindow() {
     minHeight: 600,
     title: 'One-Click Coding Agent',
     backgroundColor: '#09090b',
+    darkTheme: true,
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -259,6 +273,15 @@ function registerIpcHandlers() {
     console.log(`[restart-server] Server ready, actual ctx=${actualCtx}`)
     return { requestedCtx: ctxSize, actualCtx }
   })
+
+  // Window control handlers (frameless window)
+  ipcMain.on('win-minimize', () => mainWindow?.minimize())
+  ipcMain.on('win-maximize', () => {
+    if (mainWindow?.isMaximized()) mainWindow.unmaximize()
+    else mainWindow?.maximize()
+  })
+  ipcMain.on('win-close', () => mainWindow?.close())
+  ipcMain.handle('win-is-maximized', () => mainWindow?.isMaximized() ?? false)
 
   ipcMain.handle('get-status', async () => {
     const running = serverManager.isRunning()
