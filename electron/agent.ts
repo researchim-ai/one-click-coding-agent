@@ -134,17 +134,21 @@ export const DEFAULT_SYSTEM_PROMPT = `You are an expert software engineer workin
 - Respond in the same language the user writes in
 - If a task is ambiguous, state your interpretation and proceed`
 
-export const DEFAULT_SUMMARIZE_PROMPT = `You are a conversation compressor. Summarize the following conversation between a user and an AI coding agent.
+export const DEFAULT_SUMMARIZE_PROMPT = `You are compacting an AI coding agent's conversation history. Create a STRUCTURED summary the agent can use to continue working seamlessly.
 
-Create a structured summary preserving:
-1. All tasks requested and outcomes (completed / failed / in-progress)
-2. Files read, created, modified, or deleted (full paths)
-3. Key technical decisions and reasoning
-4. Current project state and pending work
-5. Important errors encountered and how they were resolved
+CRITICAL — preserve these sections:
+1. **CURRENT STEP**: What was the agent doing right now? What was the last action and its result?
+2. **PLAN**: What steps remain? What is the overall approach? List numbered steps.
+3. **FILES**: ALL file paths mentioned — created, modified, read, deleted. Use full paths.
+4. **WHAT WORKED**: Successful operations and their key results (1 line each).
+5. **WHAT FAILED**: Errors encountered, approaches that did NOT work, and why. Include error messages verbatim.
+6. **DECISIONS**: Key technical decisions and alternatives considered.
+7. **NEXT ACTION**: What should the agent do immediately next?
 
-Be concise but keep all critical details: file paths, function names, error messages, architecture decisions.
-Format as a compact bullet list. Use markdown.
+Rules:
+- Be extremely concise but preserve ALL file paths and error messages verbatim.
+- Use bullet points, not prose.
+- The agent will use this summary to continue — omitting details means lost work.
 
 CONVERSATION:
 `
@@ -755,14 +759,37 @@ function getMessageBudget(): number {
 function dynamicToolResultLimit(): number {
   const budget = getMessageBudget()
   const charBudget = Math.floor(budget * calibratedRatio)
+  // On small contexts, limit tool results much harder to prevent context bloat
+  if (budget < 8000) return Math.min(Math.max(800, Math.floor(charBudget * 0.08)), 3000)
+  if (budget < 15000) return Math.min(Math.max(1200, Math.floor(charBudget * 0.10)), 5000)
   return Math.min(Math.max(1500, Math.floor(charBudget * 0.15)), 40000)
 }
 
 function smartTruncateToolResult(toolName: string, result: string, maxChars: number): string {
   if (result.length <= maxChars) return result
 
-  // For file reads — keep head/tail structure (usually you want both top and bottom)
+  // For file reads — context-aware auto-limiting
   if (toolName === 'read_file') {
+    const budget = getMessageBudget()
+    const lines = result.split('\n')
+    const totalLines = lines.length
+
+    // On small contexts, aggressively limit line count even if chars would fit
+    let maxLines = Infinity
+    if (budget < 8000) maxLines = 100
+    else if (budget < 15000) maxLines = 200
+    else if (budget < 30000) maxLines = 400
+
+    if (totalLines > maxLines && maxLines < Infinity) {
+      const headCount = Math.floor(maxLines * 0.6)
+      const tailCount = Math.floor(maxLines * 0.35)
+      const head = lines.slice(0, headCount).join('\n')
+      const tail = lines.slice(-tailCount).join('\n')
+      const hint = `\n\n… [${totalLines} lines total, showing first ${headCount} + last ${tailCount}. Use offset/limit params to read specific sections.]\n\n`
+      const truncated = head + hint + tail
+      return truncated.length <= maxChars ? truncated : compressToolResultText(result, maxChars)
+    }
+
     return compressToolResultText(result, maxChars)
   }
 
@@ -1074,20 +1101,49 @@ function toolCallOneLiner(msg: Message): string {
 
 interface WorkingMemory {
   currentTask: string
+  currentPlan: string[]
+  approach: string
   filesModified: string[]
+  filesRead: string[]
   keyFacts: string[]
+  lastResults: string[]
 }
 
 function extractWorkingMemory(msgs: Message[]): WorkingMemory {
-  const mem: WorkingMemory = { currentTask: '', filesModified: [], keyFacts: [] }
+  const mem: WorkingMemory = {
+    currentTask: '', currentPlan: [], approach: '',
+    filesModified: [], filesRead: [], keyFacts: [], lastResults: [],
+  }
   const modifiedFiles = new Set<string>()
+  const readFiles = new Set<string>()
 
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i]
+
+    // Extract current task from last user message
     if (m.role === 'user' && !mem.currentTask) {
-      const clean = (m.content ?? '').replace(/```[\s\S]*?```/g, '').trim()
-      mem.currentTask = clean.length > 300 ? clean.slice(0, 297) + '…' : clean
+      const clean = (m.content ?? '').replace(/```[\s\S]*?```/g, '').replace(/\[Context was compacted[\s\S]*?\]/, '').trim()
+      if (clean.length > 5) {
+        mem.currentTask = clean.length > 300 ? clean.slice(0, 297) + '…' : clean
+      }
     }
+
+    // Extract plan (numbered lists) and approach from assistant messages
+    if (m.role === 'assistant' && m.content && mem.currentPlan.length === 0) {
+      const text = stripThinking(m.content ?? '')
+      // Look for numbered plan: "1. ...", "2. ..." etc.
+      const planMatch = text.match(/(?:^|\n)\s*\d+[\.\)]\s+.+/g)
+      if (planMatch && planMatch.length >= 2) {
+        mem.currentPlan = planMatch.slice(0, 6).map((s) => s.trim().slice(0, 120))
+      }
+      // Approach: first meaningful sentence of the last assistant content
+      if (!mem.approach && text.length > 10) {
+        const firstSentence = text.replace(/\n/g, ' ').match(/^(.{10,200}?[.!?])/)
+        if (firstSentence) mem.approach = firstSentence[1]
+      }
+    }
+
+    // Track files modified and read
     if (m.role === 'assistant' && m.tool_calls) {
       for (const tc of m.tool_calls) {
         const name = tc.function?.name
@@ -1101,9 +1157,14 @@ function extractWorkingMemory(msgs: Message[]): WorkingMemory {
           if (name === 'create_directory' && args.path) {
             modifiedFiles.add(args.path + '/')
           }
+          if (name === 'read_file' && args.path) {
+            readFiles.add(args.path)
+          }
         } catch {}
       }
     }
+
+    // Extract key facts and last significant results
     if (m.role === 'tool' && m.content) {
       const c = m.content
       if (c.startsWith('Error') || c.includes('Exit code: 1')) {
@@ -1112,10 +1173,18 @@ function extractWorkingMemory(msgs: Message[]): WorkingMemory {
           mem.keyFacts.push(line.slice(0, 150))
         }
       }
+      // Track last significant results (both success and error)
+      if (mem.lastResults.length < 3) {
+        const firstLine = c.split('\n')[0] ?? ''
+        if (firstLine.length > 5) {
+          mem.lastResults.push(firstLine.slice(0, 100))
+        }
+      }
     }
   }
 
   mem.filesModified = [...modifiedFiles].slice(0, 20)
+  mem.filesRead = [...readFiles].slice(0, 15)
   return mem
 }
 
@@ -1124,11 +1193,26 @@ function formatWorkingMemory(mem: WorkingMemory): string {
   if (mem.currentTask) {
     parts.push(`**Current task:** ${mem.currentTask}`)
   }
+  if (mem.approach) {
+    parts.push(`**Current approach:** ${mem.approach}`)
+  }
+  if (mem.currentPlan.length > 0) {
+    parts.push(`**Plan:**\n${mem.currentPlan.join('\n')}`)
+  }
   if (mem.filesModified.length > 0) {
-    parts.push(`**Files already created/modified (do NOT re-read these):** ${mem.filesModified.join(', ')}`)
+    parts.push(`**Files created/modified (do NOT re-read):** ${mem.filesModified.join(', ')}`)
+  }
+  if (mem.filesRead.length > 0) {
+    const readOnly = mem.filesRead.filter((f) => !mem.filesModified.includes(f))
+    if (readOnly.length > 0) {
+      parts.push(`**Files already read (use offset/limit if needed again):** ${readOnly.join(', ')}`)
+    }
   }
   if (mem.keyFacts.length > 0) {
-    parts.push(`**Key context:**\n${mem.keyFacts.map((f) => `- ${f}`).join('\n')}`)
+    parts.push(`**Key facts:**\n${mem.keyFacts.map((f) => `- ${f}`).join('\n')}`)
+  }
+  if (mem.lastResults.length > 0) {
+    parts.push(`**Recent results:** ${mem.lastResults.join(' | ')}`)
   }
   return parts.join('\n')
 }
@@ -1143,6 +1227,14 @@ function formatWorkingMemory(mem: WorkingMemory): string {
 function tier1CompressOldToolResults(msgs: Message[]): { msgs: Message[]; saved: number } {
   let saved = 0
   const result = [...msgs]
+  const budget = getMessageBudget()
+
+  // Adaptive limits based on context size
+  const oldThreshold = budget < 8000 ? 300 : budget < 15000 ? 500 : 800
+  const oldLimit = budget < 8000 ? 150 : budget < 15000 ? 250 : 400
+  // Also compress recent results on small contexts (but less aggressively)
+  const recentThreshold = budget < 8000 ? 600 : budget < 15000 ? 1200 : Infinity
+  const recentLimit = budget < 8000 ? 300 : budget < 15000 ? 600 : Infinity
 
   const recentTurns = keepRecentTurns()
   let recentStart = result.length
@@ -1154,10 +1246,16 @@ function tier1CompressOldToolResults(msgs: Message[]): { msgs: Message[]; saved:
     }
   }
 
-  for (let i = 0; i < recentStart; i++) {
+  for (let i = 0; i < result.length; i++) {
     const m = result[i]
-    if (m.role === 'tool' && m.content && m.content.length > 800) {
-      const compressed = compressToolResultText(m.content, 400)
+    if (m.role !== 'tool' || !m.content) continue
+
+    const isOld = i < recentStart
+    const threshold = isOld ? oldThreshold : recentThreshold
+    const limit = isOld ? oldLimit : recentLimit
+
+    if (m.content.length > threshold) {
+      const compressed = compressToolResultText(m.content, limit)
       saved += m.content.length - compressed.length
       result[i] = { ...m, content: compressed }
     }
@@ -1254,8 +1352,6 @@ async function tier3Summarize(
   const recentMessages = msgs.slice(recentStart)
 
   if (oldMessages.length < 3) return msgs
-
-  emit(win, { type: 'status', content: '🗜️ Суммаризация старой истории…' })
 
   const workingMem = extractWorkingMemory(msgs)
 
@@ -1470,14 +1566,60 @@ function injectWorkingMemory(msgs: Message[], originalMsgs: Message[]): Message[
 }
 
 // ---------------------------------------------------------------------------
+// Rehydration: guide model after compaction so it doesn't re-read everything
+// ---------------------------------------------------------------------------
+
+function getLastToolAction(msgs: Message[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      const names = m.tool_calls.map((tc) => {
+        const name = tc.function?.name ?? '?'
+        try {
+          const args = typeof tc.function?.arguments === 'string'
+            ? JSON.parse(tc.function.arguments) : tc.function?.arguments
+          const target = args?.path ?? args?.command?.slice(0, 60) ?? ''
+          return target ? `${name}(${target})` : name
+        } catch { return name }
+      })
+      return names.join(', ')
+    }
+  }
+  return 'unknown'
+}
+
+function injectRehydrationHint(msgs: Message[], originalMsgs: Message[]): Message[] {
+  const mem = extractWorkingMemory(originalMsgs)
+  const lastAction = getLastToolAction(originalMsgs)
+  const recentFiles = mem.filesModified.slice(-3)
+
+  const parts: string[] = [
+    '[Context was compacted to save space. Summary of earlier work is in the system prompt above.]',
+  ]
+  if (lastAction !== 'unknown') {
+    parts.push(`Your last action was: ${lastAction}`)
+  }
+  if (recentFiles.length > 0) {
+    parts.push(`Files you were working on: ${recentFiles.join(', ')}`)
+  }
+  parts.push('Continue from where you left off. Do NOT re-read files you already read unless you need a specific section (use offset/limit). Proceed with the next step of the task.')
+
+  msgs.push({ role: 'user', content: parts.join('\n') })
+  return msgs
+}
+
+// ---------------------------------------------------------------------------
 // Main context management — graduated compression pipeline
 // ---------------------------------------------------------------------------
+
+let lastTier3Iteration = -10
 
 async function manageContext(
   msgs: Message[],
   apiUrl: string,
   win: BrowserWindow,
   signal?: AbortSignal,
+  iteration?: number,
 ): Promise<Message[]> {
   const budget = getMessageBudget()
   let tokens = estimateContextTokens(msgs)
@@ -1514,12 +1656,18 @@ async function manageContext(
     }
   }
 
-  // Tier 3: LLM summarization
-  if (tokens > budget * SUMMARIZE_AT) {
+  // Tier 3: LLM summarization (with cooldown to avoid spamming on small contexts)
+  const iter = iteration ?? 0
+  const tier3Cooldown = budget < 8000 ? 5 : budget < 15000 ? 3 : 2
+  const tier3Ready = (iter - lastTier3Iteration) >= tier3Cooldown
+
+  if (tokens > budget * SUMMARIZE_AT && tier3Ready) {
     const nonSystem = current.filter((m) => m.role !== 'system')
     if (nonSystem.length >= 4) {
       current = await tier3Summarize(current, apiUrl, win, signal)
+      lastTier3Iteration = iter
       tokens = estimateContextTokens(current)
+      current = injectRehydrationHint(current, originalMsgs)
       if (tokens <= budget * EMERGENCY_AT) return current
     }
   }
@@ -1528,20 +1676,29 @@ async function manageContext(
   if (tokens > budget * EMERGENCY_AT) {
     emit(win, { type: 'status', content: '⚠️ Экстренная обрезка контекста' })
     current = tier4EmergencyPrune(current)
+    current = injectRehydrationHint(current, originalMsgs)
   }
 
   return current
 }
 
+// Cached project context — invalidated on workspace change
+let projectContextCache: { ws: string; ctx: string; ts: number } | null = null
+const PROJECT_CTX_CACHE_TTL = 60000
+
+export function invalidateProjectContextCache() {
+  projectContextCache = null
+}
+
 function getProjectContext(ws: string): string {
   try {
-    const ctx_size = ctxTokens()
-    // On small contexts, project info is luxury — keep minimal
-    const budgetFraction = ctx_size < 16384 ? 0.15 : ctx_size < 32768 ? 0.25 : 0.4
-    const budgetForCtx = Math.max(Math.floor(getMessageBudget() * budgetFraction), 300)
+    // Return cached if fresh
+    if (projectContextCache && projectContextCache.ws === ws && (Date.now() - projectContextCache.ts) < PROJECT_CTX_CACHE_TTL) {
+      return budgetTrimProjectContext(projectContextCache.ctx)
+    }
 
-    const depth = budgetForCtx > 2000 ? 2 : 1
-    const tree = executeTool('list_directory', { depth }, ws)
+    // Build full context (cached at max detail level)
+    const tree = executeTool('list_directory', { depth: 2 }, ws)
     let ctx = `## Project: ${ws}\n\`\`\`\n${tree}\n\`\`\`\n`
 
     const fs = require('fs')
@@ -1564,17 +1721,39 @@ function getProjectContext(ws: string): string {
       ctx += `Type: ${detected.join(', ')}\n`
     }
 
-    if (ctx.length > budgetForCtx) {
-      ctx = ctx.slice(0, budgetForCtx - 20) + '\n…[truncated]\n'
-    }
-    return ctx
+    projectContextCache = { ws, ctx, ts: Date.now() }
+    return budgetTrimProjectContext(ctx)
   } catch {
     return ''
   }
 }
 
+function budgetTrimProjectContext(ctx: string): string {
+  const ctxSize = ctxTokens()
+  // Budget-aware sizing: smaller contexts get smaller repo maps
+  let maxLines: number
+  if (ctxSize < 16384) maxLines = 15
+  else if (ctxSize < 32768) maxLines = 30
+  else maxLines = Infinity
+
+  if (maxLines < Infinity) {
+    const lines = ctx.split('\n')
+    if (lines.length > maxLines) {
+      return lines.slice(0, maxLines).join('\n') + '\n…[truncated]\n'
+    }
+  }
+
+  const budgetFraction = ctxSize < 16384 ? 0.12 : ctxSize < 32768 ? 0.20 : 0.35
+  const budgetForCtx = Math.max(Math.floor(getMessageBudget() * budgetFraction), 200)
+  if (ctx.length > budgetForCtx) {
+    return ctx.slice(0, budgetForCtx - 20) + '\n…[truncated]\n'
+  }
+  return ctx
+}
+
 export function setWorkspace(ws: string) {
   workspace = ws
+  invalidateProjectContextCache()
   for (const session of sessions.values()) {
     session.projectContextAdded = false
   }
@@ -1602,6 +1781,7 @@ export function cancelAgent() {
 export async function runAgent(userMessage: string, ws: string, win: BrowserWindow): Promise<string> {
   workspace = ws
   cancelRequested = false
+  lastTier3Iteration = -10
 
   const session = getActiveSession()
   let { messages } = session
@@ -1651,6 +1831,10 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
   const filesCreatedThisTurn = new Set<string>()
   let consecutiveReReads = 0
 
+  // General loop detection: same tool + same args repeated
+  let lastToolSig = ''
+  let sameToolRepeatCount = 0
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (cancelRequested) {
       emit(win, { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
@@ -1662,6 +1846,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
     // Signal the UI to start a new assistant "bubble" for each iteration
     if (i > 0) {
       emit(win, { type: 'new_turn' })
+      fullResponse = ''
     }
 
     // Pre-flight: sanitize structure + ensure messages fit in context budget
@@ -1912,6 +2097,23 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
         filesCreatedThisTurn.add(toolArgs.path)
       }
 
+      // General loop detection: same tool + same args called repeatedly
+      const readOnlyTools = new Set(['read_file', 'list_directory', 'find_files'])
+      const toolSig = `${toolName}:${JSON.stringify(toolArgs)}`
+      if (toolSig === lastToolSig && readOnlyTools.has(toolName)) {
+        sameToolRepeatCount++
+        debugLog('LOOP', `Duplicate ${toolName} call #${sameToolRepeatCount + 1}: ${toolArgs.path ?? ''}`)
+        if (sameToolRepeatCount >= 2) {
+          const skipMsg = `You already called ${toolName} with these exact arguments ${sameToolRepeatCount + 1} times. The result hasn't changed. Stop re-reading and proceed with the actual task. If you need to modify a file, use edit_file. If you're stuck, explain what you're trying to do.`
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: skipMsg })
+          emit(win, { type: 'tool_result', name: toolName, result: skipMsg })
+          continue
+        }
+      } else {
+        sameToolRepeatCount = 0
+      }
+      lastToolSig = toolSig
+
       // Detect pointless re-reads of files we JUST created
       if (toolName === 'read_file' && toolArgs.path && filesCreatedThisTurn.has(toolArgs.path)) {
         consecutiveReReads++
@@ -1956,6 +2158,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       // Notify renderer to refresh file tree when agent modifies filesystem
       const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
       if (fsModTools.has(toolName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+        invalidateProjectContextCache()
         try {
           win.webContents.send('workspace-files-changed')
         } catch {}
@@ -1969,7 +2172,7 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
     }
 
     // Summarize/prune after each iteration to stay within budget
-    messages = await manageContext(messages, apiUrl, win)
+    messages = await manageContext(messages, apiUrl, win, undefined, i)
     session.messages = messages
     emitContextUsage(win, messages)
   }

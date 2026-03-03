@@ -204,7 +204,6 @@ export function Chat({
 
   const noWorkspace = !workspace
   const hasAttachments = attachedFiles.length > 0 || codeRefs.length > 0
-  const lastUserId = [...messages].reverse().find((m) => m.role === 'user')?.id
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -247,16 +246,13 @@ export function Chat({
             </div>
           )}
           {messages.map((msg) => {
-            const isLastUser = busy && msg.role === 'user' && msg.id === lastUserId
-            const isDone = msg.role === 'status' || msg.done === true || (msg.role === 'user' && !isLastUser)
+            const isDone = msg.role === 'status' || msg.done === true || msg.role === 'user'
             return (
               <div key={msg.id} className={isDone ? 'msg-auto-contain' : undefined}>
                 <MessageBubble
                   message={msg}
                   onApprove={onApproval ? (id) => onApproval(id, true) : undefined}
                   onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
-                  pending={isLastUser}
-                  onCancel={isLastUser ? onCancel : undefined}
                 />
               </div>
             )
@@ -289,6 +285,26 @@ export function Chat({
           <span className="text-[9px] text-zinc-700 shrink-0">
             {Math.round(contextUsage.usedTokens / 1024)}K / {Math.round(contextUsage.maxContextTokens / 1024)}K
           </span>
+        </div>
+      )}
+
+      {/* Agent working indicator */}
+      {busy && (
+        <div className="flex items-center gap-2 px-4 py-1.5 border-t border-zinc-800/40 bg-[#010409]">
+          <span className="flex gap-1">
+            <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-[pulse-dot_1.4s_0s_infinite]" />
+            <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-[pulse-dot_1.4s_0.2s_infinite]" />
+            <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-[pulse-dot_1.4s_0.4s_infinite]" />
+          </span>
+          <span className="text-[11px] text-zinc-500">Агент работает…</span>
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              className="ml-auto px-2.5 py-0.5 rounded-full border border-zinc-700 text-[11px] text-zinc-400 hover:text-red-400 hover:border-red-500/40 hover:bg-red-500/10 cursor-pointer transition-colors"
+            >
+              ⏹ Остановить
+            </button>
+          )}
         </div>
       )}
 

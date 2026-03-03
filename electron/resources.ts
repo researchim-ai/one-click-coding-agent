@@ -146,31 +146,53 @@ export function getArch(): ModelArchInfo {
 // Model variant catalog
 // ---------------------------------------------------------------------------
 
+const REPO_9B = 'unsloth/Qwen3.5-9B-GGUF'
+
 export const MODEL_VARIANTS: ModelVariant[] = [
-  { quant: 'UD-IQ2_XXS',    bits: 2, label: 'IQ2_XXS — минимальный',     sizeMb: 9994,  quality: 1 },
-  { quant: 'UD-Q2_K_XL',    bits: 2, label: 'Q2_K_XL',                   sizeMb: 13210, quality: 2 },
-  { quant: 'UD-IQ3_XXS',    bits: 3, label: 'IQ3_XXS',                   sizeMb: 14438, quality: 3 },
-  { quant: 'UD-IQ3_S',      bits: 3, label: 'IQ3_S',                     sizeMb: 15565, quality: 4 },
-  { quant: 'UD-Q3_K_M',     bits: 3, label: 'Q3_K_M',                    sizeMb: 17101, quality: 5 },
-  { quant: 'UD-Q3_K_XL',    bits: 3, label: 'Q3_K_XL',                   sizeMb: 17613, quality: 5 },
-  { quant: 'UD-Q4_K_M',     bits: 4, label: 'Q4_K_M — баланс',           sizeMb: 20378, quality: 7 },
-  { quant: 'UD-Q4_K_XL',    bits: 4, label: 'Q4_K_XL — рекомендуемый',   sizeMb: 21094, quality: 8 },
-  { quant: 'UD-Q5_K_XL',    bits: 5, label: 'Q5_K_XL — высокое',         sizeMb: 25498, quality: 9 },
-  { quant: 'UD-Q6_K_XL',    bits: 6, label: 'Q6_K_XL',                   sizeMb: 31027, quality: 10 },
-  { quant: 'UD-Q8_K_XL',    bits: 8, label: 'Q8_K_XL — максимум',        sizeMb: 39629, quality: 11 },
+  // --- Qwen3.5-9B (dense, fast, fits on 16 GB) ---
+  { quant: '9B-UD-IQ2_XXS',  bits: 2, label: '9B  IQ2_XXS — минимальный', sizeMb: 3266,  quality: 1,  repoId: REPO_9B },
+  { quant: '9B-UD-IQ2_M',    bits: 2, label: '9B  IQ2_M',                 sizeMb: 3738,  quality: 2,  repoId: REPO_9B },
+  { quant: '9B-UD-IQ3_XXS',  bits: 3, label: '9B  IQ3_XXS',              sizeMb: 4116,  quality: 3,  repoId: REPO_9B },
+  { quant: '9B-UD-Q2_K_XL',  bits: 2, label: '9B  Q2_K_XL',              sizeMb: 4219,  quality: 3,  repoId: REPO_9B },
+  { quant: '9B-UD-Q3_K_XL',  bits: 3, label: '9B  Q3_K_XL',              sizeMb: 5171,  quality: 5,  repoId: REPO_9B },
+  { quant: '9B-UD-Q4_K_XL',  bits: 4, label: '9B  Q4_K_XL — рекоменд.',  sizeMb: 6113,  quality: 7,  repoId: REPO_9B },
+  { quant: '9B-UD-Q5_K_XL',  bits: 5, label: '9B  Q5_K_XL',              sizeMb: 6902,  quality: 8,  repoId: REPO_9B },
+  { quant: '9B-UD-Q6_K_XL',  bits: 6, label: '9B  Q6_K_XL — высокое',    sizeMb: 8971,  quality: 9,  repoId: REPO_9B },
+  { quant: '9B-UD-Q8_K_XL',  bits: 8, label: '9B  Q8_K_XL — максимум',   sizeMb: 11500, quality: 10, repoId: REPO_9B },
+
+  // --- Qwen3.5-35B-A3B (MoE, мощнее, нужно больше RAM) ---
+  { quant: 'UD-IQ2_XXS',     bits: 2, label: '35B IQ2_XXS — минимальный', sizeMb: 9994,  quality: 11 },
+  { quant: 'UD-Q2_K_XL',     bits: 2, label: '35B Q2_K_XL',              sizeMb: 13210, quality: 12 },
+  { quant: 'UD-IQ3_XXS',     bits: 3, label: '35B IQ3_XXS',              sizeMb: 14438, quality: 13 },
+  { quant: 'UD-IQ3_S',       bits: 3, label: '35B IQ3_S',                sizeMb: 15565, quality: 14 },
+  { quant: 'UD-Q3_K_M',      bits: 3, label: '35B Q3_K_M',               sizeMb: 17101, quality: 15 },
+  { quant: 'UD-Q3_K_XL',     bits: 3, label: '35B Q3_K_XL',              sizeMb: 17613, quality: 15 },
+  { quant: 'UD-Q4_K_M',      bits: 4, label: '35B Q4_K_M — баланс',      sizeMb: 20378, quality: 17 },
+  { quant: 'UD-Q4_K_XL',     bits: 4, label: '35B Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18 },
+  { quant: 'UD-Q5_K_XL',     bits: 5, label: '35B Q5_K_XL — высокое',     sizeMb: 25498, quality: 19 },
+  { quant: 'UD-Q6_K_XL',     bits: 6, label: '35B Q6_K_XL',              sizeMb: 31027, quality: 20 },
+  { quant: 'UD-Q8_K_XL',     bits: 8, label: '35B Q8_K_XL — максимум',    sizeMb: 39629, quality: 21 },
 ]
 
 // Per-layer VRAM for weight offloading (scales with model file size)
-// Q4_K_XL ≈ 21 GB, ~1.2 GB embeddings+output, 40 layers → ~500 MB/layer
-const REFERENCE_MODEL_MB = 21094
-const REFERENCE_LAYER_VRAM_MB = 500
+// 35B: Q4_K_XL ≈ 21 GB, ~1.2 GB embeddings+output, 40 layers → ~500 MB/layer
+// 9B:  Q4_K_XL ≈ 6 GB, 36 layers → ~150 MB/layer
+const LAYER_REFS: Record<string, { modelMb: number; layerMb: number }> = {
+  '35b': { modelMb: 21094, layerMb: 500 },
+  '9b':  { modelMb: 6113,  layerMb: 150 },
+}
+
+function is9B(variant: ModelVariant): boolean {
+  return variant.quant.startsWith('9B-')
+}
 
 function modelMemoryMb(variant: ModelVariant): number {
   return Math.round(variant.sizeMb * 1.03)
 }
 
 function layerVramMb(variant: ModelVariant): number {
-  return Math.round(REFERENCE_LAYER_VRAM_MB * (variant.sizeMb / REFERENCE_MODEL_MB))
+  const ref = is9B(variant) ? LAYER_REFS['9b'] : LAYER_REFS['35b']
+  return Math.round(ref.layerMb * (variant.sizeMb / ref.modelMb))
 }
 
 export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
@@ -201,11 +223,20 @@ export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
     return { ...v, fits, maxCtx, mode, recommended: false }
   })
 
-  // Mark the best fitting variant as recommended (highest quality that gives >= 16K context)
-  for (let i = results.length - 1; i >= 0; i--) {
-    if (results[i].fits && results[i].maxCtx >= 16384) {
-      bestFittingIdx = i
-      break
+  // On small systems (RAM ≤ 16 GB and VRAM < 16 GB), prefer 9B-UD-Q4_K_XL
+  const smallSystem = res.ramTotalMb <= 17408 && freeVram < 16384
+  if (smallSystem) {
+    const idx9b = results.findIndex((r) => r.quant === '9B-UD-Q4_K_XL' && r.fits)
+    if (idx9b >= 0) { bestFittingIdx = idx9b }
+  }
+
+  // Otherwise pick the highest quality that gives >= 16K context
+  if (bestFittingIdx === -1) {
+    for (let i = results.length - 1; i >= 0; i--) {
+      if (results[i].fits && results[i].maxCtx >= 16384) {
+        bestFittingIdx = i
+        break
+      }
     }
   }
   // Fallback: any fitting variant

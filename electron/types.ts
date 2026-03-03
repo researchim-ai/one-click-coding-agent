@@ -81,6 +81,7 @@ export interface ModelVariant {
   label: string
   sizeMb: number
   quality: number
+  repoId?: string
 }
 
 export interface ModelVariantInfo extends ModelVariant {

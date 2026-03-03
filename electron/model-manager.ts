@@ -3,11 +3,19 @@ import https from 'https'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import type { DownloadProgress } from './types'
+import type { DownloadProgress, ModelVariant } from './types'
 import * as config from './config'
+import { MODEL_VARIANTS } from './resources'
 
-const REPO_ID = 'unsloth/Qwen3.5-35B-A3B-GGUF'
+const DEFAULT_REPO_ID = 'unsloth/Qwen3.5-35B-A3B-GGUF'
 const DEFAULT_QUANT = 'UD-Q4_K_XL'
+
+function getRepoId(quant?: string): string {
+  const q = quant ?? selectedQuant
+  const variant = MODEL_VARIANTS.find((v: ModelVariant) => v.quant === q)
+  if (variant?.repoId) return variant.repoId
+  return DEFAULT_REPO_ID
+}
 const MAX_RETRIES = 3
 const RETRY_BASE_MS = 2000
 
@@ -58,7 +66,8 @@ interface HfSibling {
 
 async function findModelFilename(quant?: string): Promise<string> {
   const q = quant ?? selectedQuant
-  const url = `https://huggingface.co/api/models/${REPO_ID}`
+  const repoId = getRepoId(q)
+  const url = `https://huggingface.co/api/models/${repoId}`
   const body = await fetchJson(url)
   const siblings: HfSibling[] = body.siblings ?? []
   const quantNorm = q.toLowerCase().replace(/-/g, '_')
@@ -188,7 +197,8 @@ export async function download(win: BrowserWindow): Promise<string> {
     return dest
   }
 
-  const url = `https://huggingface.co/${REPO_ID}/resolve/main/${filename}`
+  const repoId = getRepoId()
+  const url = `https://huggingface.co/${repoId}/resolve/main/${filename}`
   emitProgress(win, { downloadedMb: 0, totalMb: 0, percent: 0, status: `Скачивание ${filename}…` })
 
   let lastError: Error | null = null

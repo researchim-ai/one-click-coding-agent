@@ -61,12 +61,13 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
       window.api.getConfig(),
     ]).then(([v, cfg]) => {
       setVariants(v)
-      let quant = DEFAULT_QUANT
+      const recommended = v.find((vi: ModelVariantInfo) => vi.recommended)
+      let quant = recommended?.quant ?? DEFAULT_QUANT
       if (cfg.lastQuant && v.some((vi: ModelVariantInfo) => vi.quant === cfg.lastQuant && vi.fits)) {
         quant = cfg.lastQuant
-        setSelectedQuant(quant)
-        window.api.selectModelVariant(quant).catch(() => {})
       }
+      setSelectedQuant(quant)
+      window.api.selectModelVariant(quant).catch(() => {})
       const variant = v.find((vi: ModelVariantInfo) => vi.quant === quant)
       const max = variant?.maxCtx ?? 32768
       if (cfg.ctxSize && cfg.ctxSize > 0) {
@@ -342,7 +343,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                   className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[180px]"
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-zinc-200 font-medium truncate">{selectedQuant.replace('UD-', '')}</div>
+                    <div className="text-sm text-zinc-200 font-medium truncate">{selectedQuant.replace(/^9B-/, '').replace('UD-', '')}{selectedQuant.startsWith('9B-') ? ' (9B)' : ' (35B)'}</div>
                     <div className="text-[11px] text-zinc-500 leading-tight">
                       {selectedSize}
                     </div>
@@ -357,48 +358,57 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                     <div className="px-3 py-2 border-b border-zinc-800">
                       <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Квантизация модели</span>
                     </div>
-                    {variants.map((v) => {
-                      const isSel = v.quant === selectedQuant
-                      const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
-                      return (
-                        <button
-                          key={v.quant}
-                          disabled={!v.fits}
-                          onClick={() => handleSelectVariant(v.quant)}
-                          className={`w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer ${
-                            !v.fits
-                              ? 'opacity-35 cursor-not-allowed'
-                              : isSel
-                                ? 'bg-blue-500/10'
-                                : 'hover:bg-zinc-800'
-                          }`}
-                        >
-                          <div className={`w-7 text-center text-xs font-bold ${colorClass}`}>
-                            {v.bits}b
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className={`text-sm font-medium truncate ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
-                                {v.quant.replace('UD-', '')}
-                              </span>
-                              {v.recommended && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium shrink-0">
-                                  рек.
-                                </span>
-                              )}
-                              {isSel && (
-                                <span className="text-blue-400 shrink-0">{'\u2713'}</span>
-                              )}
-                            </div>
-                            <div className={`text-[11px] leading-tight mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
-                              {formatSize(v.sizeMb)}
-                              {v.fits && <> {'\u00b7'} ctx {formatCtx(v.maxCtx)} {'\u00b7'} {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
-                              {!v.fits && <> {'\u00b7'} не хватает памяти</>}
-                            </div>
-                          </div>
-                        </button>
-                      )
-                    })}
+                    {[
+                      { title: 'Qwen3.5-9B', items: variants.filter((v) => v.quant.startsWith('9B-')) },
+                      { title: 'Qwen3.5-35B-A3B', items: variants.filter((v) => !v.quant.startsWith('9B-')) },
+                    ].map((g) => g.items.length === 0 ? null : (
+                      <div key={g.title}>
+                        <div className="px-3 pt-2 pb-1 text-[10px] text-zinc-600 uppercase tracking-wider font-semibold">{g.title}</div>
+                        {g.items.map((v) => {
+                          const isSel = v.quant === selectedQuant
+                          const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
+                          const displayQuant = v.quant.replace(/^9B-/, '').replace('UD-', '')
+                          return (
+                            <button
+                              key={v.quant}
+                              disabled={!v.fits}
+                              onClick={() => handleSelectVariant(v.quant)}
+                              className={`w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer ${
+                                !v.fits
+                                  ? 'opacity-35 cursor-not-allowed'
+                                  : isSel
+                                    ? 'bg-blue-500/10'
+                                    : 'hover:bg-zinc-800'
+                              }`}
+                            >
+                              <div className={`w-7 text-center text-xs font-bold ${colorClass}`}>
+                                {v.bits}b
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-sm font-medium truncate ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
+                                    {displayQuant}
+                                  </span>
+                                  {v.recommended && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium shrink-0">
+                                      рек.
+                                    </span>
+                                  )}
+                                  {isSel && (
+                                    <span className="text-blue-400 shrink-0">{'\u2713'}</span>
+                                  )}
+                                </div>
+                                <div className={`text-[11px] leading-tight mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                                  {formatSize(v.sizeMb)}
+                                  {v.fits && <> {'\u00b7'} ctx {formatCtx(v.maxCtx)} {'\u00b7'} {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
+                                  {!v.fits && <> {'\u00b7'} не хватает памяти</>}
+                                </div>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
