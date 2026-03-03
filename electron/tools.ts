@@ -100,7 +100,8 @@ export const TOOL_DEFINITIONS = [
       description:
         'Run a shell command and return stdout + stderr. ' +
         'Use for: running tests, installing dependencies, git operations, build commands, etc. ' +
-        'Commands run in the workspace directory by default. Timeout: 120 seconds.',
+        'Commands run in the workspace directory by default. Timeout: 120 seconds. ' +
+        'IMPORTANT: Use OS-appropriate commands (see system prompt for current OS).',
       parameters: {
         type: 'object',
         properties: {
@@ -147,7 +148,7 @@ export const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'delete_file',
-      description: 'Delete a single file. Cannot delete directories — use execute_command with rm -r for that.',
+      description: 'Delete a single file. Cannot delete directories — use execute_command to remove directories.',
       parameters: {
         type: 'object',
         properties: {
@@ -394,12 +395,14 @@ function execCommand(command: string, cwd: string | undefined, workspace: string
   }
 
   try {
+    const isWin = process.platform === 'win32'
     const out = execSync(command, {
       cwd: workDir,
       timeout: 120000,
       encoding: 'utf-8',
       maxBuffer: 1024 * 1024 * 10,
       env: { ...process.env, FORCE_COLOR: '0' },
+      shell: isWin ? 'cmd.exe' : '/bin/sh',
     })
     let result = out
     if (result.length > 80000) result = result.slice(0, 80000) + '\n… [truncated]'

@@ -10,12 +10,20 @@ export interface ToolCall {
   approvalStatus?: 'pending' | 'approved' | 'denied'
 }
 
+export interface StreamingFile {
+  toolName: string
+  path: string
+  content: string
+  done: boolean
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'status'
   content: string
   thinking?: string
   toolCalls?: ToolCall[]
+  streamingFile?: StreamingFile
   done?: boolean
 }
 
@@ -154,11 +162,28 @@ export function useAgent() {
 
   const handleAgentEvent = useCallback((ev: AgentEvent) => {
     // High-frequency events: mutate in place, batch React updates via rAF
-    if (ev.type === 'thinking' || (ev.type === 'response' && !ev.done)) {
+    if (ev.type === 'thinking' || (ev.type === 'response' && !ev.done) || ev.type === 'tool_streaming') {
       const assistant = assistantRef.current
       if (!assistant) return
       if (ev.type === 'thinking') {
         assistant.thinking = (assistant.thinking ?? '') + ev.content
+      } else if (ev.type === 'tool_streaming') {
+        assistant.streamingFile = {
+          toolName: ev.name ?? '',
+          path: ev.toolStreamPath ?? '',
+          content: ev.toolStreamContent ?? '',
+          done: ev.done ?? false,
+        }
+        if (ev.done) {
+          // Clear after a short delay so the UI can show the final state
+          setTimeout(() => {
+            if (assistant.streamingFile?.done) {
+              assistant.streamingFile = undefined
+              dirtyRef.current = true
+              flushMessages()
+            }
+          }, 300)
+        }
       } else {
         if (ev.content) assistant.content = ev.content
       }

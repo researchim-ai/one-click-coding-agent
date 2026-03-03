@@ -191,7 +191,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     {
       key: 'download',
       label: 'Скачивание модели',
-      desc: `Qwen3.5-35B-A3B — ${selectedQuant} (~${selectedSize}) · ctx ${displayCtx}`,
+      desc: `Qwen3.5-${selectedQuant.startsWith('9B-') ? '9B' : '35B-A3B'} · ${selectedQuant.replace(/^9B-/, '').replace('UD-', '')} (~${selectedSize}) · ctx ${displayCtx}`,
       active: phase === 'downloading',
       done: ['starting', 'done'].includes(phase),
       detail: phase === 'downloading' ? downloadProgress?.status : null,
@@ -217,8 +217,10 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
           <div className="text-6xl mb-3">{'⚡'}</div>
           <h1 className="text-3xl font-bold text-zinc-100 mb-2">One-Click Coding Agent</h1>
           <p className="text-zinc-400">
-            Qwen3.5-35B-A3B <span className="text-zinc-500">{'·'}</span>{' '}
-            <span className="text-zinc-300">{selectedQuant}</span>{' '}
+            Qwen3.5 <span className="text-zinc-500">{'·'}</span>{' '}
+            <span className="text-zinc-300">{selectedQuant.replace(/^9B-/, '').replace('UD-', '')}</span>{' '}
+            <span className="text-zinc-500">{'·'}</span>{' '}
+            {selectedQuant.startsWith('9B-') ? '9B' : '35B-A3B'}{' '}
             <span className="text-zinc-500">{'·'}</span>{' '}
             ctx {displayCtx}{' '}
             <span className="text-zinc-500">{'·'}</span> llama.cpp

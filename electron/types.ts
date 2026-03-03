@@ -45,13 +45,15 @@ export interface DownloadProgress {
 }
 
 export interface AgentEvent {
-  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn'
+  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn' | 'tool_streaming'
   content?: string
   name?: string
   args?: Record<string, unknown>
   result?: string
   done?: boolean
   approvalId?: string
+  toolStreamPath?: string
+  toolStreamContent?: string
   contextUsage?: {
     usedTokens: number
     budgetTokens: number

@@ -40,11 +40,17 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
   const hasContent = !!message.content
   const hasTools = !!(message.toolCalls?.length)
   const hasThinking = !!message.thinking
-  const isLoading = !message.done && !hasContent && !hasTools && !hasThinking
+  const hasStreaming = !!message.streamingFile
+  const isLoading = !message.done && !hasContent && !hasTools && !hasThinking && !hasStreaming
   const thinkingLive = hasThinking && !message.done && !hasContent
 
   // Skip completely empty completed turns (no content, no tools, no thinking)
   if (message.done && !hasContent && !hasTools && !hasThinking) return null
+
+  const streamLines = useMemo(() => {
+    if (!message.streamingFile?.content) return 0
+    return message.streamingFile.content.split('\n').length
+  }, [message.streamingFile?.content])
 
   return (
     <div className="self-start max-w-full animate-[fadeIn_0.2s]">
@@ -64,6 +70,22 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
               onDeny={onDeny}
             />
           ))}
+        </div>
+      )}
+
+      {hasStreaming && (
+        <div className="my-1.5 rounded-lg border border-zinc-800 overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900/80 border-b border-zinc-800">
+            <span className="text-green-400 text-xs">
+              {message.streamingFile!.toolName === 'edit_file' ? '✏️' : message.streamingFile!.toolName === 'append_file' ? '📎' : '📝'}
+            </span>
+            <span className="text-[11px] text-zinc-400 font-mono truncate">{message.streamingFile!.path || '...'}</span>
+            <span className="text-[10px] text-zinc-600 ml-auto shrink-0">{streamLines} строк</span>
+            {!message.streamingFile!.done && (
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse shrink-0" />
+            )}
+          </div>
+          <pre className="px-3 py-2 text-[12px] leading-[1.5] text-zinc-300 bg-zinc-950/50 max-h-[300px] overflow-y-auto font-mono whitespace-pre-wrap break-all">{message.streamingFile!.content}</pre>
         </div>
       )}
 

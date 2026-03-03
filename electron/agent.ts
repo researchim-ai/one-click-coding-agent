@@ -171,10 +171,22 @@ const COMPACT_SYSTEM_PROMPT = `You are an expert autonomous coding agent with ac
 - write_file: max 80 lines per call. For larger files: write skeleton first, then edit_file to fill sections
 - Use append_file to add content to existing files incrementally`
 
+function getOsInfo(): string {
+  const platform = process.platform
+  const isWin = platform === 'win32'
+  const isMac = platform === 'darwin'
+  const osName = isWin ? 'Windows' : isMac ? 'macOS' : 'Linux'
+  const shell = isWin ? 'PowerShell/cmd' : (process.env.SHELL?.split('/').pop() ?? 'bash')
+  return `\n\n## Environment\n- **OS**: ${osName} (${process.arch})\n- **Shell**: ${shell}\n` +
+    (isWin
+      ? '- Use Windows-compatible commands: `dir` instead of `ls`, `type` instead of `cat`, `del` instead of `rm`, `mkdir` (works on both), `move` instead of `mv`, `copy` instead of `cp`\n- Use `\\\\` or `/` for path separators in commands\n- PowerShell commands like `Get-ChildItem`, `Get-Content` also work\n'
+      : '- Standard Unix commands available: `ls`, `cat`, `rm`, `mv`, `cp`, `grep`, `find`, etc.\n')
+}
+
 function getSystemPrompt(): string {
   const custom = config.get('systemPrompt')
-  if (custom) return custom
-  return ctxTokens() < 16384 ? COMPACT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
+  const base = custom || (ctxTokens() < 16384 ? COMPACT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT)
+  return base + getOsInfo()
 }
 
 function getSummarizePrompt(): string {
@@ -466,6 +478,87 @@ function extractThinking(content: string): [string, string] {
 }
 
 // ---------------------------------------------------------------------------
+// Recover tool calls that the model wrote as text instead of using the API
+// Qwen sometimes generates <tool_call>...</tool_call> or ```tool_call\n...\n``` in content/thinking
+// ---------------------------------------------------------------------------
+
+function extractTextToolCalls(content: string): { name: string; args: Record<string, any> }[] {
+  const results: { name: string; args: Record<string, any> }[] = []
+
+  // Pattern 1: <tool_call> <function=NAME> <parameter=KEY>VALUE</parameter> ... </function> </tool_call>
+  const xmlPattern = /<tool_call>\s*<function=(\w+)>([\s\S]*?)<\/function>\s*<\/tool_call>/g
+  let match
+  while ((match = xmlPattern.exec(content)) !== null) {
+    const name = match[1]
+    const body = match[2]
+    const args: Record<string, any> = {}
+    const paramRe = /<parameter=(\w+)>\s*([\s\S]*?)\s*<\/parameter>/g
+    let pm
+    while ((pm = paramRe.exec(body)) !== null) {
+      const val = pm[2].trim()
+      // Try parsing as number
+      args[pm[1]] = /^\d+$/.test(val) ? parseInt(val) : val
+    }
+    if (name) results.push({ name, args })
+  }
+
+  // Pattern 2: {"name": "tool_name", "arguments": {...}} or tool_call JSON
+  const jsonPattern = /\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/g
+  while ((match = jsonPattern.exec(content)) !== null) {
+    try {
+      const name = match[1]
+      const args = JSON.parse(match[2])
+      if (name && typeof args === 'object') results.push({ name, args })
+    } catch {}
+  }
+
+  return results
+}
+
+// ---------------------------------------------------------------------------
+// Progressive file content streaming — extract partial content from tool call
+// arguments as they're being generated, so the UI can show file writes in real-time
+// ---------------------------------------------------------------------------
+
+const FILE_CONTENT_TOOLS = new Set(['write_file', 'edit_file', 'append_file'])
+const TOOL_STREAM_INTERVAL_MS = 200
+
+function extractPartialFileContent(partialArgs: string, toolName: string): { path: string; content: string } | null {
+  // Tool args are partial JSON like: {"path": "foo.js", "content": "line1\nline2...
+  // We need to extract the path and the content field from incomplete JSON
+  const contentKey = toolName === 'edit_file' ? 'new_string' : 'content'
+
+  // Extract path
+  const pathMatch = partialArgs.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+  const filePath = pathMatch?.[1] ?? ''
+
+  // Find the content/new_string field start
+  const keyPattern = new RegExp(`"${contentKey}"\\s*:\\s*"`)
+  const keyMatch = keyPattern.exec(partialArgs)
+  if (!keyMatch) return null
+
+  const contentStart = keyMatch.index + keyMatch[0].length
+  let raw = partialArgs.slice(contentStart)
+
+  // Remove trailing quote if the JSON is complete
+  if (raw.endsWith('"}') || raw.endsWith('", ') || raw.endsWith('",')) {
+    raw = raw.replace(/"\s*[,}]\s*$/, '')
+  } else if (raw.endsWith('"')) {
+    raw = raw.slice(0, -1)
+  }
+
+  // Unescape JSON string
+  try {
+    const content = JSON.parse(`"${raw}"`)
+    return { path: filePath, content }
+  } catch {
+    // If JSON parse fails, do basic unescaping
+    const content = raw.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    return { path: filePath, content }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Streaming LLM call — SSE parser with incremental think/response emission
 // ---------------------------------------------------------------------------
 
@@ -501,11 +594,13 @@ async function streamLlmResponse(
   fullResponseSoFar: string,
   signal: AbortSignal,
   maxTokensOverride?: number,
+  temperatureOverride?: number,
 ): Promise<StreamResult> {
   const cleanMsgs = sanitizeMessages(msgs)
   const maxTok = (maxTokensOverride && maxTokensOverride > 0) ? maxTokensOverride : getMaxResponseTokens()
+  const temp = temperatureOverride ?? 0.3
   const msgRoles = cleanMsgs.map((m) => m.role + (m.tool_calls ? `(${m.tool_calls.length}tc)` : '')).join(', ')
-  debugLog('STREAM', `Sending request: ${cleanMsgs.length} msgs [${msgRoles}], max_tokens=${maxTok}, ctx=${ctxTokens()}, budget=${getMessageBudget()}, used=${estimateContextTokens(cleanMsgs)}`)
+  debugLog('STREAM', `Sending request: ${cleanMsgs.length} msgs [${msgRoles}], max_tokens=${maxTok}, temp=${temp}, ctx=${ctxTokens()}, budget=${getMessageBudget()}, used=${estimateContextTokens(cleanMsgs)}`)
 
   const startMs = Date.now()
   const r = await fetch(apiUrl, {
@@ -516,7 +611,7 @@ async function streamLlmResponse(
       messages: cleanMsgs,
       tools: getAllTools(),
       tool_choice: 'auto',
-      temperature: 0.3,
+      temperature: temp,
       max_tokens: maxTok,
       stream: true,
     }),
@@ -546,6 +641,7 @@ async function streamLlmResponse(
   const toolCallMap = new Map<number, any>()
   let sseBuffer = ''
   let lastEmitMs = 0
+  let lastToolStreamMs = 0
   const EMIT_INTERVAL_MS = 150 // max ~7 UI updates per second
   let finishReason: string | null = null
 
@@ -587,8 +683,31 @@ async function streamLlmResponse(
       const delta = choice?.delta
       if (!delta) continue
 
+      // Log first few chunks for debugging empty responses
+      if (chunkCount <= 3) {
+        debugLog('SSE_CHUNK', `#${chunkCount}: content=${JSON.stringify(delta.content)}, tc=${delta.tool_calls ? 'yes' : 'no'}, role=${delta.role ?? '-'}, finish=${choice.finish_reason ?? '-'}`)
+      }
+
+      // Capture reasoning_content (Qwen's separate thinking field)
+      if (delta.reasoning_content) {
+        const rc = delta.reasoning_content
+        accContent += accContent.includes('<think>') ? rc : `<think>${rc}`
+        const { thinking } = parseAccumulatedThinking(accContent)
+        if (thinking.length > lastThinkLen) {
+          emit(win, { type: 'thinking', content: thinking.slice(lastThinkLen) })
+          lastThinkLen = thinking.length
+        }
+        wasThinkingDone = false
+      }
+
       // Accumulate content tokens
       if (delta.content) {
+        // Close any open reasoning_content thinking block before visible content
+        if (!wasThinkingDone && !delta.content.includes('<think>')) {
+          accContent += '</think>'
+          wasThinkingDone = true
+          emit(win, { type: 'status', content: '' })
+        }
         accContent += delta.content
 
         const { thinking, visible, thinkingDone } = parseAccumulatedThinking(accContent)
@@ -638,6 +757,25 @@ async function streamLlmResponse(
             if (tc.function?.name) existing.function.name += tc.function.name
             if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
           }
+
+          // Stream file content for write/edit/append tools
+          const entry = toolCallMap.get(idx)!
+          const toolName = entry.function.name
+          if (FILE_CONTENT_TOOLS.has(toolName)) {
+            const now = Date.now()
+            if (now - lastToolStreamMs >= TOOL_STREAM_INTERVAL_MS) {
+              lastToolStreamMs = now
+              const partial = extractPartialFileContent(entry.function.arguments, toolName)
+              if (partial) {
+                emit(win, {
+                  type: 'tool_streaming',
+                  name: toolName,
+                  toolStreamPath: partial.path,
+                  toolStreamContent: partial.content,
+                })
+              }
+            }
+          }
         }
       }
     }
@@ -650,6 +788,22 @@ async function streamLlmResponse(
       ? fullResponseSoFar + '\n\n' + finalVisible
       : finalVisible
     emit(win, { type: 'response', content: fullNow, done: false })
+  }
+
+  // Final tool streaming emission (ensure UI gets the complete content)
+  for (const entry of toolCallMap.values()) {
+    if (FILE_CONTENT_TOOLS.has(entry.function.name)) {
+      const partial = extractPartialFileContent(entry.function.arguments, entry.function.name)
+      if (partial) {
+        emit(win, {
+          type: 'tool_streaming',
+          name: entry.function.name,
+          toolStreamPath: partial.path,
+          toolStreamContent: partial.content,
+          done: true,
+        })
+      }
+    }
   }
 
   const rawToolCalls = toolCallMap.size > 0 ? [...toolCallMap.values()] : undefined
@@ -1880,7 +2034,8 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       // No fixed total timeout — idle timeout inside streamLlmResponse handles stalls
       // Only abort on user cancel or server idle (120s no data)
 
-      streamResult = await streamLlmResponse(apiUrl, messages, win, fullResponse, controller.signal, effectiveMaxTokens)
+      const retryTemp = emptyRetries > 0 ? 0.3 + emptyRetries * 0.2 : undefined
+      streamResult = await streamLlmResponse(apiUrl, messages, win, fullResponse, controller.signal, effectiveMaxTokens, retryTemp)
     } catch (e: any) {
       debugLog('ERROR', `Catch in runAgent: name=${e?.name}, message=${e?.message}, cancelRequested=${cancelRequested}, stack=${(e?.stack ?? '').slice(0, 500)}`)
       if (cancelRequested) {
@@ -2010,8 +2165,66 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
       continue
     }
 
+    // --- Recover text-based tool calls from content/thinking ---
+    // Model sometimes writes tool calls as text instead of using the API
+    if (!toolCalls && content) {
+      const textCalls = extractTextToolCalls(content)
+      if (textCalls.length > 0) {
+        debugLog('TEXT_TOOL', `Recovered ${textCalls.length} text-based tool call(s): ${textCalls.map((t) => t.name).join(', ')}`)
+        const [thinking] = extractThinking(content)
+        if (thinking) {
+          emit(win, { type: 'thinking', content: thinking })
+        }
+
+        const recoveredCustomTools = config.get('customTools')
+        for (const tc of textCalls) {
+          emit(win, { type: 'tool_call', name: tc.name, args: tc.args })
+
+          const isCustom = recoveredCustomTools.some((ct: any) => ct.name === tc.name)
+          if (isCustom || NEEDS_APPROVAL.has(tc.name)) {
+            const approved = await requestApproval(win, tc.name, tc.args)
+            if (!approved) {
+              const deniedResult = `[Denied by user] Operation "${tc.name}" was not approved.`
+              emit(win, { type: 'tool_result', name: tc.name, result: deniedResult })
+              messages.push({ role: 'assistant', content: stripThinking(content) })
+              messages.push({ role: 'user', content: deniedResult })
+              break
+            }
+          }
+
+          let result: string
+          if (isCustom) {
+            const ct = recoveredCustomTools.find((t: any) => t.name === tc.name)
+            result = ct ? executeCustomTool(ct, tc.args, workspace) : `Error: custom tool "${tc.name}" not found`
+          } else {
+            result = executeTool(tc.name, tc.args, workspace)
+          }
+
+          const uiResult = result.length > 5000 ? result.slice(0, 5000) + '\n… [truncated]' : result
+          emit(win, { type: 'tool_result', name: tc.name, result: uiResult })
+
+          // Build proper tool_calls message format
+          const callId = `text_tc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+          messages.push({
+            role: 'assistant',
+            content: stripThinking(content),
+            tool_calls: [{ id: callId, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args) } }],
+          })
+          messages.push({ role: 'tool', tool_call_id: callId, content: smartTruncateToolResult(tc.name, result, dynamicToolResultLimit()) })
+        }
+
+        session.messages = messages
+        saveSession(session)
+        emitContextUsage(win, messages)
+        continue
+      }
+    }
+
     // --- Truly empty response handling ---
-    if (!content && !toolCalls) {
+    // Also treat responses that are ONLY thinking (no visible content) as empty
+    const visibleContent = content ? extractThinking(content)[1].trim() : ''
+    const isEffectivelyEmpty = !visibleContent && !toolCalls
+    if (isEffectivelyEmpty) {
       const usedTokens = estimateContextTokens(messages)
       const budgetNow = getMessageBudget()
       const usageRatio = usedTokens / budgetNow
@@ -2024,7 +2237,15 @@ export async function runAgent(userMessage: string, ws: string, win: BrowserWind
           messages = tier4EmergencyPrune(messages)
           session.messages = messages
         } else {
-          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю запрос (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
+          // Nudge the model — add a user message to break the empty-response loop
+          const lastMsg = messages[messages.length - 1]
+          const afterTool = lastMsg?.role === 'tool'
+          const nudge = afterTool
+            ? 'The tool above returned a result. Please analyze it and continue with the task. Respond in the user\'s language.'
+            : 'Please respond to the user\'s request. Think step by step and use tools as needed.'
+          messages.push({ role: 'user', content: `[System: empty response detected, retry ${emptyRetries}/${MAX_EMPTY_RETRIES}] ${nudge}` })
+          debugLog('EMPTY', `Added nudge message (afterTool=${afterTool})`)
+          emit(win, { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${MAX_EMPTY_RETRIES})…` })
         }
         saveSession(session)
         continue
