@@ -47,6 +47,17 @@ let mainWindow: BrowserWindow | null = null
 let agentWorker: Worker | null = null
 let pendingSendResolve: ((result: string) => void) | null = null
 
+const WORKSPACE_CHANGED_DEBOUNCE_MS = 1200
+let workspaceChangedTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleWorkspaceChangedNotify(): void {
+  if (workspaceChangedTimer) clearTimeout(workspaceChangedTimer)
+  workspaceChangedTimer = setTimeout(() => {
+    workspaceChangedTimer = null
+    try { mainWindow?.webContents.send('workspace-files-changed') } catch {}
+  }, WORKSPACE_CHANGED_DEBOUNCE_MS)
+}
+
 function getAgentWorker(): Worker {
   if (!agentWorker) {
     const workerPath = path.join(__dirname, 'agent-worker.js')
@@ -64,7 +75,7 @@ function getAgentWorker(): Worker {
         ipcMain.on('command-approval-response', handler)
         try { mainWindow.webContents.send('agent-event', { type: 'command_approval', name: msg.name, args: msg.args, approvalId: msg.approvalId }) } catch {}
       } else if (msg.type === 'workspace-changed' && mainWindow) {
-        try { mainWindow.webContents.send('workspace-files-changed') } catch {}
+        scheduleWorkspaceChangedNotify()
       } else if (msg.type === 'session-update') {
         updateSessionFromWorker(msg.session)
       } else if (msg.type === 'query-ctx') {
@@ -117,7 +128,7 @@ function createMainBridge(win: BrowserWindow): AgentBridge {
     setCtxSize(n) { serverManager.setCtxSize(n) },
     async queryActualCtxSize() { await serverManager.queryActualCtxSize() },
     isCancelRequested() { return isCancelRequested() },
-    notifyWorkspaceChanged() { try { win.webContents.send('workspace-files-changed') } catch {} },
+    notifyWorkspaceChanged() { scheduleWorkspaceChangedNotify() },
   }
 }
 

@@ -126,7 +126,11 @@ export function useAgent() {
     const off3 = window.api.onBuildStatus((s: string) => {
       setBuildStatus(s)
     })
-    return () => { off1(); off2(); off3() }
+    return () => {
+      off1(); off2(); off3()
+      if (pendingRafRef.current) cancelAnimationFrame(pendingRafRef.current)
+      if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current)
+    }
   }, [])
 
   useEffect(() => {
@@ -150,12 +154,28 @@ export function useAgent() {
     } catch {}
   }, [])
 
-  // Streaming events (thinking/response) are very frequent — batch them
-  const pendingUpdateRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null)
+  // Streaming events (thinking/response) are very frequent — batch with rAF and throttle to avoid blocking editor
+  const pendingRafRef = useRef<number | null>(null)
+  const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dirtyRef = useRef(false)
+  const lastFlushAtRef = useRef(0)
+  const FLUSH_THROTTLE_MS = 100
 
   const flushMessages = useCallback(() => {
     if (!dirtyRef.current) return
+    const now = Date.now()
+    if (now - lastFlushAtRef.current < FLUSH_THROTTLE_MS) {
+      if (!throttleTimerRef.current) {
+        throttleTimerRef.current = setTimeout(() => {
+          throttleTimerRef.current = null
+          lastFlushAtRef.current = Date.now()
+          dirtyRef.current = false
+          setMessages((prev) => [...prev])
+        }, FLUSH_THROTTLE_MS - (now - lastFlushAtRef.current))
+      }
+      return
+    }
+    lastFlushAtRef.current = now
     dirtyRef.current = false
     setMessages((prev) => [...prev])
   }, [])
@@ -188,11 +208,11 @@ export function useAgent() {
         if (ev.content) assistant.content = ev.content
       }
       dirtyRef.current = true
-      if (!pendingUpdateRef.current) {
-        pendingUpdateRef.current = requestAnimationFrame(() => {
-          pendingUpdateRef.current = null
+      if (!pendingRafRef.current) {
+        pendingRafRef.current = requestAnimationFrame(() => {
+          pendingRafRef.current = null
           flushMessages()
-        })
+        }) as unknown as number
       }
       return
     }

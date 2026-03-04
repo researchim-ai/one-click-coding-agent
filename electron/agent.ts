@@ -36,7 +36,8 @@ function debugLog(category: string, ...args: any[]) {
   } catch {}
 }
 
-const NEEDS_APPROVAL = new Set(['execute_command', 'write_file', 'edit_file', 'delete_file', 'append_file'])
+const FILE_OPS_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'delete_file', 'create_directory'])
+const COMMAND_TOOL = 'execute_command'
 
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
@@ -58,7 +59,14 @@ function getMaxIterations(): number { return doGetConfig().maxIterations || 200 
 function getBaseTemperature(): number { return doGetConfig().temperature ?? 0.3 }
 function getIdleTimeoutMs(): number { return (doGetConfig().idleTimeoutSec || 60) * 1000 }
 function getMaxEmptyRetries(): number { return doGetConfig().maxEmptyRetries || 3 }
-function isApprovalRequired(): boolean { return doGetConfig().approvalRequired ?? true }
+/** Whether this tool requires user approval given current config (file ops vs commands split). */
+function needsApprovalForTool(toolName: string, isCustom: boolean): boolean {
+  const cfg = doGetConfig()
+  if (isCustom) return (cfg.approvalForFileOps ?? true) || (cfg.approvalForCommands ?? true)
+  if (FILE_OPS_TOOLS.has(toolName)) return cfg.approvalForFileOps ?? true
+  if (toolName === COMMAND_TOOL) return cfg.approvalForCommands ?? true
+  return false
+}
 
 // Graduated compression thresholds (fraction of message budget)
 const COMPRESS_TOOL_RESULTS_AT = 0.35
@@ -2152,7 +2160,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
           doEmit( { type: 'status', content: `🔧 Tool call обрезался — спасаю частичный контент (${(repairArgs.content ?? '').length} символов)…` })
           doEmit( { type: 'tool_call', name: repairName, args: repairArgs })
 
-          const needsApproval = NEEDS_APPROVAL.has(repairName)
+          const needsApproval = needsApprovalForTool(repairName, false)
           const approved = needsApproval ? await doRequestApproval( repairName, repairArgs) : true
 
           if (approved) {
@@ -2222,7 +2230,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
           doEmit( { type: 'tool_call', name: tc.name, args: tc.args })
 
           const isCustom = recoveredCustomTools.some((ct: any) => ct.name === tc.name)
-          if (isCustom || NEEDS_APPROVAL.has(tc.name)) {
+          if (needsApprovalForTool(tc.name, isCustom)) {
             const approved = await doRequestApproval( tc.name, tc.args)
             if (!approved) {
               const deniedResult = `[Denied by user] Operation "${tc.name}" was not approved.`
@@ -2390,12 +2398,12 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
         consecutiveReReads = 0
       }
 
-      // Request user approval for destructive operations or custom tools
+      // Request user approval when enabled for file ops or commands (or custom tools)
       let result: string
       const customTools = doGetConfig().customTools
       const isCustom = customTools.some((ct) => ct.name === toolName)
 
-      const needsApproval = isApprovalRequired() && (isCustom || NEEDS_APPROVAL.has(toolName))
+      const needsApproval = needsApprovalForTool(toolName, isCustom)
       if (needsApproval) {
         const approved = await doRequestApproval( toolName, toolArgs)
         if (approved) {

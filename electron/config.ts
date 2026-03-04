@@ -21,7 +21,12 @@ export interface AppConfig {
   temperature: number
   idleTimeoutSec: number
   maxEmptyRetries: number
-  approvalRequired: boolean
+  /** @deprecated use approvalForFileOps/approvalForCommands */
+  approvalRequired?: boolean
+  /** Ask before write_file, edit_file, append_file, delete_file, create_directory */
+  approvalForFileOps: boolean
+  /** Ask before execute_command */
+  approvalForCommands: boolean
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -34,7 +39,8 @@ const DEFAULT_CONFIG: AppConfig = {
   temperature: 0.3,
   idleTimeoutSec: 60,
   maxEmptyRetries: 3,
-  approvalRequired: true,
+  approvalForFileOps: true,
+  approvalForCommands: true,
 }
 
 export function resetToDefaults(): AppConfig {
@@ -58,6 +64,11 @@ export function load(): AppConfig {
     const raw = fs.readFileSync(configPath(), 'utf-8')
     const parsed = JSON.parse(raw)
     cached = { ...DEFAULT_CONFIG, ...parsed }
+    // Migrate old single approvalRequired to the two new flags
+    if (parsed.approvalRequired !== undefined && (parsed.approvalForFileOps === undefined || parsed.approvalForCommands === undefined)) {
+      cached.approvalForFileOps = Boolean(parsed.approvalRequired)
+      cached.approvalForCommands = Boolean(parsed.approvalRequired)
+    }
     return cached!
   } catch {
     cached = { ...DEFAULT_CONFIG }

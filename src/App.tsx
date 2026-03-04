@@ -11,7 +11,7 @@ import { StatusBar } from './components/StatusBar'
 import { SessionTabs } from './components/SessionTabs'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TitleBar } from './components/TitleBar'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 export function App() {
   const {
@@ -67,6 +67,18 @@ export function App() {
     setTerminalOpen(true)
   }, [])
 
+  const openTerminalRef = useRef(() => {
+    bottomPanel.setCollapsed(false)
+    setTerminalOpen(true)
+  })
+  openTerminalRef.current = () => {
+    bottomPanel.setCollapsed(false)
+    setTerminalOpen(true)
+  }
+  const onOpenTerminalAt = useCallback((_dir: string) => {
+    openTerminalRef.current()
+  }, [])
+
   const bottomPanel = useResizable({
     direction: 'down',
     initialSize: 250,
@@ -113,13 +125,25 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   })
 
+  const refreshFileRef = useRef(refreshFile)
+  refreshFileRef.current = refreshFile
+  const openFilesRef = useRef(openFiles)
+  openFilesRef.current = openFiles
   useEffect(() => {
     if (!window.api?.onWorkspaceFilesChanged) return
+    let timer: ReturnType<typeof setTimeout> | null = null
     const unsub = window.api.onWorkspaceFilesChanged(() => {
-      openFiles.forEach((f) => refreshFile(f.path))
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        openFilesRef.current.forEach((f) => refreshFileRef.current(f.path))
+      }, 600)
     })
-    return unsub
-  }, [openFiles, refreshFile])
+    return () => {
+      unsub()
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
 
   useEffect(() => {
     if (!window.api?.onMenuAction) return
@@ -207,10 +231,7 @@ export function App() {
               onFileClick={openFile}
               serverOnline={serverOnline}
               onReset={resetChat}
-              onOpenTerminalAt={(dir) => {
-                bottomPanel.setCollapsed(false)
-                setTerminalOpen(true)
-              }}
+              onOpenTerminalAt={onOpenTerminalAt}
             />
           </div>
         )}

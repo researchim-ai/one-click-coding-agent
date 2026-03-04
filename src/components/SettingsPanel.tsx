@@ -57,7 +57,8 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
   const [temperature, setTemperature] = useState(0.3)
   const [idleTimeoutSec, setIdleTimeoutSec] = useState(60)
   const [maxEmptyRetries, setMaxEmptyRetries] = useState(3)
-  const [approvalRequired, setApprovalRequired] = useState(true)
+  const [approvalForFileOps, setApprovalForFileOps] = useState(true)
+  const [approvalForCommands, setApprovalForCommands] = useState(true)
   const [agentDirty, setAgentDirty] = useState(false)
 
   // Prompts state
@@ -97,7 +98,8 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       setTemperature(c.temperature ?? 0.3)
       setIdleTimeoutSec(c.idleTimeoutSec ?? 60)
       setMaxEmptyRetries(c.maxEmptyRetries ?? 3)
-      setApprovalRequired(c.approvalRequired ?? true)
+      setApprovalForFileOps(c.approvalForFileOps ?? (c as any).approvalRequired ?? true)
+      setApprovalForCommands(c.approvalForCommands ?? (c as any).approvalRequired ?? true)
       setAgentDirty(false)
 
       setSysPrompt(p.systemPrompt ?? p.defaultSystemPrompt)
@@ -269,13 +271,15 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               temperature={temperature}
               idleTimeoutSec={idleTimeoutSec}
               maxEmptyRetries={maxEmptyRetries}
-              approvalRequired={approvalRequired}
+              approvalForFileOps={approvalForFileOps}
+              approvalForCommands={approvalForCommands}
               onChange={(field, value) => {
                 if (field === 'maxIterations') setMaxIterations(value as number)
                 else if (field === 'temperature') setTemperature(value as number)
                 else if (field === 'idleTimeoutSec') setIdleTimeoutSec(value as number)
                 else if (field === 'maxEmptyRetries') setMaxEmptyRetries(value as number)
-                else if (field === 'approvalRequired') setApprovalRequired(value as boolean)
+                else if (field === 'approvalForFileOps') setApprovalForFileOps(value as boolean)
+                else if (field === 'approvalForCommands') setApprovalForCommands(value as boolean)
                 setAgentDirty(true)
               }}
             />
@@ -327,7 +331,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
             </span>
             <button
               onClick={async () => {
-                await window.api.saveConfig({ maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalRequired })
+                await window.api.saveConfig({ maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalForFileOps, approvalForCommands })
                 setAgentDirty(false)
               }}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors"
@@ -481,13 +485,14 @@ function ModelTab({
 // ---------------------------------------------------------------------------
 
 function AgentTab({
-  maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalRequired, onChange,
+  maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalForFileOps, approvalForCommands, onChange,
 }: {
   maxIterations: number
   temperature: number
   idleTimeoutSec: number
   maxEmptyRetries: number
-  approvalRequired: boolean
+  approvalForFileOps: boolean
+  approvalForCommands: boolean
   onChange: (field: string, value: number | boolean) => void
 }) {
   return (
@@ -556,17 +561,31 @@ function AgentTab({
         </div>
       </div>
 
-      {/* Approval toggle */}
+      {/* Approval: file ops */}
       <div className="flex items-center justify-between py-2 border-t border-zinc-800">
         <div>
-          <div className="text-sm text-zinc-300">Подтверждение действий</div>
-          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на запись файлов и команды</div>
+          <div className="text-sm text-zinc-300">Подтверждение записи и создания файлов</div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на write_file, edit_file, append_file, delete_file, create_directory</div>
         </div>
         <button
-          onClick={() => onChange('approvalRequired', !approvalRequired)}
-          className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${approvalRequired ? 'bg-blue-600' : 'bg-zinc-700'}`}
+          onClick={() => onChange('approvalForFileOps', !approvalForFileOps)}
+          className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${approvalForFileOps ? 'bg-blue-600' : 'bg-zinc-700'}`}
         >
-          <div className={`w-4.5 h-4.5 rounded-full bg-white absolute top-[3px] transition-transform ${approvalRequired ? 'translate-x-[22px]' : 'translate-x-[3px]'}`} />
+          <div className={`w-4.5 h-4.5 rounded-full bg-white absolute top-[3px] transition-transform ${approvalForFileOps ? 'translate-x-[22px]' : 'translate-x-[3px]'}`} />
+        </button>
+      </div>
+
+      {/* Approval: commands */}
+      <div className="flex items-center justify-between py-2 border-t border-zinc-800">
+        <div>
+          <div className="text-sm text-zinc-300">Подтверждение выполнения команд</div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на execute_command (терминал, сборка, тесты и т.д.)</div>
+        </div>
+        <button
+          onClick={() => onChange('approvalForCommands', !approvalForCommands)}
+          className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${approvalForCommands ? 'bg-blue-600' : 'bg-zinc-700'}`}
+        >
+          <div className={`w-4.5 h-4.5 rounded-full bg-white absolute top-[3px] transition-transform ${approvalForCommands ? 'translate-x-[22px]' : 'translate-x-[3px]'}`} />
         </button>
       </div>
     </div>

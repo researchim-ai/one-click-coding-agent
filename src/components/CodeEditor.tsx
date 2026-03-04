@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useMemo, useState, memo, type MouseEvent } from 'react'
 import hljs from 'highlight.js'
 import type { OpenFile } from '../hooks/useEditor'
 import { ContextMenu, type MenuItem } from './ContextMenu'
@@ -18,7 +18,7 @@ interface Props {
   onAttachCode?: (info: CodeSelectionInfo) => void
 }
 
-export function CodeEditor({ file, workspace, onAttachCode }: Props) {
+export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCode }: Props) {
   const codeRef = useRef<HTMLDivElement>(null)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
 
@@ -213,7 +213,7 @@ export function CodeEditor({ file, workspace, onAttachCode }: Props) {
       )}
     </div>
   )
-}
+})
 
 function getLineHtml(fullHtml: string, lineIndex: number): string {
   const lines = splitHtmlByLines(fullHtml)

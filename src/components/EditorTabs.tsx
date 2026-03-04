@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react'
+import { useState, memo, type MouseEvent } from 'react'
 import type { OpenFile } from '../hooks/useEditor'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
@@ -39,7 +39,7 @@ function LangDot({ language }: { language: string }) {
   return <span className={`text-[8px] ${color}`}>●</span>
 }
 
-export function EditorTabs({ files, activeFilePath, workspace, onSelect, onClose, onCloseAll, onCloseOthers }: Props) {
+export const EditorTabs = memo(function EditorTabs({ files, activeFilePath, workspace, onSelect, onClose, onCloseAll, onCloseOthers }: Props) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; file: OpenFile } | null>(null)
 
   if (files.length === 0) return null
@@ -116,4 +116,4 @@ export function EditorTabs({ files, activeFilePath, workspace, onSelect, onClose
       )}
     </>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type KeyboardEvent, type MouseEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, memo, type KeyboardEvent, type MouseEvent } from 'react'
 import type { FileTreeEntry } from '../../electron/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
@@ -219,7 +219,7 @@ function TreeNode({
   )
 }
 
-export function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat }: Props) {
+export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat }: Props) {
   const [tree, setTree] = useState<FileTreeEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [creatingRoot, setCreatingRoot] = useState<'file' | 'dir' | null>(null)
@@ -242,11 +242,28 @@ export function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnlin
 
   useEffect(() => { loadTree() }, [loadTree])
 
+  const loadTreeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadTreeRef = useRef(loadTree)
+  loadTreeRef.current = loadTree
+  const debouncedLoadTree = useCallback(() => {
+    if (loadTreeTimerRef.current) clearTimeout(loadTreeTimerRef.current)
+    loadTreeTimerRef.current = setTimeout(() => {
+      loadTreeTimerRef.current = null
+      loadTreeRef.current()
+    }, 500)
+  }, [])
+
   useEffect(() => {
     if (!window.api?.onWorkspaceFilesChanged || !workspace) return
-    const unsub = window.api.onWorkspaceFilesChanged(loadTree)
-    return unsub
-  }, [workspace, loadTree])
+    const unsub = window.api.onWorkspaceFilesChanged(debouncedLoadTree)
+    return () => {
+      unsub()
+      if (loadTreeTimerRef.current) {
+        clearTimeout(loadTreeTimerRef.current)
+        loadTreeTimerRef.current = null
+      }
+    }
+  }, [workspace, debouncedLoadTree])
 
   const handlePickDir = async () => {
     const dir = await window.api.pickDirectory()
@@ -495,4 +512,4 @@ export function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnlin
       )}
     </aside>
   )
-}
+})

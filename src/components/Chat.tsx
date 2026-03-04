@@ -55,9 +55,18 @@ export function Chat({
   const [expandedRef, setExpandedRef] = useState<number | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const lastScrollLenRef = useRef(0)
+  const lastScrollIdRef = useRef<string | null>(null)
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const len = messages.length
+    const lastId = len > 0 ? messages[len - 1].id : null
+    const shouldScroll = len !== lastScrollLenRef.current || lastId !== lastScrollIdRef.current
+    lastScrollLenRef.current = len
+    lastScrollIdRef.current = lastId
+    if (shouldScroll) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [messages])
 
   const handleSend = useCallback(async () => {
