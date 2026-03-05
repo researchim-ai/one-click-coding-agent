@@ -18,7 +18,7 @@ export function TitleBar({ children }: TitleBarProps) {
 
   return (
     <div
-      className="h-9 bg-[#010409] border-b border-zinc-800/60 flex items-center px-3 shrink-0 gap-3 select-none"
+      className="h-9 bg-[#0d1117] border-b border-zinc-800/60 flex items-center px-3 shrink-0 gap-3 select-none"
       style={{ WebkitAppRegion: 'drag' } as any}
     >
       {children}

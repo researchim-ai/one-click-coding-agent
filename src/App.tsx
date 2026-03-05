@@ -217,7 +217,7 @@ export function App() {
         {sidebar.collapsed ? (
           <button
             onClick={() => sidebar.setCollapsed(false)}
-            className="w-10 bg-[#010409] border-r border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
+            className="w-10 bg-[#0d1117] border-r border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
             title="Развернуть панель"
           >
             <span className="text-sm">⚡</span>
@@ -290,7 +290,7 @@ export function App() {
                   style={{ height: bottomPanel.size }}
                   className="shrink-0 flex flex-col overflow-hidden"
                 >
-                  <div className="flex items-center justify-between px-3 py-1 bg-[#010409] border-b border-zinc-800/40 shrink-0">
+                  <div className="flex items-center justify-between px-3 py-1 bg-[#0d1117] border-b border-zinc-800/40 shrink-0">
                     <span className="text-[11px] text-zinc-400 font-semibold">Терминал</span>
                     <button
                       onClick={closeTerminal}
@@ -313,7 +313,7 @@ export function App() {
             {chat.collapsed ? (
               <button
                 onClick={() => chat.setCollapsed(false)}
-                className="w-10 bg-[#010409] border-l border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
+                className="w-10 bg-[#0d1117] border-l border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
                 title="Развернуть чат"
               >
                 <span className="text-sm">💬</span>

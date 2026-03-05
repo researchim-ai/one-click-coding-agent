@@ -272,7 +272,7 @@ export function Chat({
 
       {/* Context usage bar */}
       {contextUsage && (
-        <div className="border-t border-zinc-800/40 bg-[#010409] px-3 py-1 flex items-center gap-2">
+        <div className="border-t border-zinc-800/40 bg-[#0d1117] px-3 py-1 flex items-center gap-2">
           <span className="text-[10px] text-zinc-600 shrink-0">Контекст</span>
           <div className="flex-1 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden">
             <div
@@ -299,7 +299,7 @@ export function Chat({
 
       {/* Agent working indicator */}
       {busy && (
-        <div className="flex items-center gap-2 px-4 py-1.5 border-t border-zinc-800/40 bg-[#010409]">
+        <div className="flex items-center gap-2 px-4 py-1.5 border-t border-zinc-800/40 bg-[#0d1117]">
           <span className="flex gap-1">
             <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-[pulse-dot_1.4s_0s_infinite]" />
             <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-[pulse-dot_1.4s_0.2s_infinite]" />
@@ -318,7 +318,7 @@ export function Chat({
       )}
 
       {/* Input area */}
-      <div className="border-t border-zinc-800/60 bg-[#010409]">
+      <div className="border-t border-zinc-800/60 bg-[#0d1117]">
         {/* Attached code references */}
         {codeRefs.length > 0 && (
           <div className="flex flex-col gap-1.5 px-3 pt-2.5 pb-1">

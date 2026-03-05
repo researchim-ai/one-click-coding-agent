@@ -172,6 +172,8 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
       monacoRef.current = monaco
       if (typeof document !== 'undefined') document.body.classList.add('monaco-editor')
 
+      monaco.editor.setTheme('app-dark')
+
       if (linkProviderDisposable.current) {
         linkProviderDisposable.current.dispose()
         linkProviderDisposable.current = null
@@ -509,8 +511,8 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
   const monacoLang = MONACO_LANG[file.language] ?? file.language ?? 'plaintext'
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e]">
-      <div className="flex items-center gap-1.5 px-4 py-1.5 bg-[#1e1e1e] border-b border-zinc-700/50 text-[11px] text-zinc-500 font-mono shrink-0">
+    <div className="flex flex-col h-full bg-[#0d1117]">
+      <div className="flex items-center gap-1.5 px-4 py-1.5 bg-[#0d1117] border-b border-zinc-800/60 text-[11px] text-zinc-500 font-mono shrink-0">
         {file.path.split(/[\\/]/).map((part, i, arr) => (
           <span key={i} className="flex items-center gap-1.5">
             {i > 0 && <span className="text-zinc-600">/</span>}
@@ -524,8 +526,19 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
           height="100%"
           language={monacoLang}
           value={file.content}
-          theme="vs-dark"
+          theme="app-dark"
           path={file.path}
+          beforeMount={(monaco) => {
+            monaco.editor.defineTheme('app-dark', {
+              base: 'vs-dark',
+              inherit: true,
+              rules: [],
+              colors: {
+                'editor.background': '#0d1117',
+                'editor.foreground': '#c9d1d9',
+              },
+            })
+          }}
           onMount={handleEditorMount}
           onChange={(value) => onContentChange?.(value ?? '')}
           options={{
@@ -547,11 +560,11 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
             fixedOverflowWidgets: true,
             overflowWidgetsDomNode: typeof document !== 'undefined' ? document.body : undefined,
           }}
-          loading={<div className="flex items-center justify-center h-full text-zinc-500">Загрузка редактора…</div>}
+          loading={<div className="flex items-center justify-center h-full bg-[#0d1117] text-zinc-500">Загрузка редактора…</div>}
         />
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 px-4 py-1 bg-[#1e1e1e] border-t border-zinc-700/50 text-[11px] text-zinc-500 font-mono shrink-0">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 px-4 py-1 bg-[#0d1117] border-t border-zinc-800/60 text-[11px] text-zinc-500 font-mono shrink-0">
         <span>{file.language}</span>
         <span>{file.lines} lines</span>
         <span>{formatSize(file.size)}</span>

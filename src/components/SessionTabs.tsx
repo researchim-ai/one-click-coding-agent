@@ -46,7 +46,7 @@ export function SessionTabs({
   const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
 
   return (
-    <div className="flex items-center bg-[#010409] border-b border-zinc-800/60 shrink-0 min-h-[33px]">
+    <div className="flex items-center bg-[#0d1117] border-b border-zinc-800/60 shrink-0 min-h-[33px]">
       {/* Scrollable tabs */}
       <div
         ref={scrollRef}

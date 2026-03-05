@@ -76,7 +76,7 @@ export const EditorTabs = memo(function EditorTabs({ files, activeFilePath, work
 
   return (
     <>
-      <div className="flex items-stretch bg-[#010409] border-b border-zinc-800/60 overflow-x-auto shrink-0">
+      <div className="flex items-stretch bg-[#0d1117] border-b border-zinc-800/60 overflow-x-auto shrink-0">
         {files.map((file) => {
           const active = file.path === activeFilePath
           return (
@@ -85,7 +85,7 @@ export const EditorTabs = memo(function EditorTabs({ files, activeFilePath, work
               className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r border-zinc-800/40 transition-colors shrink-0 ${
                 active
                   ? 'bg-[#0d1117] text-zinc-200 border-t-2 border-t-blue-500'
-                  : 'bg-[#010409] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50 border-t-2 border-t-transparent'
+                  : 'bg-[#0d1117] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50 border-t-2 border-t-transparent'
               }`}
               onClick={() => onSelect(file.path)}
               onContextMenu={(e) => handleContextMenu(e, file)}

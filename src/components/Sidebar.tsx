@@ -425,7 +425,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   const dirName = workspace ? workspace.split(/[\\/]/).pop() || workspace : null
 
   return (
-    <aside className="h-full bg-[#010409] border-r border-zinc-800/60 flex flex-col">
+    <aside className="h-full bg-[#0d1117] border-r border-zinc-800/60 flex flex-col">
       {/* Header */}
       <div className="px-3 py-2 border-b border-zinc-800/60 flex items-center gap-2">
         <button
