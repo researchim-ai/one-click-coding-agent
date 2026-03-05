@@ -63,13 +63,14 @@ export function load(): AppConfig {
   try {
     const raw = fs.readFileSync(configPath(), 'utf-8')
     const parsed = JSON.parse(raw)
-    cached = { ...DEFAULT_CONFIG, ...parsed }
+    const loaded = { ...DEFAULT_CONFIG, ...parsed }
     // Migrate old single approvalRequired to the two new flags
     if (parsed.approvalRequired !== undefined && (parsed.approvalForFileOps === undefined || parsed.approvalForCommands === undefined)) {
-      cached.approvalForFileOps = Boolean(parsed.approvalRequired)
-      cached.approvalForCommands = Boolean(parsed.approvalRequired)
+      loaded.approvalForFileOps = Boolean(parsed.approvalRequired)
+      loaded.approvalForCommands = Boolean(parsed.approvalRequired)
     }
-    return cached!
+    cached = loaded
+    return loaded
   } catch {
     cached = { ...DEFAULT_CONFIG }
     return cached!

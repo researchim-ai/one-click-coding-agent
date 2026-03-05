@@ -140,6 +140,12 @@ export function useEditor() {
     } catch {}
   }, [])
 
+  const updateFileContent = useCallback((filePath: string, content: string) => {
+    setOpenFiles((prev) =>
+      prev.map((f) => f.path === filePath ? { ...f, content, lines: content.split('\n').length } : f)
+    )
+  }, [])
+
   const closeAll = useCallback(() => {
     setOpenFiles([])
     setActiveFilePath(null)
@@ -161,6 +167,7 @@ export function useEditor() {
     closeAll,
     closeOthers,
     refreshFile,
+    updateFileContent,
     setActiveFilePath,
   }
 }

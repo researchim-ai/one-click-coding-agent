@@ -30,6 +30,18 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('list-files', workspace, dirPath),
   readFileContent: (filePath: string): Promise<{ content: string; size: number; lines: number }> =>
     ipcRenderer.invoke('read-file-content', filePath),
+  writeFile: (filePath: string, content: string): Promise<void> =>
+    ipcRenderer.invoke('write-file', filePath, content),
+  tsGetDefinition: (workspacePath: string, filePath: string, fileContent: string, line: number, column: number) =>
+    ipcRenderer.invoke('ts-get-definition', workspacePath, filePath, fileContent, line, column),
+  tsGetHover: (workspacePath: string, filePath: string, fileContent: string, line: number, column: number) =>
+    ipcRenderer.invoke('ts-get-hover', workspacePath, filePath, fileContent, line, column),
+  tsGetCompletions: (workspacePath: string, filePath: string, fileContent: string, line: number, column: number) =>
+    ipcRenderer.invoke('ts-get-completions', workspacePath, filePath, fileContent, line, column),
+  tsGetDiagnostics: (workspacePath: string, filePath: string, fileContent?: string) =>
+    ipcRenderer.invoke('ts-get-diagnostics', workspacePath, filePath, fileContent),
+  pyResolveModule: (workspacePath: string, moduleName: string) =>
+    ipcRenderer.invoke('py-resolve-module', workspacePath, moduleName),
 
   onAgentEvent: (cb: (event: AgentEvent) => void) => {
     const listener = (_: any, data: AgentEvent) => cb(data)

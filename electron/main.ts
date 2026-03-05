@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, nativeTheme, globalShortcut } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
@@ -41,6 +41,8 @@ import {
   type SessionInfo, type AgentBridge,
 } from './agent'
 import * as terminalManager from './terminal-manager'
+import * as tsService from './ts-service'
+import * as pyResolve from './py-resolve'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
@@ -258,6 +260,14 @@ function createWindow() {
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+    mainWindow.webContents.once('did-finish-load', () => {
+      globalShortcut.register('F12', () => mainWindow?.webContents.toggleDevTools())
+      globalShortcut.register('CommandOrControl+Shift+I', () => mainWindow?.webContents.toggleDevTools())
+    })
+    mainWindow.on('closed', () => {
+      globalShortcut.unregister('F12')
+      globalShortcut.unregister('CommandOrControl+Shift+I')
+    })
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
@@ -557,6 +567,28 @@ function registerIpcHandlers() {
     } catch (e: any) {
       throw new Error(`Cannot read file: ${e.message}`)
     }
+  })
+
+  ipcMain.handle('write-file', async (_e, filePath: string, content: string) => {
+    const dir = path.dirname(filePath)
+    fs.mkdirSync(dir, { recursive: true })
+    await fs.promises.writeFile(filePath, content, 'utf-8')
+  })
+
+  ipcMain.handle('ts-get-definition', (_e, workspacePath: string, filePath: string, fileContent: string, line: number, column: number) => {
+    return tsService.getDefinition(workspacePath, filePath, fileContent, line, column)
+  })
+  ipcMain.handle('ts-get-hover', (_e, workspacePath: string, filePath: string, fileContent: string, line: number, column: number) => {
+    return tsService.getHover(workspacePath, filePath, fileContent, line, column)
+  })
+  ipcMain.handle('ts-get-completions', (_e, workspacePath: string, filePath: string, fileContent: string, line: number, column: number) => {
+    return tsService.getCompletions(workspacePath, filePath, fileContent, line, column)
+  })
+  ipcMain.handle('ts-get-diagnostics', (_e, workspacePath: string, filePath: string, fileContent?: string) => {
+    return tsService.getDiagnostics(workspacePath, filePath, fileContent)
+  })
+  ipcMain.handle('py-resolve-module', (_e, workspacePath: string, moduleName: string) => {
+    return pyResolve.resolvePythonModule(workspacePath, moduleName)
   })
 
   // File creation

@@ -24,7 +24,7 @@ export function App() {
 
   const {
     openFiles, activeFile, activeFilePath,
-    openFile, closeFile, closeAll, closeOthers, refreshFile, setActiveFilePath,
+    openFile, closeFile, closeAll, closeOthers, refreshFile, updateFileContent, setActiveFilePath,
   } = useEditor()
 
   const [setupDone, setSetupDone] = useState(false)
@@ -252,7 +252,7 @@ export function App() {
             {/* Center: editor + bottom terminal */}
             <div className="flex-1 flex flex-col overflow-hidden min-w-0">
               {/* Editor */}
-              <div className="flex-1 flex flex-col overflow-hidden bg-[#0d1117] panel-contain">
+              <div className="flex-1 flex flex-col overflow-hidden bg-[#0d1117]">
                 <EditorTabs
                   files={openFiles}
                   activeFilePath={activeFilePath}
@@ -263,7 +263,14 @@ export function App() {
                   onCloseOthers={closeOthers}
                 />
                 {activeFile ? (
-                  <CodeEditor file={activeFile} workspace={workspace} onAttachCode={addCodeRef} />
+                  <CodeEditor
+                    file={activeFile}
+                    workspace={workspace}
+                    onAttachCode={addCodeRef}
+                    onOpenFile={openFile}
+                    onContentChange={(content) => updateFileContent(activeFile.path, content)}
+                    onAfterSave={() => refreshFile(activeFile.path)}
+                  />
                 ) : (
                   <div className="flex-1 flex items-center justify-center text-zinc-600">
                     <div className="text-center">

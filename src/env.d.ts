@@ -31,6 +31,12 @@ interface ElectronAPI {
   pickDirectory(): Promise<string | null>
   listFiles(workspace: string, dirPath?: string): Promise<import('../electron/types').FileTreeEntry[]>
   readFileContent(filePath: string): Promise<{ content: string; size: number; lines: number }>
+  writeFile(filePath: string, content: string): Promise<void>
+  tsGetDefinition(workspacePath: string, filePath: string, fileContent: string, line: number, column: number): Promise<{ path: string; startLine: number; startColumn: number; endLine: number; endColumn: number } | null>
+  tsGetHover(workspacePath: string, filePath: string, fileContent: string, line: number, column: number): Promise<{ contents: string } | null>
+  tsGetCompletions(workspacePath: string, filePath: string, fileContent: string, line: number, column: number): Promise<{ label: string; kind: number; insertText?: string; detail?: string }[]>
+  tsGetDiagnostics(workspacePath: string, filePath: string, fileContent?: string): Promise<{ line: number; column: number; message: string; severity: 'error' | 'warning' }[]>
+  pyResolveModule(workspacePath: string, moduleName: string): Promise<string | null>
   respondApproval(approvalId: string, approved: boolean): void
 
   // Session management
