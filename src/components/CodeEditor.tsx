@@ -125,9 +125,11 @@ interface Props {
   onOpenFile?: (path: string) => void
   onContentChange?: (content: string) => void
   onAfterSave?: () => void
+  /** Called when user clicks a directory segment in the path breadcrumb (to expand that dir in the sidebar). */
+  onBreadcrumbClick?: (dirPath: string) => void
 }
 
-export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCode, onOpenFile, onContentChange, onAfterSave }: Props) {
+export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCode, onOpenFile, onContentChange, onAfterSave, onBreadcrumbClick }: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
@@ -510,13 +512,31 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
 
   const monacoLang = MONACO_LANG[file.language] ?? file.language ?? 'plaintext'
 
+  const pathSep = file.path.includes('\\') ? '\\' : '/'
+  const pathParts = file.path.split(pathSep)
+  const pathUpTo = (idx: number): string => {
+    if (pathParts[0] === '') return pathSep + pathParts.slice(1, idx + 1).join(pathSep)
+    return pathParts.slice(0, idx + 1).join(pathSep)
+  }
+
   return (
     <div className="flex flex-col h-full bg-[#0d1117]">
-      <div className="flex items-center gap-1.5 px-4 py-1.5 bg-[#0d1117] border-b border-zinc-800/60 text-[11px] text-zinc-500 font-mono shrink-0">
-        {file.path.split(/[\\/]/).map((part, i, arr) => (
-          <span key={i} className="flex items-center gap-1.5">
-            {i > 0 && <span className="text-zinc-600">/</span>}
-            <span className={i === arr.length - 1 ? 'text-zinc-300' : ''}>{part}</span>
+      <div className="flex items-center gap-1.5 px-4 py-1.5 bg-[#0d1117] border-b border-zinc-800/60 text-[11px] text-zinc-500 font-mono shrink-0 min-w-0">
+        {pathParts.map((part, i, arr) => (
+          <span key={i} className="flex items-center gap-1.5 shrink-0">
+            {i > 0 && <span className="text-zinc-600">{pathSep}</span>}
+            {onBreadcrumbClick && i < arr.length - 1 ? (
+              <button
+                type="button"
+                className="text-zinc-400 hover:text-blue-400 hover:underline truncate max-w-[120px] cursor-pointer"
+                title={pathUpTo(i)}
+                onClick={() => onBreadcrumbClick(pathUpTo(i))}
+              >
+                {part || (pathSep === '/' ? '/' : '')}
+              </button>
+            ) : (
+              <span className={i === arr.length - 1 ? 'text-zinc-300' : 'text-zinc-500'}>{part || (pathSep === '/' ? '/' : '')}</span>
+            )}
           </span>
         ))}
       </div>

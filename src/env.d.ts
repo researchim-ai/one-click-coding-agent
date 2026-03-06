@@ -31,6 +31,8 @@ interface ElectronAPI {
   pickDirectory(): Promise<string | null>
   listFiles(workspace: string, dirPath?: string): Promise<import('../electron/types').FileTreeEntry[]>
   getGitStatus(workspace: string): Promise<import('../electron/git').GitStatus>
+  getGitNumstat(workspace: string): Promise<import('../electron/git').GitNumstatEntry[]>
+  getGitFileAtHead(workspace: string, relativePath: string): Promise<string | null>
   readFileContent(filePath: string): Promise<{ content: string; size: number; lines: number }>
   writeFile(filePath: string, content: string): Promise<void>
   tsGetDefinition(workspacePath: string, filePath: string, fileContent: string, line: number, column: number): Promise<{ path: string; startLine: number; startColumn: number; endLine: number; endColumn: number } | null>

@@ -11,6 +11,7 @@ import { StatusBar } from './components/StatusBar'
 import { SessionTabs } from './components/SessionTabs'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TitleBar } from './components/TitleBar'
+import { DiffViewer } from './components/DiffViewer'
 import { useState, useEffect, useCallback, useRef } from 'react'
 
 export function App() {
@@ -32,6 +33,33 @@ export function App() {
   const [codeRefs, setCodeRefs] = useState<CodeReference[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined)
+  const [diffView, setDiffView] = useState<{ filePath: string; original: string; modified: string } | null>(null)
+  const [breadcrumbExpandTo, setBreadcrumbExpandTo] = useState<string | null>(null)
+
+  useEffect(() => {
+    setBreadcrumbExpandTo(null)
+  }, [activeFilePath])
+
+  const handleOpenDiff = useCallback(async (filePath: string) => {
+    if (!workspace || !window.api?.getGitFileAtHead || !window.api?.readFileContent) return
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    const rel = filePath.startsWith(workspace)
+      ? filePath.slice(workspace.length).replace(/^[/\\]+/, '').replace(/[/\\]+/g, '/')
+      : filePath
+    try {
+      const [original, fileData] = await Promise.all([
+        window.api.getGitFileAtHead(workspace, rel),
+        window.api.readFileContent(filePath),
+      ])
+      setDiffView({
+        filePath,
+        original: original ?? '',
+        modified: fileData?.content ?? '',
+      })
+    } catch {
+      setDiffView(null)
+    }
+  }, [workspace])
 
   const addCodeRef = useCallback((ref: CodeReference) => {
     setCodeRefs((prev) => {
@@ -232,6 +260,9 @@ export function App() {
               serverOnline={serverOnline}
               onReset={resetChat}
               onOpenTerminalAt={onOpenTerminalAt}
+              onOpenDiff={handleOpenDiff}
+              expandToPath={breadcrumbExpandTo ?? activeFilePath ?? null}
+              activeFilePath={activeFilePath}
             />
           </div>
         )}
@@ -253,31 +284,43 @@ export function App() {
             <div className="flex-1 flex flex-col overflow-hidden min-w-0">
               {/* Editor */}
               <div className="flex-1 flex flex-col overflow-hidden bg-[#0d1117]">
-                <EditorTabs
-                  files={openFiles}
-                  activeFilePath={activeFilePath}
-                  workspace={workspace}
-                  onSelect={setActiveFilePath}
-                  onClose={closeFile}
-                  onCloseAll={closeAll}
-                  onCloseOthers={closeOthers}
-                />
-                {activeFile ? (
-                  <CodeEditor
-                    file={activeFile}
-                    workspace={workspace}
-                    onAttachCode={addCodeRef}
-                    onOpenFile={openFile}
-                    onContentChange={(content) => updateFileContent(activeFile.path, content)}
-                    onAfterSave={() => refreshFile(activeFile.path)}
+                {diffView ? (
+                  <DiffViewer
+                    filePath={diffView.filePath}
+                    original={diffView.original}
+                    modified={diffView.modified}
+                    onClose={() => setDiffView(null)}
                   />
                 ) : (
-                  <div className="flex-1 flex items-center justify-center text-zinc-600">
-                    <div className="text-center">
-                      <div className="text-4xl mb-3 opacity-30">⚡</div>
-                      <p className="text-sm">Выбери файл слева</p>
-                    </div>
-                  </div>
+                  <>
+                    <EditorTabs
+                      files={openFiles}
+                      activeFilePath={activeFilePath}
+                      workspace={workspace}
+                      onSelect={setActiveFilePath}
+                      onClose={closeFile}
+                      onCloseAll={closeAll}
+                      onCloseOthers={closeOthers}
+                    />
+                    {activeFile ? (
+                      <CodeEditor
+                        file={activeFile}
+                        workspace={workspace}
+                        onAttachCode={addCodeRef}
+                        onOpenFile={openFile}
+                        onContentChange={(content) => updateFileContent(activeFile.path, content)}
+                        onAfterSave={() => refreshFile(activeFile.path)}
+                        onBreadcrumbClick={(dirPath) => setBreadcrumbExpandTo(dirPath)}
+                      />
+                    ) : (
+                      <div className="flex-1 flex items-center justify-center text-zinc-600">
+                        <div className="text-center">
+                          <div className="text-4xl mb-3 opacity-30">⚡</div>
+                          <p className="text-sm">Выбери файл слева</p>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 

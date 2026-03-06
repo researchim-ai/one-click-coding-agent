@@ -73,3 +73,57 @@ export function getStatus(workspace: string): GitStatus {
     isRepo: true,
   }
 }
+
+export interface GitNumstatEntry {
+  path: string
+  added: number
+  deleted: number
+}
+
+/**
+ * Get added/deleted line counts per file (for diff stats in UI).
+ * Runs `git diff --numstat HEAD` and parses output.
+ */
+export function getNumstat(workspace: string): GitNumstatEntry[] {
+  if (!workspace?.trim()) return []
+
+  const result = spawnSync('git', ['diff', '--numstat', 'HEAD'], {
+    cwd: workspace,
+    encoding: 'utf8',
+    timeout: 15000,
+  })
+
+  if (result.error || result.status !== 0) return []
+
+  const lines = (result.stdout || '').trim().split('\n')
+  const entries: GitNumstatEntry[] = []
+  for (const line of lines) {
+    const parts = line.split(/\s+/)
+    if (parts.length >= 3) {
+      const added = parseInt(parts[0], 10) || 0
+      const deleted = parseInt(parts[1], 10) || 0
+      let filePath = parts.slice(2).join(' ').trim()
+      if (filePath.includes(' -> ')) filePath = filePath.split(' -> ')[1]?.trim() || filePath
+      if (filePath) entries.push({ path: normalizeRelPath(filePath), added, deleted })
+    }
+  }
+  return entries
+}
+
+/**
+ * Get file content from HEAD (for diff view: original version).
+ * Returns null if file is new (untracked) or error.
+ */
+export function getFileContentAtHead(workspace: string, relativePath: string): string | null {
+  if (!workspace?.trim() || !relativePath?.trim()) return null
+
+  const normalized = relativePath.split(path.sep).filter(Boolean).join('/')
+  const result = spawnSync('git', ['show', `HEAD:${normalized}`], {
+    cwd: workspace,
+    encoding: 'utf8',
+    timeout: 10000,
+  })
+
+  if (result.error || result.status !== 0) return null
+  return result.stdout ?? null
+}

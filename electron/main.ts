@@ -559,6 +559,8 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('git-status', (_e, workspace: string) => git.getStatus(workspace))
+  ipcMain.handle('git-numstat', (_e, workspace: string) => git.getNumstat(workspace))
+  ipcMain.handle('git-file-at-head', (_e, workspace: string, relativePath: string) => git.getFileContentAtHead(workspace, relativePath))
 
   ipcMain.handle('read-file-content', async (_e, filePath: string) => {
     try {

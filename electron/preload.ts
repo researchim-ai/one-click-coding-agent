@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('list-files', workspace, dirPath),
   getGitStatus: (workspace: string): Promise<import('./git').GitStatus> =>
     ipcRenderer.invoke('git-status', workspace),
+  getGitNumstat: (workspace: string): Promise<import('./git').GitNumstatEntry[]> =>
+    ipcRenderer.invoke('git-numstat', workspace),
+  getGitFileAtHead: (workspace: string, relativePath: string): Promise<string | null> =>
+    ipcRenderer.invoke('git-file-at-head', workspace, relativePath),
   readFileContent: (filePath: string): Promise<{ content: string; size: number; lines: number }> =>
     ipcRenderer.invoke('read-file-content', filePath),
   writeFile: (filePath: string, content: string): Promise<void> =>

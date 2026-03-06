@@ -2,6 +2,19 @@ import { useState, useEffect, useCallback, useRef, useMemo, memo, type KeyboardE
 import type { FileTreeEntry } from '../../electron/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
+/** Returns parent directory paths (ancestors) of the given path, for expanding tree. */
+function getParentPaths(filePath: string): string[] {
+  const sep = filePath.includes('\\') ? '\\' : '/'
+  const parts = filePath.split(sep)
+  if (parts.length <= 1) return []
+  const dirParts = parts.slice(0, -1)
+  if (dirParts.length === 0) return []
+  if (parts[0] === '') {
+    return [sep, ...Array.from({ length: dirParts.length - 1 }, (_, i) => sep + dirParts.slice(1, i + 2).join(sep))]
+  }
+  return dirParts.map((_, i) => dirParts.slice(0, i + 1).join(sep))
+}
+
 interface Props {
   workspace: string
   onWorkspaceChange: (ws: string) => void
@@ -10,6 +23,11 @@ interface Props {
   onReset: () => void
   onOpenTerminalAt?: (dir: string) => void
   onAttachToChat?: (filePath: string) => void
+  onOpenDiff?: (filePath: string) => void
+  /** When set, expand tree to show this path (e.g. active file or breadcrumb-clicked dir). */
+  expandToPath?: string | null
+  /** Path of the currently active file in the editor (for highlighting in tree). */
+  activeFilePath?: string | null
 }
 
 interface CtxMenuState {
@@ -90,6 +108,9 @@ function TreeNode({
   renamingPath, ctxCreateAt, onRenameSubmit, onRenameCancel,
   onCtxCreateSubmit, onCtxCreateCancel,
   gitStatusByPath,
+  expandedPaths,
+  setExpandedPaths,
+  activeFilePath,
 }: {
   entry: FileTreeEntry
   depth: number
@@ -103,17 +124,26 @@ function TreeNode({
   onCtxCreateSubmit: (name: string) => void
   onCtxCreateCancel: () => void
   gitStatusByPath?: Map<string, string>
+  expandedPaths: Set<string>
+  setExpandedPaths: (fn: (prev: Set<string>) => Set<string>) => void
+  activeFilePath?: string | null
 }) {
-  const [expanded, setExpanded] = useState(depth < 1)
+  const isExpanded = expandedPaths.has(entry.path) || depth < 1
+  const setExpanded = (exp: boolean) => setExpandedPaths((prev) => {
+    const next = new Set(prev)
+    if (exp) next.add(entry.path)
+    else next.delete(entry.path)
+    return next
+  })
   const [creating, setCreating] = useState<'file' | 'dir' | null>(null)
 
   const isRenaming = renamingPath === entry.path
   const isCtxCreateTarget = ctxCreateAt?.dirPath === entry.path
+  const isActive = activeFilePath != null && entry.path === activeFilePath
 
-  // auto-expand when context-menu create targets this dir
   useEffect(() => {
     if (isCtxCreateTarget) setExpanded(true)
-  }, [isCtxCreateTarget])
+  }, [isCtxCreateTarget, entry.path])
 
   const handleCreate = async (name: string) => {
     const sep = entry.path.includes('\\') ? '\\' : '/'
@@ -158,7 +188,7 @@ function TreeNode({
       <button
         onClick={() => onFileClick(entry.path)}
         onContextMenu={handleCtx}
-        className="w-full flex items-center gap-1.5 py-[3px] px-2 hover:bg-zinc-800/60 rounded text-xs cursor-pointer select-none text-left group"
+        className={`w-full flex items-center gap-1.5 py-[3px] px-2 rounded text-xs cursor-pointer select-none text-left group ${isActive ? 'bg-blue-500/20 text-zinc-100' : 'hover:bg-zinc-800/60'}`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         <FileIcon name={entry.name} isDir={false} />
@@ -180,10 +210,10 @@ function TreeNode({
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         <button
-          onClick={() => setExpanded((e) => !e)}
+          onClick={() => setExpanded(!isExpanded)}
           className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer text-left"
         >
-          <span className="text-zinc-500 text-[10px] w-3 text-center">{expanded ? '▼' : '▶'}</span>
+          <span className="text-zinc-500 text-[10px] w-3 text-center">{isExpanded ? '▼' : '▶'}</span>
           <FileIcon name={entry.name} isDir={true} />
           <span className="truncate text-zinc-200 font-medium">{entry.name}</span>
         </button>
@@ -200,7 +230,7 @@ function TreeNode({
           >📁</button>
         </div>
       </div>
-      {expanded && (
+      {isExpanded && (
         <>
           {isCtxCreateTarget && (
             <InlineInput
@@ -233,6 +263,9 @@ function TreeNode({
               onCtxCreateSubmit={onCtxCreateSubmit}
               onCtxCreateCancel={onCtxCreateCancel}
               gitStatusByPath={gitStatusByPath}
+              expandedPaths={expandedPaths}
+              setExpandedPaths={setExpandedPaths}
+              activeFilePath={activeFilePath}
             />
           ))}
         </>
@@ -241,7 +274,7 @@ function TreeNode({
   )
 }
 
-export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat }: Props) {
+export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat, onOpenDiff, expandToPath, activeFilePath }: Props) {
   const [tree, setTree] = useState<FileTreeEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [creatingRoot, setCreatingRoot] = useState<'file' | 'dir' | null>(null)
@@ -250,7 +283,20 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   const [renamingOrigName, setRenamingOrigName] = useState<string>('')
   const [ctxCreateAt, setCtxCreateAt] = useState<{ dirPath: string; type: 'file' | 'dir' } | null>(null)
   const [gitStatus, setGitStatus] = useState<import('../../electron/git').GitStatus | null>(null)
+  const [gitNumstat, setGitNumstat] = useState<import('../../electron/git').GitNumstatEntry[]>([])
   const [sourceControlOpen, setSourceControlOpen] = useState(true)
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set())
+
+  useEffect(() => {
+    if (!expandToPath) return
+    const parents = getParentPaths(expandToPath)
+    if (parents.length === 0) return
+    setExpandedPaths((prev) => {
+      const next = new Set(prev)
+      parents.forEach((p) => next.add(p))
+      return next
+    })
+  }, [expandToPath])
 
   const loadTree = useCallback(async () => {
     if (!workspace) { setTree([]); return }
@@ -292,10 +338,15 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   const loadGitStatus = useCallback(async () => {
     if (!workspace || !window.api?.getGitStatus) return
     try {
-      const status = await window.api.getGitStatus(workspace)
+      const [status, numstat] = await Promise.all([
+        window.api.getGitStatus(workspace),
+        window.api.getGitNumstat?.(workspace) ?? Promise.resolve([]),
+      ])
       setGitStatus(status)
+      setGitNumstat(Array.isArray(numstat) ? numstat : [])
     } catch {
       setGitStatus(null)
+      setGitNumstat([])
     }
   }, [workspace])
 
@@ -329,6 +380,14 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     }
     return map
   }, [workspace, gitStatus])
+
+  const numstatByPath = useMemo(() => {
+    const map = new Map<string, { added: number; deleted: number }>()
+    for (const n of gitNumstat) {
+      map.set(n.path, { added: n.added, deleted: n.deleted })
+    }
+    return map
+  }, [gitNumstat])
 
   const handlePickDir = async () => {
     const dir = await window.api.pickDirectory()
@@ -557,6 +616,9 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
             onCtxCreateSubmit={handleCtxCreateSubmit}
             onCtxCreateCancel={() => setCtxCreateAt(null)}
             gitStatusByPath={gitStatusByPath}
+            expandedPaths={expandedPaths}
+            setExpandedPaths={setExpandedPaths}
+            activeFilePath={activeFilePath}
           />
         ))}
       </div>
@@ -594,18 +656,42 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                     <div className="space-y-0.5">
                       {gitStatus.files.slice(0, 50).map((f) => {
                         const badge = gitStatusLabel(f.status)
+                        const stats = numstatByPath.get(f.path)
+                        const sep = workspace.includes('\\') ? '\\' : '/'
+                        const fullPath = (workspace + sep + f.path).replace(/[/\\]+/g, sep)
                         return (
                           <div
                             key={f.path}
-                            className="flex items-center gap-1.5 py-0.5 px-1 rounded text-[10px] hover:bg-zinc-800/50 cursor-pointer truncate"
-                            onClick={() => {
-                              const sep = workspace.includes('\\') ? '\\' : '/'
-                              onFileClick((workspace + sep + f.path).replace(/[/\\]+/g, sep))
-                            }}
+                            className="flex items-center gap-1 py-0.5 px-1 rounded text-[10px] hover:bg-zinc-800/50 group"
                             title={f.path}
                           >
-                            <span className={`shrink-0 font-semibold w-3 ${badge.className}`}>{badge.label}</span>
-                            <span className="truncate text-zinc-400">{f.path}</span>
+                            <div
+                              className="flex items-center gap-1 min-w-0 flex-1 cursor-pointer truncate"
+                              onClick={() => onFileClick(fullPath)}
+                            >
+                              <span className={`shrink-0 font-semibold w-3 ${badge.className}`}>{badge.label}</span>
+                              <span className="truncate text-zinc-400">{f.path}</span>
+                            </div>
+                            {(stats?.added !== undefined || stats?.deleted !== undefined) && (
+                              <span className="shrink-0 text-emerald-400/90 tabular-nums">
+                                +{stats?.added ?? 0}
+                              </span>
+                            )}
+                            {(stats?.added !== undefined || stats?.deleted !== undefined) && (
+                              <span className="shrink-0 text-red-400/90 tabular-nums">
+                                -{stats?.deleted ?? 0}
+                              </span>
+                            )}
+                            {onOpenDiff && (
+                              <button
+                                type="button"
+                                className="shrink-0 opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-blue-400 cursor-pointer"
+                                title="Показать diff"
+                                onClick={(e) => { e.stopPropagation(); onOpenDiff(fullPath) }}
+                              >
+                                ⇔
+                              </button>
+                            )}
                           </div>
                         )
                       })}
