@@ -43,6 +43,7 @@ import {
 import * as terminalManager from './terminal-manager'
 import * as tsService from './ts-service'
 import * as pyResolve from './py-resolve'
+import * as git from './git'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
@@ -556,6 +557,8 @@ function registerIpcHandlers() {
     if (!target) return []
     return readTree(target, 4)
   })
+
+  ipcMain.handle('git-status', (_e, workspace: string) => git.getStatus(workspace))
 
   ipcMain.handle('read-file-content', async (_e, filePath: string) => {
     try {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, memo, type KeyboardEvent, type MouseEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, memo, type KeyboardEvent, type MouseEvent } from 'react'
 import type { FileTreeEntry } from '../../electron/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
@@ -74,10 +74,22 @@ function InlineInput({
   )
 }
 
+function gitStatusLabel(xy: string): { label: string; className: string } {
+  const x = xy[0] ?? ''
+  const y = xy[1] ?? ''
+  if (x === '?' || y === '?') return { label: 'U', className: 'text-amber-400' }
+  if (x === 'A' || y === 'A') return { label: 'A', className: 'text-emerald-400' }
+  if (x === 'D' || y === 'D') return { label: 'D', className: 'text-red-400' }
+  if (x === 'M' || y === 'M' || x === 'm' || y === 'm') return { label: 'M', className: 'text-orange-400' }
+  if (x === 'U' || y === 'U') return { label: 'U', className: 'text-purple-400' }
+  return { label: xy.slice(0, 1) || ' ', className: 'text-zinc-500' }
+}
+
 function TreeNode({
   entry, depth, onFileClick, onRefresh, onContextMenu,
   renamingPath, ctxCreateAt, onRenameSubmit, onRenameCancel,
   onCtxCreateSubmit, onCtxCreateCancel,
+  gitStatusByPath,
 }: {
   entry: FileTreeEntry
   depth: number
@@ -90,6 +102,7 @@ function TreeNode({
   onRenameCancel: () => void
   onCtxCreateSubmit: (name: string) => void
   onCtxCreateCancel: () => void
+  gitStatusByPath?: Map<string, string>
 }) {
   const [expanded, setExpanded] = useState(depth < 1)
   const [creating, setCreating] = useState<'file' | 'dir' | null>(null)
@@ -137,6 +150,9 @@ function TreeNode({
     )
   }
 
+  const fileGitStatus = gitStatusByPath?.get(entry.path)
+  const statusBadge = fileGitStatus ? gitStatusLabel(fileGitStatus) : null
+
   if (!entry.isDir) {
     return (
       <button
@@ -146,7 +162,12 @@ function TreeNode({
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         <FileIcon name={entry.name} isDir={false} />
-        <span className="truncate text-zinc-300">{entry.name}</span>
+        <span className="truncate text-zinc-300 flex-1 min-w-0">{entry.name}</span>
+        {statusBadge && (
+          <span className={`shrink-0 text-[10px] font-semibold ${statusBadge.className}`} title={fileGitStatus}>
+            {statusBadge.label}
+          </span>
+        )}
       </button>
     )
   }
@@ -211,6 +232,7 @@ function TreeNode({
               onRenameCancel={onRenameCancel}
               onCtxCreateSubmit={onCtxCreateSubmit}
               onCtxCreateCancel={onCtxCreateCancel}
+              gitStatusByPath={gitStatusByPath}
             />
           ))}
         </>
@@ -227,6 +249,8 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   const [renamingPath, setRenamingPath] = useState<string | null>(null)
   const [renamingOrigName, setRenamingOrigName] = useState<string>('')
   const [ctxCreateAt, setCtxCreateAt] = useState<{ dirPath: string; type: 'file' | 'dir' } | null>(null)
+  const [gitStatus, setGitStatus] = useState<import('../../electron/git').GitStatus | null>(null)
+  const [sourceControlOpen, setSourceControlOpen] = useState(true)
 
   const loadTree = useCallback(async () => {
     if (!workspace) { setTree([]); return }
@@ -264,6 +288,47 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
       }
     }
   }, [workspace, debouncedLoadTree])
+
+  const loadGitStatus = useCallback(async () => {
+    if (!workspace || !window.api?.getGitStatus) return
+    try {
+      const status = await window.api.getGitStatus(workspace)
+      setGitStatus(status)
+    } catch {
+      setGitStatus(null)
+    }
+  }, [workspace])
+
+  useEffect(() => {
+    loadGitStatus()
+  }, [loadGitStatus])
+
+  const gitStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!window.api?.onWorkspaceFilesChanged || !workspace) return
+    const unsub = window.api.onWorkspaceFilesChanged(() => {
+      if (gitStatusTimerRef.current) clearTimeout(gitStatusTimerRef.current)
+      gitStatusTimerRef.current = setTimeout(() => {
+        gitStatusTimerRef.current = null
+        loadGitStatus()
+      }, 600)
+    })
+    return () => {
+      unsub()
+      if (gitStatusTimerRef.current) clearTimeout(gitStatusTimerRef.current)
+    }
+  }, [workspace, loadGitStatus])
+
+  const gitStatusByPath = useMemo(() => {
+    if (!workspace || !gitStatus?.isRepo || !gitStatus.files.length) return undefined
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    const map = new Map<string, string>()
+    for (const f of gitStatus.files) {
+      const full = (workspace + sep + f.path).replace(/[/\\]+/g, sep)
+      map.set(full, f.status)
+    }
+    return map
+  }, [workspace, gitStatus])
 
   const handlePickDir = async () => {
     const dir = await window.api.pickDirectory()
@@ -451,7 +516,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
           )}
           <button onClick={onReset} title="Новый чат"
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[10px]">✦</button>
-          <button onClick={loadTree} title="Обновить"
+          <button onClick={() => { loadTree(); loadGitStatus() }} title="Обновить"
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[11px]">↻</button>
         </div>
       </div>
@@ -491,9 +556,70 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
             onRenameCancel={() => setRenamingPath(null)}
             onCtxCreateSubmit={handleCtxCreateSubmit}
             onCtxCreateCancel={() => setCtxCreateAt(null)}
+            gitStatusByPath={gitStatusByPath}
           />
         ))}
       </div>
+
+      {/* Source Control */}
+      {workspace && (
+        <div className="border-t border-zinc-800/60 shrink-0">
+          <button
+            onClick={() => setSourceControlOpen((o) => !o)}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200 transition-colors"
+          >
+            <span className="text-zinc-500">{sourceControlOpen ? '▼' : '▶'}</span>
+            <span className="font-medium">Source Control</span>
+            {gitStatus?.isRepo && gitStatus.files.length > 0 && (
+              <span className="ml-auto text-zinc-500 tabular-nums">{gitStatus.files.length}</span>
+            )}
+          </button>
+          {sourceControlOpen && (
+            <div className="px-2 pb-2 max-h-40 overflow-y-auto">
+              {!gitStatus && <div className="text-[10px] text-zinc-600 py-1">Проверка git…</div>}
+              {gitStatus && !gitStatus.isRepo && (
+                <div className="text-[10px] text-zinc-600 py-1">Не репозиторий git</div>
+              )}
+              {gitStatus?.isRepo && (
+                <>
+                  {gitStatus.branch && (
+                    <div className="text-[10px] text-zinc-500 py-0.5 flex items-center gap-1">
+                      <span className="text-blue-400">◇</span> {gitStatus.branch}
+                    </div>
+                  )}
+                  {gitStatus.files.length === 0 && (
+                    <div className="text-[10px] text-zinc-600 py-1">Нет изменений</div>
+                  )}
+                  {gitStatus.files.length > 0 && (
+                    <div className="space-y-0.5">
+                      {gitStatus.files.slice(0, 50).map((f) => {
+                        const badge = gitStatusLabel(f.status)
+                        return (
+                          <div
+                            key={f.path}
+                            className="flex items-center gap-1.5 py-0.5 px-1 rounded text-[10px] hover:bg-zinc-800/50 cursor-pointer truncate"
+                            onClick={() => {
+                              const sep = workspace.includes('\\') ? '\\' : '/'
+                              onFileClick((workspace + sep + f.path).replace(/[/\\]+/g, sep))
+                            }}
+                            title={f.path}
+                          >
+                            <span className={`shrink-0 font-semibold w-3 ${badge.className}`}>{badge.label}</span>
+                            <span className="truncate text-zinc-400">{f.path}</span>
+                          </div>
+                        )
+                      })}
+                      {gitStatus.files.length > 50 && (
+                        <div className="text-[10px] text-zinc-600 py-0.5">+{gitStatus.files.length - 50} ещё</div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Status */}
       <div className="px-3 py-1.5 border-t border-zinc-800/60 flex items-center gap-2">

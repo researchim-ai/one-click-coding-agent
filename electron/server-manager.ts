@@ -390,13 +390,15 @@ export function start(
   lastServerLog = []
   if (win) {
     emitBuild(win, `Запуск: ${path.basename(bin)}`)
+    emitBuild(win, 'GGML_CUDA_DISABLE_GRAPHS=1 (multi-GPU stability)')
     emitBuild(win, `GPU layers: ${la.nGpuLayers}, ctx: ${la.ctxSize}, threads: ${la.threads}` +
       `, kv-cache: ${la.cacheTypeK}` +
       (la.tensorSplit ? `, tensor-split: ${la.tensorSplit}` : '') +
       (la.flashAttn ? ', flash-attn: on' : ''))
   }
 
-  serverProcess = spawn(bin, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false })
+  const spawnEnv = { ...process.env, GGML_CUDA_DISABLE_GRAPHS: '1' }
+  serverProcess = spawn(bin, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false, env: spawnEnv })
 
   const handleOutput = (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean)

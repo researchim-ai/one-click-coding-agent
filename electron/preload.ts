@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('api', {
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke('pick-directory'),
   listFiles: (workspace: string, dirPath?: string): Promise<import('./types').FileTreeEntry[]> =>
     ipcRenderer.invoke('list-files', workspace, dirPath),
+  getGitStatus: (workspace: string): Promise<import('./git').GitStatus> =>
+    ipcRenderer.invoke('git-status', workspace),
   readFileContent: (filePath: string): Promise<{ content: string; size: number; lines: number }> =>
     ipcRenderer.invoke('read-file-content', filePath),
   writeFile: (filePath: string, content: string): Promise<void> =>
