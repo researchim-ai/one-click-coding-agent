@@ -45,7 +45,7 @@ export interface DownloadProgress {
 }
 
 export interface AgentEvent {
-  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn' | 'tool_streaming'
+  type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn' | 'tool_streaming' | 'stream_stats'
   content?: string
   name?: string
   args?: Record<string, unknown>
@@ -60,6 +60,8 @@ export interface AgentEvent {
     maxContextTokens: number
     percent: number
   }
+  /** Tokens per second from last completed stream (emitted after each LLM response). */
+  tokensPerSecond?: number
 }
 
 export interface AppStatus {

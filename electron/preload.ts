@@ -22,9 +22,10 @@ contextBridge.exposeInMainWorld('api', {
   stopServer: (): Promise<void> => ipcRenderer.invoke('stop-server'),
   sendMessage: (msg: string, workspace: string): Promise<string> =>
     ipcRenderer.invoke('send-message', msg, workspace),
-  resetAgent: (): Promise<void> => ipcRenderer.invoke('reset-agent'),
+  resetAgent: (workspace: string): Promise<void> => ipcRenderer.invoke('reset-agent', workspace),
   cancelAgent: (): Promise<void> => ipcRenderer.invoke('cancel-agent'),
   setWorkspace: (ws: string): Promise<void> => ipcRenderer.invoke('set-workspace', ws),
+  getRecentWorkspaces: (): Promise<string[]> => ipcRenderer.invoke('get-recent-workspaces'),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke('pick-directory'),
   listFiles: (workspace: string, dirPath?: string): Promise<import('./types').FileTreeEntry[]> =>
     ipcRenderer.invoke('list-files', workspace, dirPath),
@@ -64,8 +65,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('build-status', listener)
     return () => { ipcRenderer.removeListener('build-status', listener) }
   },
-  onMenuAction: (cb: (action: string) => void) => {
-    const listener = (_: any, action: string) => cb(action)
+  onMenuAction: (cb: (action: string, payload?: unknown) => void) => {
+    const listener = (_: any, action: string, payload?: unknown) => cb(action, payload)
     ipcRenderer.on('menu-action', listener)
     return () => { ipcRenderer.removeListener('menu-action', listener) }
   },
@@ -78,15 +79,15 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.send('command-approval-response', approvalId, approved)
   },
 
-  // Session management
-  createSession: (): Promise<string> => ipcRenderer.invoke('create-session'),
-  switchSession: (id: string): Promise<boolean> => ipcRenderer.invoke('switch-session', id),
-  listSessions: (): Promise<any[]> => ipcRenderer.invoke('list-sessions'),
-  deleteSession: (id: string): Promise<void> => ipcRenderer.invoke('delete-session', id),
-  renameSession: (id: string, title: string): Promise<void> => ipcRenderer.invoke('rename-session', id, title),
-  getActiveSessionId: (): Promise<string | null> => ipcRenderer.invoke('get-active-session-id'),
-  saveUiMessages: (id: string, msgs: any[]): Promise<void> => ipcRenderer.invoke('save-ui-messages', id, msgs),
-  getUiMessages: (id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', id),
+  // Session management (workspace-scoped)
+  createSession: (workspace: string): Promise<string> => ipcRenderer.invoke('create-session', workspace),
+  switchSession: (workspace: string, id: string): Promise<boolean> => ipcRenderer.invoke('switch-session', workspace, id),
+  listSessions: (workspace: string): Promise<any[]> => ipcRenderer.invoke('list-sessions', workspace),
+  deleteSession: (workspace: string, id: string): Promise<void> => ipcRenderer.invoke('delete-session', workspace, id),
+  renameSession: (workspace: string, id: string, title: string): Promise<void> => ipcRenderer.invoke('rename-session', workspace, id, title),
+  getActiveSessionId: (workspace: string): Promise<string | null> => ipcRenderer.invoke('get-active-session-id', workspace),
+  saveUiMessages: (workspace: string, id: string, msgs: any[]): Promise<void> => ipcRenderer.invoke('save-ui-messages', workspace, id, msgs),
+  getUiMessages: (workspace: string, id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', workspace, id),
 
   // File operations
   createFile: (filePath: string): Promise<void> => ipcRenderer.invoke('create-file', filePath),

@@ -5,7 +5,6 @@ import os from 'os'
 import { Worker } from 'worker_threads'
 import type { FileTreeEntry } from './types'
 
-const SESSIONS_DIR = path.join(os.homedir(), '.one-click-agent', 'sessions')
 const SESSION_WRITE_YIELD_EVERY = 12 // yield to event loop every N messages (avoids "app not responding" with huge context)
 
 nativeTheme.themeSource = 'dark'
@@ -35,7 +34,7 @@ import {
   createSession, switchSession, listSessions, deleteSession,
   renameSession, getActiveSessionId, initSessions,
   saveUiMessages, getUiMessages,
-  getActiveSession, saveSession as persistSession, isCancelRequested,
+  getActiveSession, getSessionPathForWorker, saveSession as persistSession, isCancelRequested,
   updateSessionFromWorker,
   DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARIZE_PROMPT,
   type SessionInfo, type AgentBridge,
@@ -44,6 +43,7 @@ import * as terminalManager from './terminal-manager'
 import * as tsService from './ts-service'
 import * as pyResolve from './py-resolve'
 import * as git from './git'
+import * as recentWorkspaces from './recent-workspaces'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
@@ -124,7 +124,7 @@ function createMainBridge(win: BrowserWindow): AgentBridge {
       })
     },
     getConfig() { return config.load() },
-    getSession() { return getActiveSession() },
+    getSession() { return getActiveSession('') },
     saveSession(s) { persistSession(s) },
     getApiUrl() { return serverManager.llamaApiUrl() },
     getCtxSize() { return serverManager.getCtxSize() },
@@ -135,8 +135,12 @@ function createMainBridge(win: BrowserWindow): AgentBridge {
   }
 }
 
-function sendMenuAction(action: string) {
-  mainWindow?.webContents.send('menu-action', action)
+function sendMenuAction(action: string, payload?: unknown) {
+  if (payload !== undefined) {
+    mainWindow?.webContents.send('menu-action', action, payload)
+  } else {
+    mainWindow?.webContents.send('menu-action', action)
+  }
 }
 
 function buildAppMenu() {
@@ -154,6 +158,41 @@ function buildAppMenu() {
         { role: 'quit' as const, label: 'Выход' },
       ],
     }] : []),
+    {
+      label: 'Файл',
+      submenu: [
+        {
+          label: 'Открыть папку…',
+          accelerator: 'CmdOrCtrl+O',
+          click: async () => {
+            const result = await dialog.showOpenDialog(mainWindow!, {
+              title: 'Выберите папку проекта',
+              properties: ['openDirectory'],
+            })
+            if (!result.canceled && result.filePaths[0]) {
+              const dir = result.filePaths[0]
+              recentWorkspaces.addRecentWorkspace(dir)
+              sendMenuAction('open-recent', dir)
+              buildAppMenu()
+            }
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Недавние',
+          submenu: recentWorkspaces.getRecentWorkspaces().length === 0
+            ? [{ label: '(нет недавних проектов)', enabled: false }]
+            : recentWorkspaces.getRecentWorkspaces().map((dir) => ({
+                label: path.basename(dir) || dir,
+                click: () => {
+                  recentWorkspaces.addRecentWorkspace(dir)
+                  sendMenuAction('open-recent', dir)
+                  buildAppMenu()
+                },
+              })),
+        },
+      ],
+    },
     {
       label: 'Агент',
       submenu: [
@@ -455,14 +494,12 @@ function registerIpcHandlers() {
     return new Promise<string>((resolve) => {
       pendingSendResolve = resolve
       setImmediate(async () => {
-        const session = getActiveSession()
+        const session = getActiveSession(workspace)
         const configVal = config.load()
         const apiUrl = serverManager.llamaApiUrl()
         const ctxSize = serverManager.getCtxSize() || 32768
-        // With 262K context the session can be huge; postMessage(structured clone) would block main for seconds.
-        // Write session to disk with periodic yields, then pass path so worker loads it (main stays responsive).
-        fs.mkdirSync(SESSIONS_DIR, { recursive: true })
-        const sessionPath = path.join(SESSIONS_DIR, `${session.id}.json`)
+        const sessionPath = getSessionPathForWorker(workspace, session.id)
+        fs.mkdirSync(path.dirname(sessionPath), { recursive: true })
         const stream = fs.createWriteStream(sessionPath, { encoding: 'utf-8' })
         const write = (s: string) => stream.write(s)
         write('{"id":')
@@ -482,6 +519,8 @@ function registerIpcHandlers() {
         write(String(session.createdAt))
         write(',"updatedAt":')
         write(String(session.updatedAt))
+        write(',"workspaceKey":')
+        write(JSON.stringify(session.workspaceKey ?? ''))
         write('}')
         await new Promise<void>((res, rej) => { stream.once('finish', res); stream.once('error', rej); stream.end() })
         getAgentWorker().postMessage({
@@ -497,18 +536,24 @@ function registerIpcHandlers() {
     if (agentWorker && pendingSendResolve) agentWorker.postMessage({ type: 'cancel' })
   })
 
-  ipcMain.handle('reset-agent', () => resetAgent())
-  ipcMain.handle('set-workspace', (_e, ws: string) => setWorkspace(ws))
+  ipcMain.handle('reset-agent', (_e, workspace: string) => resetAgent(workspace))
+  ipcMain.handle('set-workspace', (_e, ws: string) => {
+    setWorkspace(ws)
+    recentWorkspaces.addRecentWorkspace(ws)
+    buildAppMenu()
+  })
 
-  // Session management
-  ipcMain.handle('create-session', () => createSession())
-  ipcMain.handle('switch-session', (_e, id: string) => switchSession(id))
-  ipcMain.handle('list-sessions', () => listSessions())
-  ipcMain.handle('delete-session', (_e, id: string) => deleteSession(id))
-  ipcMain.handle('rename-session', (_e, id: string, title: string) => renameSession(id, title))
-  ipcMain.handle('get-active-session-id', () => getActiveSessionId())
-  ipcMain.handle('save-ui-messages', (_e, id: string, msgs: any[]) => saveUiMessages(id, msgs))
-  ipcMain.handle('get-ui-messages', (_e, id: string) => getUiMessages(id))
+  // Session management (all workspace-scoped)
+  ipcMain.handle('create-session', (_e, workspace: string) => createSession(workspace))
+  ipcMain.handle('switch-session', (_e, workspace: string, id: string) => switchSession(workspace, id))
+  ipcMain.handle('list-sessions', (_e, workspace: string) => listSessions(workspace))
+  ipcMain.handle('delete-session', (_e, workspace: string, id: string) => deleteSession(workspace, id))
+  ipcMain.handle('rename-session', (_e, workspace: string, id: string, title: string) => renameSession(workspace, id, title))
+  ipcMain.handle('get-active-session-id', (_e, workspace: string) => getActiveSessionId(workspace))
+  ipcMain.handle('save-ui-messages', (_e, workspace: string, id: string, msgs: any[]) => saveUiMessages(workspace, id, msgs))
+  ipcMain.handle('get-ui-messages', (_e, workspace: string, id: string) => getUiMessages(workspace, id))
+
+  ipcMain.handle('get-recent-workspaces', () => recentWorkspaces.getRecentWorkspaces())
 
   ipcMain.handle('pick-directory', async () => {
     if (!mainWindow) return null

@@ -25,9 +25,10 @@ interface ElectronAPI {
   startServer(): Promise<void>
   stopServer(): Promise<void>
   sendMessage(msg: string, workspace: string): Promise<string>
-  resetAgent(): Promise<void>
+  resetAgent(workspace: string): Promise<void>
   cancelAgent(): Promise<void>
   setWorkspace(ws: string): Promise<void>
+  getRecentWorkspaces(): Promise<string[]>
   pickDirectory(): Promise<string | null>
   listFiles(workspace: string, dirPath?: string): Promise<import('../electron/types').FileTreeEntry[]>
   getGitStatus(workspace: string): Promise<import('../electron/git').GitStatus>
@@ -42,20 +43,20 @@ interface ElectronAPI {
   pyResolveModule(workspacePath: string, moduleName: string): Promise<string | null>
   respondApproval(approvalId: string, approved: boolean): void
 
-  // Session management
-  createSession(): Promise<string>
-  switchSession(id: string): Promise<boolean>
-  listSessions(): Promise<import('../electron/agent').SessionInfo[]>
-  deleteSession(id: string): Promise<void>
-  renameSession(id: string, title: string): Promise<void>
-  getActiveSessionId(): Promise<string | null>
-  saveUiMessages(id: string, msgs: any[]): Promise<void>
-  getUiMessages(id: string): Promise<any[]>
+  // Session management (workspace-scoped)
+  createSession(workspace: string): Promise<string>
+  switchSession(workspace: string, id: string): Promise<boolean>
+  listSessions(workspace: string): Promise<import('../electron/agent').SessionInfo[]>
+  deleteSession(workspace: string, id: string): Promise<void>
+  renameSession(workspace: string, id: string, title: string): Promise<void>
+  getActiveSessionId(workspace: string): Promise<string | null>
+  saveUiMessages(workspace: string, id: string, msgs: any[]): Promise<void>
+  getUiMessages(workspace: string, id: string): Promise<any[]>
 
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void
-  onMenuAction(cb: (action: string) => void): () => void
+  onMenuAction(cb: (action: string, payload?: unknown) => void): () => void
   onWorkspaceFilesChanged(cb: () => void): () => void
 
   // Window controls

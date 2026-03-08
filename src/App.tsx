@@ -17,7 +17,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 export function App() {
   const {
     messages, busy, status, downloadProgress, buildStatus,
-    workspace, setWorkspace, contextUsage,
+    workspace, setWorkspace, contextUsage, tokensPerSecond,
     sendMessage, resetChat, pollStatus, respondApproval, cancel,
     sessions, activeSessionId,
     newSession, switchToSession, removeSession,
@@ -35,10 +35,27 @@ export function App() {
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined)
   const [diffView, setDiffView] = useState<{ filePath: string; original: string; modified: string } | null>(null)
   const [breadcrumbExpandTo, setBreadcrumbExpandTo] = useState<string | null>(null)
+  const [fileMenuOpen, setFileMenuOpen] = useState(false)
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
+  const fileMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setBreadcrumbExpandTo(null)
   }, [activeFilePath])
+
+  useEffect(() => {
+    if (!fileMenuOpen || !window.api?.getRecentWorkspaces) return
+    window.api.getRecentWorkspaces().then(setRecentWorkspaces).catch(() => setRecentWorkspaces([]))
+  }, [fileMenuOpen])
+
+  useEffect(() => {
+    if (!fileMenuOpen) return
+    const onOutside = (e: MouseEvent) => {
+      if (fileMenuRef.current && !fileMenuRef.current.contains(e.target as Node)) setFileMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [fileMenuOpen])
 
   const handleOpenDiff = useCallback(async (filePath: string) => {
     if (!workspace || !window.api?.getGitFileAtHead || !window.api?.readFileContent) return
@@ -175,8 +192,13 @@ export function App() {
 
   useEffect(() => {
     if (!window.api?.onMenuAction) return
-    const unsub = window.api.onMenuAction((action) => {
+    const unsub = window.api.onMenuAction((action, payload) => {
       switch (action) {
+        case 'open-recent':
+          if (typeof payload === 'string' && payload.trim()) {
+            setWorkspace(payload.trim())
+          }
+          break
         case 'new-chat':
           newSession()
           break
@@ -223,6 +245,51 @@ export function App() {
           <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
             ⚡ One-Click Agent
           </span>
+          <div className="relative flex items-center gap-1" ref={fileMenuRef} style={{ WebkitAppRegion: 'no-drag' } as any}>
+            <button
+              type="button"
+              onClick={() => setFileMenuOpen((v) => !v)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/80 cursor-pointer transition-colors"
+              title="Файл"
+            >
+              Файл
+            </button>
+            {fileMenuOpen && (
+              <div className="absolute left-0 top-full mt-0.5 z-50 min-w-[200px] py-1 bg-zinc-900 border border-zinc-700 rounded-md shadow-lg">
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-700/80 cursor-pointer"
+                  onClick={async () => {
+                    setFileMenuOpen(false)
+                    const dir = await window.api?.pickDirectory()
+                    if (dir?.trim()) setWorkspace(dir.trim())
+                  }}
+                >
+                  Открыть папку…
+                </button>
+                <div className="border-t border-zinc-700/80 my-1" />
+                <div className="px-2 py-0.5 text-[10px] text-zinc-500 uppercase tracking-wider">Недавние</div>
+                {recentWorkspaces.length === 0 ? (
+                  <div className="px-3 py-1.5 text-[11px] text-zinc-500">Нет недавних проектов</div>
+                ) : (
+                  recentWorkspaces.map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      className="w-full text-left px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-700/80 cursor-pointer truncate"
+                      title={dir}
+                      onClick={() => {
+                        setFileMenuOpen(false)
+                        setWorkspace(dir)
+                      }}
+                    >
+                      {dir.split(/[/\\]/).filter(Boolean).pop() || dir}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
           <button
             onClick={() => { setSettingsTab('model'); setSettingsOpen(true) }}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/80 cursor-pointer transition-colors"
@@ -396,7 +463,7 @@ export function App() {
       {/* Status bar */}
       <div className="flex items-center shrink-0">
         <div className="flex-1">
-          <StatusBar status={status} />
+          <StatusBar status={status} tokensPerSecond={tokensPerSecond} />
         </div>
         {!showSetup && (
           <button

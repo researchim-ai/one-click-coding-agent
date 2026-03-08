@@ -3,9 +3,11 @@ import type { AppStatus, SystemResources } from '../../electron/types'
 
 interface Props {
   status: AppStatus | null
+  /** Last measured tokens per second from LLM stream (shown in status bar). */
+  tokensPerSecond?: number | null
 }
 
-export function StatusBar({ status }: Props) {
+export function StatusBar({ status, tokensPerSecond }: Props) {
   const [resources, setResources] = useState<SystemResources | null>(null)
   const online = status?.serverRunning && status?.serverHealth?.status === 'ok'
 
@@ -26,6 +28,11 @@ export function StatusBar({ status }: Props) {
       {status?.modelPath && (
         <span className="truncate text-zinc-600">
           {status.modelPath.split('/').pop()?.replace('.gguf', '')}
+        </span>
+      )}
+      {tokensPerSecond != null && (
+        <span className="text-emerald-400" title="Токенов в секунду (последний ответ)">
+          {tokensPerSecond} tok/s
         </span>
       )}
       <div className="ml-auto flex items-center gap-3">

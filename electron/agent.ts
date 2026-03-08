@@ -1,6 +1,7 @@
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool } from './tools'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
+import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -294,60 +295,66 @@ export interface Session {
   projectContextAdded: boolean
   createdAt: number
   updatedAt: number
+  /** Workspace key (hash) so we know which folder to save to when updating from worker. */
+  workspaceKey?: string
 }
 
 // ---------------------------------------------------------------------------
-// Session storage
+// Session storage (per-workspace: each project has its own chats)
 // ---------------------------------------------------------------------------
 
-const sessions = new Map<string, Session>()
-let activeSessionId: string | null = null
-let workspace = ''
+const BASE_SESSIONS_DIR = path.join(os.homedir(), '.one-click-agent', 'sessions')
+const ACTIVE_FILE = '_active.json'
 
-let currentAbort: AbortController | null = null
-let cancelRequested = false
+/** Stable key for workspace so sessions are stored in their own folder. */
+function getWorkspaceKey(ws: string): string {
+  if (!ws || !ws.trim()) return '_empty'
+  const normalized = path.normalize(ws).trim()
+  return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16)
+}
 
-function sessionsDir(): string {
-  const fs = require('fs')
-  const path = require('path')
-  const os = require('os')
-  const d = path.join(os.homedir(), '.one-click-agent', 'sessions')
+function sessionsDir(ws: string): string {
+  const d = path.join(BASE_SESSIONS_DIR, getWorkspaceKey(ws))
   fs.mkdirSync(d, { recursive: true })
   return d
 }
 
-function sessionFilePath(id: string): string {
-  const path = require('path')
-  return path.join(sessionsDir(), `${id}.json`)
+function sessionFilePath(ws: string, id: string): string {
+  return path.join(sessionsDir(ws), `${id}.json`)
 }
 
-export function saveSession(session: Session): void {
-  const fs = require('fs')
-  try {
-    fs.writeFileSync(sessionFilePath(session.id), JSON.stringify({
-      id: session.id,
-      title: session.title,
-      messages: session.messages,
-      uiMessages: session.uiMessages,
-      projectContextAdded: session.projectContextAdded,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-    }), 'utf-8')
-  } catch {}
+/** In-memory: sessions per workspace (workspaceKey -> Map<sessionId, Session>). */
+const sessionsByWorkspace = new Map<string, Map<string, Session>>()
+/** Active session id per workspace (workspaceKey -> sessionId). */
+const activeIdByWorkspace = new Map<string, string>()
+
+let workspace = ''
+let currentAbort: AbortController | null = null
+let cancelRequested = false
+
+function getSessionsMap(ws: string): Map<string, Session> {
+  const key = getWorkspaceKey(ws)
+  if (!sessionsByWorkspace.has(key)) {
+    sessionsByWorkspace.set(key, new Map())
+  }
+  return sessionsByWorkspace.get(key)!
 }
 
-function loadAllSessions(): void {
-  const fs = require('fs')
-  const path = require('path')
+function loadSessionsForWorkspace(ws: string): void {
+  if (!ws || !ws.trim()) return
+  const key = getWorkspaceKey(ws)
+  if (sessionsByWorkspace.has(key)) return
+  const map = new Map<string, Session>()
+  sessionsByWorkspace.set(key, map)
   try {
-    const dir = sessionsDir()
-    const files = fs.readdirSync(dir).filter((f: string) => f.endsWith('.json'))
+    const dir = sessionsDir(ws)
+    const files = fs.readdirSync(dir).filter((f: string) => f.endsWith('.json') && f !== ACTIVE_FILE)
     for (const file of files) {
       try {
         const raw = fs.readFileSync(path.join(dir, file), 'utf-8')
         const data = JSON.parse(raw)
         if (data.id && Array.isArray(data.messages)) {
-          sessions.set(data.id, {
+          const session: Session = {
             id: data.id,
             title: data.title ?? 'Без названия',
             messages: data.messages,
@@ -355,16 +362,53 @@ function loadAllSessions(): void {
             projectContextAdded: data.projectContextAdded ?? false,
             createdAt: data.createdAt ?? Date.now(),
             updatedAt: data.updatedAt ?? Date.now(),
-          })
+            workspaceKey: key,
+          }
+          map.set(session.id, session)
         }
       } catch {}
+    }
+    const activePath = path.join(dir, ACTIVE_FILE)
+    if (fs.existsSync(activePath)) {
+      const activeRaw = fs.readFileSync(activePath, 'utf-8')
+      const activeData = JSON.parse(activeRaw)
+      if (typeof activeData?.activeSessionId === 'string' && map.has(activeData.activeSessionId)) {
+        activeIdByWorkspace.set(key, activeData.activeSessionId)
+      }
     }
   } catch {}
 }
 
-function deleteSessionFile(id: string): void {
-  const fs = require('fs')
-  try { fs.unlinkSync(sessionFilePath(id)) } catch {}
+function saveActiveId(ws: string): void {
+  if (!ws?.trim()) return
+  const key = getWorkspaceKey(ws)
+  const activeId = activeIdByWorkspace.get(key) ?? null
+  try {
+    const dir = sessionsDir(ws)
+    fs.writeFileSync(path.join(dir, ACTIVE_FILE), JSON.stringify({ activeSessionId: activeId }), 'utf-8')
+  } catch {}
+}
+
+export function saveSession(session: Session): void {
+  const key = session.workspaceKey ?? getWorkspaceKey(workspace)
+  try {
+    const dir = path.join(BASE_SESSIONS_DIR, key)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, `${session.id}.json`), JSON.stringify({
+      id: session.id,
+      title: session.title,
+      messages: session.messages,
+      uiMessages: session.uiMessages,
+      projectContextAdded: session.projectContextAdded,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      workspaceKey: session.workspaceKey ?? key,
+    }), 'utf-8')
+  } catch {}
+}
+
+function deleteSessionFile(ws: string, id: string): void {
+  try { fs.unlinkSync(sessionFilePath(ws, id)) } catch {}
 }
 
 function generateSessionId(): string {
@@ -377,9 +421,18 @@ function titleFromMessage(text: string): string {
   return firstLine.length > 50 ? firstLine.slice(0, 47) + '…' : firstLine || 'Новый чат'
 }
 
-export function getActiveSession(): Session {
-  if (activeSessionId && sessions.has(activeSessionId)) {
-    return sessions.get(activeSessionId)!
+/** Path where main process writes session for worker (same layout as our storage). */
+export function getSessionPathForWorker(ws: string, sessionId: string): string {
+  return sessionFilePath(ws, sessionId)
+}
+
+export function getActiveSession(ws: string): Session {
+  loadSessionsForWorkspace(ws)
+  const key = getWorkspaceKey(ws)
+  const map = getSessionsMap(ws)
+  const activeId = activeIdByWorkspace.get(key)
+  if (activeId && map.has(activeId)) {
+    return map.get(activeId)!
   }
   const id = generateSessionId()
   const session: Session = {
@@ -390,18 +443,23 @@ export function getActiveSession(): Session {
     projectContextAdded: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    workspaceKey: key,
   }
-  sessions.set(id, session)
-  activeSessionId = id
+  map.set(id, session)
+  activeIdByWorkspace.set(key, id)
   saveSession(session)
+  saveActiveId(ws)
   return session
 }
 
 // ---------------------------------------------------------------------------
-// Public session management
+// Public session management (all take workspace)
 // ---------------------------------------------------------------------------
 
-export function createSession(): string {
+export function createSession(ws: string): string {
+  loadSessionsForWorkspace(ws)
+  const key = getWorkspaceKey(ws)
+  const map = getSessionsMap(ws)
   const id = generateSessionId()
   const session: Session = {
     id,
@@ -411,21 +469,29 @@ export function createSession(): string {
     projectContextAdded: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    workspaceKey: key,
   }
-  sessions.set(id, session)
-  activeSessionId = id
+  map.set(id, session)
+  activeIdByWorkspace.set(key, id)
   saveSession(session)
+  saveActiveId(ws)
   return id
 }
 
-export function switchSession(id: string): boolean {
-  if (!sessions.has(id)) return false
-  activeSessionId = id
+export function switchSession(ws: string, id: string): boolean {
+  loadSessionsForWorkspace(ws)
+  const key = getWorkspaceKey(ws)
+  const map = getSessionsMap(ws)
+  if (!map.has(id)) return false
+  activeIdByWorkspace.set(key, id)
+  saveActiveId(ws)
   return true
 }
 
-export function listSessions(): SessionInfo[] {
-  return [...sessions.values()]
+export function listSessions(ws: string): SessionInfo[] {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  return [...map.values()]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map((s) => ({
       id: s.id,
@@ -436,24 +502,34 @@ export function listSessions(): SessionInfo[] {
     }))
 }
 
-export function deleteSession(id: string): void {
-  sessions.delete(id)
-  deleteSessionFile(id)
-  if (activeSessionId === id) {
-    activeSessionId = null
+export function deleteSession(ws: string, id: string): void {
+  loadSessionsForWorkspace(ws)
+  const key = getWorkspaceKey(ws)
+  const map = getSessionsMap(ws)
+  map.delete(id)
+  deleteSessionFile(ws, id)
+  if (activeIdByWorkspace.get(key) === id) {
+    const first = map.keys().next().value
+    if (first) activeIdByWorkspace.set(key, first)
+    else activeIdByWorkspace.delete(key)
+    saveActiveId(ws)
   }
 }
 
-export function renameSession(id: string, title: string): void {
-  const session = sessions.get(id)
+export function renameSession(ws: string, id: string, title: string): void {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  const session = map.get(id)
   if (session) {
     session.title = title
     saveSession(session)
   }
 }
 
-export function getActiveSessionId(): string | null {
-  return activeSessionId
+export function getActiveSessionId(ws: string): string | null {
+  loadSessionsForWorkspace(ws)
+  const key = getWorkspaceKey(ws)
+  return activeIdByWorkspace.get(key) ?? null
 }
 
 // Debounced session persist so main process doesn't block on every tool call
@@ -472,7 +548,9 @@ function flushSessionPersist(): void {
 
 /** Called from main when worker sends session-update. In-memory update + debounced disk write. */
 export function updateSessionFromWorker(session: Session, immediate = false): void {
-  sessions.set(session.id, session)
+  const key = session.workspaceKey ?? getWorkspaceKey(workspace)
+  const map = sessionsByWorkspace.get(key)
+  if (map) map.set(session.id, session)
   if (immediate) {
     if (persistTimer) clearTimeout(persistTimer)
     persistTimer = null
@@ -484,20 +562,24 @@ export function updateSessionFromWorker(session: Session, immediate = false): vo
   }
 }
 
-export function saveUiMessages(id: string, uiMsgs: any[]): void {
-  const session = sessions.get(id)
+export function saveUiMessages(ws: string, id: string, uiMsgs: any[]): void {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  const session = map.get(id)
   if (session) {
     session.uiMessages = uiMsgs
     saveSession(session)
   }
 }
 
-export function getUiMessages(id: string): any[] {
-  return sessions.get(id)?.uiMessages ?? []
+export function getUiMessages(ws: string, id: string): any[] {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  return map.get(id)?.uiMessages ?? []
 }
 
 export function initSessions(): void {
-  loadAllSessions()
+  fs.mkdirSync(BASE_SESSIONS_DIR, { recursive: true })
 }
 
 function emitContextUsage(msgs: Message[]) {
@@ -631,6 +713,8 @@ interface StreamResult {
   toolCalls: any[] | undefined
   rawToolCalls: any[] | undefined
   finishReason: string | null
+  elapsedMs: number
+  estimatedOutputTokens: number
 }
 
 async function streamLlmResponse(
@@ -687,7 +771,9 @@ async function streamLlmResponse(
   let sseBuffer = ''
   let lastEmitMs = 0
   let lastToolStreamMs = 0
+  let lastStreamStatsEmitMs = 0
   const EMIT_INTERVAL_MS = 150 // max ~7 UI updates per second
+  const STREAM_STATS_INTERVAL_MS = 500
   let finishReason: string | null = null
 
   // Idle timeout: abort if no data received for 60s (server stalled)
@@ -823,6 +909,17 @@ async function streamLlmResponse(
           }
         }
       }
+
+      // Emit tokens/s during any generation — thinking or visible (throttled)
+      const now = Date.now()
+      const elapsedMs = now - startMs
+      if (elapsedMs >= 300 && now - lastStreamStatsEmitMs >= STREAM_STATS_INTERVAL_MS) {
+        lastStreamStatsEmitMs = now
+        const est = estimateTokens(accContent)
+        if (est > 0) {
+          doEmit({ type: 'stream_stats', tokensPerSecond: Math.round((est * 1000) / elapsedMs) })
+        }
+      }
     }
   }
 
@@ -868,7 +965,8 @@ async function streamLlmResponse(
   }
   debugLog('STREAM', `Content preview: ${contentPreview || '(empty)'}`)
 
-  return { content: accContent, toolCalls, rawToolCalls, finishReason }
+  const estimatedOutputTokens = estimateTokens(accContent)
+  return { content: accContent, toolCalls, rawToolCalls, finishReason, elapsedMs, estimatedOutputTokens }
 }
 
 // ---------------------------------------------------------------------------
@@ -1951,13 +2049,10 @@ function budgetTrimProjectContext(ctx: string): string {
 export function setWorkspace(ws: string) {
   workspace = ws
   invalidateProjectContextCache()
-  for (const session of sessions.values()) {
-    session.projectContextAdded = false
-  }
 }
 
-export function resetAgent() {
-  const session = getActiveSession()
+export function resetAgent(ws: string) {
+  const session = getActiveSession(ws)
   session.messages = []
   session.projectContextAdded = false
   session.updatedAt = Date.now()
@@ -2080,6 +2175,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
     try {
       const controller = new AbortController()
       currentAbort = controller
+      doEmit({ type: 'stream_stats', tokensPerSecond: 0 })
       // No fixed total timeout — idle timeout inside streamLlmResponse handles stalls
       // Only abort on user cancel or server idle (120s no data)
 
@@ -2145,6 +2241,11 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
     const toolCalls = streamResult.toolCalls
     const rawToolCalls = streamResult.rawToolCalls
     const finishReason = streamResult.finishReason
+
+    if (streamResult.elapsedMs > 0 && streamResult.estimatedOutputTokens > 0) {
+      const tokPerSec = Math.round((streamResult.estimatedOutputTokens * 1000) / streamResult.elapsedMs)
+      doEmit({ type: 'stream_stats', tokensPerSecond: tokPerSec })
+    }
 
     // --- Truncated tool call handling ---
     // Model tried to call a tool but JSON was too large and got cut off
