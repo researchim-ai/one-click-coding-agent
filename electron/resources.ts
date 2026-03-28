@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
 import os from 'os'
-import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection, ModelVariant, ModelVariantInfo } from './types'
+import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection, ModelVariant, ModelVariantInfo, GpuMode } from './types'
 import { readGGUFMetadata, deriveArchInfo, defaultArchInfo, type ModelArchInfo } from './gguf'
 
 export function detectGpus(): GpuInfo[] {
@@ -75,6 +75,24 @@ export function detect(): SystemResources {
     totalVramMb: gpus.reduce((s, g) => s + g.vramTotalMb, 0),
     platform: process.platform,
     arch: process.arch,
+  }
+}
+
+export function applyGpuPreferences(
+  res: SystemResources,
+  gpuMode: GpuMode = 'single',
+  gpuIndex: number | null = 0,
+): SystemResources {
+  if (gpuMode !== 'single' || res.gpus.length === 0) return res
+
+  const selected = res.gpus.find((gpu) => gpu.index === gpuIndex) ?? res.gpus[0]
+  const gpus = selected ? [selected] : []
+
+  return {
+    ...res,
+    gpus,
+    cudaAvailable: gpus.length > 0,
+    totalVramMb: gpus.reduce((sum, gpu) => sum + gpu.vramTotalMb, 0),
   }
 }
 

@@ -5,6 +5,8 @@ export interface GpuInfo {
   vramFreeMb: number
 }
 
+export type GpuMode = 'single' | 'split'
+
 export interface SystemResources {
   gpus: GpuInfo[]
   cpuModel: string

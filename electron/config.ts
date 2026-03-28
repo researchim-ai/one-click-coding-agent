@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import type { GpuMode } from './types'
 
 export interface CustomTool {
   id: string
@@ -14,6 +15,8 @@ export interface CustomTool {
 export interface AppConfig {
   lastQuant: string
   ctxSize: number | null
+  gpuMode: GpuMode
+  gpuIndex: number | null
   customTools: CustomTool[]
   systemPrompt: string | null
   summarizePrompt: string | null
@@ -32,6 +35,8 @@ export interface AppConfig {
 const DEFAULT_CONFIG: AppConfig = {
   lastQuant: 'UD-Q4_K_XL',
   ctxSize: null,
+  gpuMode: 'single',
+  gpuIndex: 0,
   customTools: [],
   systemPrompt: null,
   summarizePrompt: null,
