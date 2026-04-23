@@ -111,6 +111,31 @@ contextBridge.exposeInMainWorld('api', {
   checkpointDiffStat: (workspace: string, sha: string): Promise<string> =>
     ipcRenderer.invoke('checkpoints:diff-stat', workspace, sha),
 
+  // Project rules metadata (for the UI pill)
+  getProjectRulesInfo: (workspace: string): Promise<{
+    files: { path: string; relativePath: string; bytes: number }[]
+    truncated: boolean
+    totalBytes: number
+  }> => ipcRenderer.invoke('project-rules:info', workspace),
+
+  // MCP (Model Context Protocol) — wiring for the Settings UI.
+  mcpListServers: (): Promise<import('./config').McpServerConfig[]> =>
+    ipcRenderer.invoke('mcp:list-servers'),
+  mcpGetStatus: (): Promise<import('./mcp').McpServerStatus[]> =>
+    ipcRenderer.invoke('mcp:status'),
+  mcpGetTools: (): Promise<{ qualifiedName: string; serverId: string; rawName: string; description: string }[]> =>
+    ipcRenderer.invoke('mcp:tools'),
+  mcpGetStderrTail: (serverId: string): Promise<string> =>
+    ipcRenderer.invoke('mcp:stderr-tail', serverId),
+  mcpSaveServer: (server: import('./config').McpServerConfig): Promise<import('./mcp').McpServerStatus[]> =>
+    ipcRenderer.invoke('mcp:save-server', server),
+  mcpDeleteServer: (serverId: string): Promise<import('./mcp').McpServerStatus[]> =>
+    ipcRenderer.invoke('mcp:delete-server', serverId),
+  mcpConnect: (serverId: string): Promise<import('./mcp').McpServerStatus> =>
+    ipcRenderer.invoke('mcp:connect', serverId),
+  mcpDisconnect: (serverId: string): Promise<import('./mcp').McpServerStatus[]> =>
+    ipcRenderer.invoke('mcp:disconnect', serverId),
+
   // File operations
   createFile: (filePath: string): Promise<void> => ipcRenderer.invoke('create-file', filePath),
   createDirectory: (dirPath: string): Promise<void> => ipcRenderer.invoke('create-directory', dirPath),

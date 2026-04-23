@@ -1,6 +1,14 @@
 import { useRef, useEffect, useState, useCallback, type KeyboardEvent } from 'react'
 import { MessageBubble } from './MessageBubble'
 import type { ChatMessage } from '../hooks/useAgent'
+import {
+  SLASH_COMMANDS,
+  filterSlashCommands,
+  findSlashCommand,
+  parseSlashInput,
+  expandSlashTemplate,
+  type SlashCommand,
+} from '../slashCommands'
 
 interface AttachedFile {
   path: string
@@ -35,6 +43,9 @@ interface Props {
   contextUsage?: ContextUsage | null
   appLanguage?: 'ru' | 'en'
   onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
+  /** Handler for slash-command actions like /clear, /new. Prompt-style
+   *  slash commands are expanded in place and flow through onSend. */
+  onSlashAction?: (actionId: 'clear-chat' | 'new-session', arg: string) => void
 }
 
 export function Chat({
@@ -49,6 +60,7 @@ export function Chat({
   contextUsage,
   appLanguage = 'ru',
   onRestoreCheckpoint,
+  onSlashAction,
 }: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
@@ -59,6 +71,10 @@ export function Chat({
   const [mentionFiles, setMentionFiles] = useState<{ path: string; name: string }[]>([])
   const [mentionIndex, setMentionIndex] = useState(0)
   const [expandedRef, setExpandedRef] = useState<number | null>(null)
+  const [showSlash, setShowSlash] = useState(false)
+  const [slashResults, setSlashResults] = useState<SlashCommand[]>(SLASH_COMMANDS)
+  const [slashIndex, setSlashIndex] = useState(0)
+  const [rulesInfo, setRulesInfo] = useState<{ files: { relativePath: string; bytes: number }[]; truncated: boolean; totalBytes: number } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lastScrollLenRef = useRef(0)
@@ -75,9 +91,80 @@ export function Chat({
     }
   }, [messages])
 
+  // Load AGENTS.md / CLAUDE.md / .cursorrules info for the current workspace.
+  // Re-runs when the user picks a different project or when they reset chat
+  // (the agent re-reads the files then too).
+  useEffect(() => {
+    if (!workspace || !window.api?.getProjectRulesInfo) {
+      setRulesInfo(null)
+      return
+    }
+    let cancelled = false
+    window.api.getProjectRulesInfo(workspace).then((info) => {
+      if (!cancelled) setRulesInfo(info && info.files.length ? info : null)
+    }).catch(() => {
+      if (!cancelled) setRulesInfo(null)
+    })
+    return () => { cancelled = true }
+  }, [workspace])
+
   const handleSend = useCallback(async () => {
     if (!input.trim() && attachedFiles.length === 0 && codeRefs.length === 0) return
     if (busy) return
+
+    // ---- Slash-command expansion -----------------------------------------
+    // Intercept BEFORE composing the full message. For "action" commands
+    // (/clear, /new) we never send anything to the LLM; we just call the
+    // parent handler and clear the input. For "prompt" commands we swap
+    // the raw input with the expanded template — attachments still apply.
+    const parsed = parseSlashInput(input)
+    if (parsed) {
+      const cmd = findSlashCommand(parsed.name)
+      if (cmd) {
+        if (cmd.kind === 'action' && cmd.actionId) {
+          onSlashAction?.(cmd.actionId, parsed.arg)
+          setInput('')
+          setShowSlash(false)
+          if (textareaRef.current) textareaRef.current.style.height = 'auto'
+          return
+        }
+        if (cmd.kind === 'prompt') {
+          // Compose attachments THEN expanded template — keeps existing
+          // UX where pinned files/code-refs still anchor context.
+          const expanded = expandSlashTemplate(cmd, parsed.arg, appLanguage ?? 'ru')
+          let fullMessage = ''
+          if (codeRefs.length > 0) {
+            fullMessage += codeRefs.map((ref) =>
+              `[${ref.relativePath}:${ref.startLine}-${ref.endLine}]\n\`\`\`${ref.language}\n${ref.content}\n\`\`\``,
+            ).join('\n\n') + '\n\n'
+          }
+          if (attachedFiles.length > 0) {
+            const parts: string[] = []
+            for (const f of attachedFiles) {
+              try {
+                const { content } = await window.api.readFileContent(f.path)
+                const lines = content.split('\n').length
+                parts.push(`[File: ${f.name}] (${lines} lines)\n\`\`\`\n${content}\n\`\`\``)
+              } catch {
+                parts.push(`[File: ${f.name}] (failed to read)`)
+              }
+            }
+            fullMessage += parts.join('\n\n') + '\n\n'
+          }
+          fullMessage += expanded
+          onSend(fullMessage)
+          setInput('')
+          setAttachedFiles([])
+          setExpandedRef(null)
+          if (onRemoveCodeRef) {
+            for (let i = codeRefs.length - 1; i >= 0; i--) onRemoveCodeRef(i)
+          }
+          setShowSlash(false)
+          if (textareaRef.current) textareaRef.current.style.height = 'auto'
+          return
+        }
+      }
+    }
 
     let fullMessage = ''
 
@@ -119,7 +206,7 @@ export function Chat({
     }
     setShowMention(false)
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
-  }, [input, attachedFiles, codeRefs, busy, onSend, onRemoveCodeRef])
+  }, [input, attachedFiles, codeRefs, busy, onSend, onRemoveCodeRef, onSlashAction, appLanguage])
 
   const collectFiles = useCallback(async (query: string) => {
     if (!workspace || !window.api) return
@@ -162,9 +249,46 @@ export function Chat({
       setShowMention(true)
       setMentionQuery(atMatch[1])
       collectFiles(atMatch[1])
-    } else {
-      setShowMention(false)
+      setShowSlash(false)
+      return
     }
+    setShowMention(false)
+
+    // Slash-command popover: only surface while the user is still typing the
+    // command name (first token). Once they add a space, they're typing
+    // arguments — hide the picker to keep out of the way.
+    const slashMatch = val.match(/^\s*\/([A-Za-z][\w-]*)$/)
+    if (slashMatch) {
+      const results = filterSlashCommands(slashMatch[1])
+      setSlashResults(results)
+      setSlashIndex(0)
+      setShowSlash(results.length > 0)
+    } else if (val.startsWith('/') && !val.includes(' ') && !val.includes('\n')) {
+      // Just `/` — show full list.
+      setSlashResults(SLASH_COMMANDS)
+      setSlashIndex(0)
+      setShowSlash(true)
+    } else {
+      setShowSlash(false)
+    }
+  }
+
+  const insertSlashCommand = (cmd: SlashCommand) => {
+    // Insert the command name followed by a space, so the user can start
+    // typing additional context (it becomes `${arg}` in the template).
+    // For pure actions (/clear) we leave no trailing space — pressing Enter
+    // immediately runs the action.
+    const next = cmd.kind === 'action' ? `/${cmd.name}` : `/${cmd.name} `
+    setInput(next)
+    setShowSlash(false)
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (ta) {
+        ta.focus()
+        const len = ta.value.length
+        ta.setSelectionRange(len, len)
+      }
+    })
   }
 
   const insertFile = (file: { path: string; name: string }) => {
@@ -208,6 +332,41 @@ export function Chat({
         e.preventDefault()
         setShowMention(false)
         return
+      }
+    }
+
+    if (showSlash && slashResults.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashIndex((i) => Math.min(i + 1, slashResults.length - 1))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashIndex((i) => Math.max(i - 1, 0))
+        return
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        insertSlashCommand(slashResults[slashIndex])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setShowSlash(false)
+        return
+      }
+      // Enter: if user already typed a full matching command name, fall
+      // through to send. Otherwise accept the highlighted suggestion.
+      if (e.key === 'Enter' && !e.shiftKey) {
+        const parsed = parseSlashInput(input)
+        const exact = parsed ? findSlashCommand(parsed.name) : null
+        if (!exact) {
+          e.preventDefault()
+          insertSlashCommand(slashResults[slashIndex])
+          return
+        }
+        // Fall through to normal send.
       }
     }
 
@@ -286,30 +445,80 @@ export function Chat({
         </div>
       </div>
 
-      {/* Context usage bar */}
-      {contextUsage && (
+      {/* Context usage bar + project-rules pill. Lives right above the
+          composer, so the user sees both pieces of "who's at the wheel"
+          state without ever having to open settings. */}
+      {(contextUsage || rulesInfo) && (
         <div className="border-t border-zinc-800/40 bg-[#0d1117] px-3 py-1 flex items-center gap-2">
-          <span className="text-[10px] text-zinc-600 shrink-0">{t('Контекст', 'Context')}</span>
-          <div className="flex-1 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                contextUsage.percent > 85 ? 'bg-red-500' :
-                contextUsage.percent > 60 ? 'bg-amber-500' :
-                'bg-emerald-500'
-              }`}
-              style={{ width: `${Math.min(contextUsage.percent, 100)}%` }}
-            />
-          </div>
-          <span className={`text-[10px] font-mono tabular-nums shrink-0 ${
-            contextUsage.percent > 85 ? 'text-red-400' :
-            contextUsage.percent > 60 ? 'text-amber-400' :
-            'text-zinc-500'
-          }`}>
-            {contextUsage.percent}%
-          </span>
-          <span className="text-[9px] text-zinc-700 shrink-0">
-            {Math.round(contextUsage.usedTokens / 1024)}K / {Math.round(contextUsage.maxContextTokens / 1024)}K
-          </span>
+          {contextUsage && (
+            <>
+              <span className="text-[10px] text-zinc-600 shrink-0">{t('Контекст', 'Context')}</span>
+              <div
+                className="flex-1 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden cursor-help"
+                title={
+                  t(
+                    `Использовано ${contextUsage.usedTokens.toLocaleString('ru')} из ${contextUsage.maxContextTokens.toLocaleString('ru')} токенов (${contextUsage.percent}%).`
+                    + (contextUsage.percent > 85
+                      ? '\n⚠ Скоро лимит — подумай о /clear или /new.'
+                      : contextUsage.percent > 60
+                        ? '\nАгент начнёт автосжимать контекст после ~70%.'
+                        : ''),
+                    `Used ${contextUsage.usedTokens.toLocaleString('en')} of ${contextUsage.maxContextTokens.toLocaleString('en')} tokens (${contextUsage.percent}%).`
+                    + (contextUsage.percent > 85
+                      ? '\n⚠ Near the limit — consider /clear or /new.'
+                      : contextUsage.percent > 60
+                        ? '\nAgent auto-compacts context past ~70%.'
+                        : ''),
+                  )
+                }
+              >
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    contextUsage.percent > 85 ? 'bg-red-500' :
+                    contextUsage.percent > 60 ? 'bg-amber-500' :
+                    'bg-emerald-500'
+                  }`}
+                  style={{ width: `${Math.min(contextUsage.percent, 100)}%` }}
+                />
+              </div>
+              <span className={`text-[10px] font-mono tabular-nums shrink-0 ${
+                contextUsage.percent > 85 ? 'text-red-400' :
+                contextUsage.percent > 60 ? 'text-amber-400' :
+                'text-zinc-500'
+              }`}>
+                {contextUsage.percent}%
+              </span>
+              <span className="text-[9px] text-zinc-700 shrink-0">
+                {Math.round(contextUsage.usedTokens / 1024)}K / {Math.round(contextUsage.maxContextTokens / 1024)}K
+              </span>
+              {contextUsage.percent > 85 && onSlashAction && (
+                <button
+                  onClick={() => onSlashAction('clear-chat', '')}
+                  className="text-[10px] px-1.5 py-[1px] rounded border border-red-500/30 text-red-300 hover:bg-red-500/10 cursor-pointer shrink-0"
+                  title={t('Очистить чат (/clear)', 'Clear chat (/clear)')}
+                >
+                  {t('очистить', 'clear')}
+                </button>
+              )}
+            </>
+          )}
+          {rulesInfo && rulesInfo.files.length > 0 && (
+            <span
+              className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-emerald-500/25 bg-emerald-500/5 text-[10px] text-emerald-300/90 cursor-help shrink-0"
+              title={
+                t('Загруженные правила проекта', 'Loaded project rules')
+                + ':\n' + rulesInfo.files.map((f) => `• ${f.relativePath} (${(f.bytes / 1024).toFixed(1)} KB)`).join('\n')
+                + (rulesInfo.truncated ? '\n\n' + t('⚠ Обрезано по лимиту 16KB', '⚠ Truncated at 16KB limit') : '')
+              }
+            >
+              <span>📋</span>
+              <span className="font-mono">
+                {rulesInfo.files.length === 1
+                  ? rulesInfo.files[0].relativePath
+                  : `${rulesInfo.files.length} ${t('правил', 'rules')}`}
+              </span>
+            </span>
+          )}
         </div>
       )}
 
@@ -401,8 +610,40 @@ export function Chat({
           </div>
         )}
 
-        {/* Mention dropdown */}
+        {/* Slash + mention dropdowns share one positioning wrapper so only
+            one is ever visible at once. */}
         <div className="relative">
+          {showSlash && slashResults.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mx-3 mb-1 bg-zinc-900 border border-zinc-700/60 rounded-lg shadow-xl overflow-hidden z-50 max-h-[280px] overflow-y-auto">
+              <div className="px-2.5 py-1.5 text-[10px] text-zinc-500 uppercase tracking-wider border-b border-zinc-800/60 flex items-center justify-between">
+                <span>{t('Команды', 'Commands')}</span>
+                <span className="text-zinc-600 normal-case tracking-normal text-[10px]">
+                  {t('↑↓ · Tab / Enter · Esc', '↑↓ · Tab / Enter · Esc')}
+                </span>
+              </div>
+              {slashResults.map((c, i) => (
+                <button
+                  key={c.name}
+                  onMouseDown={(e) => { e.preventDefault(); insertSlashCommand(c) }}
+                  className={`w-full px-2.5 py-1.5 text-left text-[12px] flex items-center gap-2 cursor-pointer ${
+                    i === slashIndex
+                      ? 'bg-blue-500/15 text-blue-300'
+                      : 'text-zinc-300 hover:bg-zinc-800/60'
+                  }`}
+                >
+                  <span className="font-mono text-zinc-500 w-20 shrink-0">/{c.name}</span>
+                  <span className="truncate text-zinc-400 text-[11.5px]">
+                    {c.description[appLanguage ?? 'ru']}
+                  </span>
+                  {c.kind === 'action' && (
+                    <span className="ml-auto text-[10px] text-amber-400/80 shrink-0">
+                      {t('действие', 'action')}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
           {showMention && mentionFiles.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 mx-3 mb-1 bg-zinc-900 border border-zinc-700/60 rounded-lg shadow-xl overflow-hidden z-50 max-h-[240px] overflow-y-auto">
               <div className="px-2.5 py-1.5 text-[10px] text-zinc-500 uppercase tracking-wider border-b border-zinc-800/60">

@@ -73,6 +73,23 @@ interface ElectronAPI {
   createCheckpoint(workspace: string, label: string): Promise<import('../electron/types').CheckpointInfo | null>
   checkpointDiffStat(workspace: string, sha: string): Promise<string>
 
+  // Project rules info (AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules/*)
+  getProjectRulesInfo(workspace: string): Promise<{
+    files: { path: string; relativePath: string; bytes: number }[]
+    truncated: boolean
+    totalBytes: number
+  }>
+
+  // MCP (Model Context Protocol)
+  mcpListServers(): Promise<import('../electron/config').McpServerConfig[]>
+  mcpGetStatus(): Promise<import('../electron/mcp').McpServerStatus[]>
+  mcpGetTools(): Promise<{ qualifiedName: string; serverId: string; rawName: string; description: string }[]>
+  mcpGetStderrTail(serverId: string): Promise<string>
+  mcpSaveServer(server: import('../electron/config').McpServerConfig): Promise<import('../electron/mcp').McpServerStatus[]>
+  mcpDeleteServer(serverId: string): Promise<import('../electron/mcp').McpServerStatus[]>
+  mcpConnect(serverId: string): Promise<import('../electron/mcp').McpServerStatus>
+  mcpDisconnect(serverId: string): Promise<import('../electron/mcp').McpServerStatus[]>
+
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void

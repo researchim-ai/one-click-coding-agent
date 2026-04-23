@@ -29,6 +29,8 @@ import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
 import * as config from './config'
 import * as checkpoints from './checkpoints'
+import { describeProjectRules } from './project-rules'
+import * as mcp from './mcp'
 import { TOOL_DEFINITIONS } from './tools'
 import { MODEL_FAMILIES } from './resources'
 import { ensureWebSearchBackend, getWebSearchStatus } from './searxng'
@@ -303,6 +305,14 @@ function getAgentWorker(): Worker {
         }).catch(() => {
           agentWorker?.postMessage({ type: 'query-ctx-result', id: msg.id, ctxSize: serverManager.getCtxSize() })
         })
+      } else if (msg.type === 'mcp-call') {
+        mcp.callTool(msg.qualifiedName, msg.args)
+          .then((result) => {
+            agentWorker?.postMessage({ type: 'mcp-call-result', id: msg.id, result })
+          })
+          .catch((err: any) => {
+            agentWorker?.postMessage({ type: 'mcp-call-result', id: msg.id, error: err?.message ?? String(err) })
+          })
       } else if (msg.type === 'done') {
         if (msg.session) updateSessionFromWorker(msg.session, true)
         if (pendingSendResolve) {
@@ -348,6 +358,16 @@ function createMainBridge(win: BrowserWindow): AgentBridge {
     async queryActualCtxSize() { await serverManager.queryActualCtxSize() },
     isCancelRequested() { return isCancelRequested() },
     notifyWorkspaceChanged() { scheduleWorkspaceChangedNotify() },
+    listMcpToolDefs() {
+      return mcp.listAllTools().map((t) => ({
+        qualifiedName: t.qualifiedName,
+        description: t.description,
+        inputSchema: t.inputSchema,
+      }))
+    },
+    callMcpTool(name: string, args: Record<string, any>) {
+      return mcp.callTool(name, args)
+    },
   }
 }
 
@@ -661,6 +681,15 @@ app.whenReady().then(() => {
   // setup wizard on every cold start.
   scheduleAutoStartServer()
 
+  // Kick MCP servers in the background — any configured+enabled server
+  // gets connected so its tools show up on the first send-message. Failures
+  // are stored per-server in status.lastError; nothing blocks startup.
+  try {
+    mcp.connectAllInBackground(config.get('mcpServers') ?? [])
+  } catch (e) {
+    console.error('[mcp] connectAllInBackground failed:', e)
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -669,11 +698,13 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   terminalManager.killAll()
   serverManager.stop()
+  mcp.shutdownAll().catch(() => {})
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
   serverManager.stop()
+  mcp.shutdownAll().catch(() => {})
 })
 
 function registerIpcHandlers() {
@@ -934,9 +965,19 @@ function registerIpcHandlers() {
         write(JSON.stringify(session.workspaceKey ?? ''))
         write('}')
         await new Promise<void>((res, rej) => { stream.once('finish', res); stream.once('error', rej); stream.end() })
+        // Snapshot the current MCP tool catalogue so the worker can hand
+        // it to the LLM without needing its own view of the MCP registry.
+        // We don't await a refresh here — connectAllInBackground() runs at
+        // startup and any enabled-but-not-yet-connected servers will be
+        // picked up on the *next* message, not mid-flight.
+        const mcpToolDefs = mcp.listAllTools().map((t) => ({
+          qualifiedName: t.qualifiedName,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        }))
         getAgentWorker().postMessage({
           type: 'run',
-          payload: { message: msg, workspace, config: configVal, apiUrl, ctxSize, sessionPath },
+          payload: { message: msg, workspace, config: configVal, apiUrl, ctxSize, sessionPath, mcpToolDefs },
         })
       })
     })
@@ -988,6 +1029,59 @@ function registerIpcHandlers() {
   ipcMain.handle('checkpoints:diff-stat', (_e, workspace: string, sha: string) => {
     if (!workspace || !sha) return ''
     try { return checkpoints.checkpointDiffStat(workspace, sha) } catch { return '' }
+  })
+
+  // Project rules (AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules/*) —
+  // the renderer calls this to show a "rules loaded" pill, purely cosmetic.
+  ipcMain.handle('project-rules:info', (_e, workspace: string) => {
+    if (!workspace) return { files: [], truncated: false, totalBytes: 0 }
+    try { return describeProjectRules(workspace) }
+    catch { return { files: [], truncated: false, totalBytes: 0 } }
+  })
+
+  // ---- MCP (Model Context Protocol) -----------------------------------
+  // The settings panel talks to these. `mcp:list-servers` + `mcp:status`
+  // are read-only snapshots; the save/remove/connect handlers mutate
+  // config and kick off reconciliation. Tool list is surfaced per-server
+  // so the UI can show "connected, N tools: foo, bar".
+
+  ipcMain.handle('mcp:list-servers', () => {
+    return config.get('mcpServers') ?? []
+  })
+  ipcMain.handle('mcp:status', () => mcp.listStatus())
+  ipcMain.handle('mcp:tools', () => mcp.listAllTools().map((t) => ({
+    qualifiedName: t.qualifiedName,
+    serverId: t.serverId,
+    rawName: t.rawName,
+    description: t.description,
+  })))
+  ipcMain.handle('mcp:stderr-tail', (_e, serverId: string) => mcp.getStderrTail(serverId))
+  ipcMain.handle('mcp:save-server', async (_e, server: config.McpServerConfig) => {
+    const list = config.get('mcpServers') ?? []
+    const idx = list.findIndex((s) => s.id === server.id)
+    const next = [...list]
+    if (idx >= 0) next[idx] = server
+    else next.push(server)
+    config.set('mcpServers', next)
+    await mcp.reconcileServers(next)
+    // Best-effort auto-connect if enabled.
+    if (server.enabled) {
+      try { await mcp.connectOne(server.id) } catch { /* errors surfaced via status */ }
+    }
+    return mcp.listStatus()
+  })
+  ipcMain.handle('mcp:delete-server', async (_e, serverId: string) => {
+    const list = (config.get('mcpServers') ?? []).filter((s) => s.id !== serverId)
+    config.set('mcpServers', list)
+    await mcp.reconcileServers(list)
+    return mcp.listStatus()
+  })
+  ipcMain.handle('mcp:connect', async (_e, serverId: string) => {
+    return mcp.connectOne(serverId)
+  })
+  ipcMain.handle('mcp:disconnect', async (_e, serverId: string) => {
+    await mcp.disconnectOne(serverId)
+    return mcp.listStatus()
   })
 
   ipcMain.handle('pick-directory', async () => {

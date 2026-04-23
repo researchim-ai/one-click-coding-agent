@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ModelVariantInfo, ToolInfo, SystemResources, GpuMode, ModelFamily, WebSearchStatus } from '../../electron/types'
-import type { AppConfig, CustomTool, WebSearchProvider } from '../../electron/config'
+import type { AppConfig, CustomTool, McpServerConfig, WebSearchProvider } from '../../electron/config'
+import type { McpServerStatus } from '../../electron/mcp'
 
 interface Props {
   open: boolean
@@ -9,7 +10,7 @@ interface Props {
   appLanguage?: 'ru' | 'en'
 }
 
-type Tab = 'model' | 'agent' | 'tools' | 'prompts' | 'web-search'
+type Tab = 'model' | 'agent' | 'tools' | 'mcp' | 'prompts' | 'web-search'
 
 function tr(ru: string, en: string, lang: 'ru' | 'en'): string {
   return lang === 'ru' ? ru : en
@@ -101,6 +102,7 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       const mapped: Tab =
         initialTab === 'prompts' ? 'prompts'
         : initialTab === 'tools' ? 'tools'
+        : initialTab === 'mcp' ? 'mcp'
         : initialTab === 'agent' ? 'agent'
         : initialTab === 'web-search' ? 'web-search'
         : 'model'
@@ -322,6 +324,7 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
     { key: 'model', label: t('Модель', 'Model') },
     { key: 'agent', label: t('Агент', 'Agent') },
     { key: 'tools', label: t('Инструменты', 'Tools') },
+    { key: 'mcp', label: t('MCP', 'MCP') },
     { key: 'web-search', label: t('Веб‑поиск', 'Web search') },
     { key: 'prompts', label: t('Промпты', 'Prompts') },
   ]
@@ -453,6 +456,7 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
               onCancelEdit={() => setEditingTool(null)}
             />
           )}
+          {tab === 'mcp' && <McpTab appLanguage={L} />}
           {tab === 'prompts' && (
             <PromptsTab
               sysPrompt={sysPrompt}
@@ -1274,6 +1278,468 @@ function WebSearchTab({
           className="px-3 py-2 text-xs rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors disabled:opacity-50"
         >
           {t('Обновить статус', 'Refresh status')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// MCP tab — manages user-configured Model Context Protocol servers.
+// ---------------------------------------------------------------------------
+
+interface McpPreset {
+  name: string
+  command: string
+  args: string[]
+  envHints?: { key: string; description: string }[]
+  description: { ru: string; en: string }
+}
+
+const MCP_PRESETS: McpPreset[] = [
+  {
+    name: 'filesystem',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/allowed/dir'],
+    description: {
+      ru: 'Официальный сервер для чтения/записи файлов в разрешённых директориях',
+      en: 'Official server for reading/writing files in allowed directories',
+    },
+  },
+  {
+    name: 'github',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-github'],
+    envHints: [{ key: 'GITHUB_PERSONAL_ACCESS_TOKEN', description: 'Personal access token' }],
+    description: {
+      ru: 'GitHub API: issues, PRs, поиск по коду, репозитории',
+      en: 'GitHub API: issues, PRs, code search, repositories',
+    },
+  },
+  {
+    name: 'postgres',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://localhost/mydb'],
+    description: {
+      ru: 'Read-only доступ к PostgreSQL: список таблиц, схемы, SELECT-запросы',
+      en: 'Read-only access to PostgreSQL: tables, schemas, SELECT queries',
+    },
+  },
+  {
+    name: 'sqlite',
+    command: 'uvx',
+    args: ['mcp-server-sqlite', '--db-path', '/path/to/file.db'],
+    description: {
+      ru: 'Запросы к SQLite-базе: список таблиц, схемы, SQL-запросы',
+      en: 'SQLite database queries: tables, schemas, SQL queries',
+    },
+  },
+  {
+    name: 'brave-search',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-brave-search'],
+    envHints: [{ key: 'BRAVE_API_KEY', description: 'Brave Search API key' }],
+    description: {
+      ru: 'Веб-поиск через Brave Search API',
+      en: 'Web search via Brave Search API',
+    },
+  },
+]
+
+function McpTab({ appLanguage }: { appLanguage: 'ru' | 'en' }) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
+
+  const [servers, setServers] = useState<McpServerConfig[]>([])
+  const [statuses, setStatuses] = useState<McpServerStatus[]>([])
+  const [tools, setTools] = useState<{ qualifiedName: string; serverId: string; rawName: string; description: string }[]>([])
+  const [editing, setEditing] = useState<McpServerConfig | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [stderrFor, setStderrFor] = useState<string | null>(null)
+  const [stderr, setStderr] = useState('')
+
+  async function refresh() {
+    const [srv, st, tl] = await Promise.all([
+      window.api.mcpListServers(),
+      window.api.mcpGetStatus(),
+      window.api.mcpGetTools(),
+    ])
+    setServers(srv)
+    setStatuses(st)
+    setTools(tl)
+  }
+
+  useEffect(() => {
+    refresh().catch(() => {})
+    const id = setInterval(() => refresh().catch(() => {}), 2500)
+    return () => clearInterval(id)
+  }, [])
+
+  function statusFor(id: string) {
+    return statuses.find((s) => s.id === id)
+  }
+  function toolsFor(id: string) {
+    return tools.filter((t) => t.serverId === id)
+  }
+
+  async function doConnect(id: string) {
+    setBusyId(id)
+    try { await window.api.mcpConnect(id) } catch {}
+    await refresh()
+    setBusyId(null)
+  }
+  async function doDisconnect(id: string) {
+    setBusyId(id)
+    try { await window.api.mcpDisconnect(id) } catch {}
+    await refresh()
+    setBusyId(null)
+  }
+  async function doDelete(id: string) {
+    if (!confirm(t('Удалить этот MCP-сервер?', 'Delete this MCP server?'))) return
+    try { await window.api.mcpDeleteServer(id) } catch {}
+    await refresh()
+  }
+  async function doSave(s: McpServerConfig) {
+    try { await window.api.mcpSaveServer(s) } catch {}
+    setEditing(null)
+    await refresh()
+  }
+
+  function newServerFromPreset(preset?: McpPreset): McpServerConfig {
+    const id = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    if (!preset) {
+      return { id, name: 'my-server', command: '', args: [], env: {}, enabled: true }
+    }
+    const env: Record<string, string> = {}
+    for (const h of preset.envHints ?? []) env[h.key] = ''
+    return {
+      id,
+      name: preset.name,
+      command: preset.command,
+      args: [...preset.args],
+      env,
+      enabled: true,
+    }
+  }
+
+  async function openStderr(id: string) {
+    setStderrFor(id)
+    try { setStderr(await window.api.mcpGetStderrTail(id)) }
+    catch { setStderr('') }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-medium text-zinc-300 mb-1">{t('MCP серверы', 'MCP servers')}</h3>
+        <p className="text-xs text-zinc-500">
+          {t(
+            'Подключите любой MCP‑сервер (GitHub, Postgres, Slack, файловая система…) — его инструменты станут доступны агенту как обычные tool‑ы.',
+            'Connect any MCP server (GitHub, Postgres, Slack, filesystem, …) — its tools will be exposed to the agent like native tools.',
+          )}
+          {' '}
+          <a
+            className="text-blue-400 hover:underline cursor-pointer"
+            onClick={(e) => { e.preventDefault(); (window.api as any).openExternalUrl?.('https://modelcontextprotocol.io/servers') }}
+          >
+            {t('Каталог серверов', 'Browse the registry')} ↗
+          </a>
+        </p>
+      </div>
+
+      {/* Existing servers */}
+      {servers.length === 0 && !editing && (
+        <p className="text-xs text-zinc-600 py-4 text-center">
+          {t('Пока нет серверов. Добавьте первый — или начните с готового пресета ниже.', 'No servers yet. Add one — or start from a preset below.')}
+        </p>
+      )}
+      {servers.map((s) => {
+        const st = statusFor(s.id)
+        const st_tools = toolsFor(s.id)
+        const connected = st?.connected ?? false
+        const busy = busyId === s.id
+        return (
+          <div key={s.id} className="px-3 py-2.5 rounded-lg border border-zinc-800">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${
+                connected ? 'bg-emerald-500'
+                : st?.lastError ? 'bg-red-500'
+                : 'bg-zinc-600'
+              }`} />
+              <span className="text-sm font-mono text-zinc-200">{s.name}</span>
+              {!s.enabled && (
+                <span className="text-[10px] text-zinc-600">{t('отключён', 'disabled')}</span>
+              )}
+              {connected && (
+                <span className="text-[10px] text-emerald-400/80">
+                  {st_tools.length} {t('инстр.', 'tools')}
+                </span>
+              )}
+              <div className="ml-auto flex gap-1">
+                {connected ? (
+                  <button
+                    onClick={() => doDisconnect(s.id)}
+                    disabled={busy}
+                    className="text-[10px] px-2 py-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 cursor-pointer disabled:opacity-50"
+                  >
+                    {busy ? '…' : t('откл.', 'disconnect')}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => doConnect(s.id)}
+                    disabled={busy || !s.enabled}
+                    className="text-[10px] px-2 py-0.5 rounded text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 cursor-pointer disabled:opacity-50"
+                  >
+                    {busy ? '…' : t('подкл.', 'connect')}
+                  </button>
+                )}
+                <button
+                  onClick={() => setEditing(s)}
+                  className="text-[10px] px-2 py-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 cursor-pointer"
+                >
+                  {t('ред.', 'edit')}
+                </button>
+                <button
+                  onClick={() => doDelete(s.id)}
+                  className="text-[10px] px-2 py-0.5 rounded text-red-500/60 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
+                >
+                  {t('удал.', 'del')}
+                </button>
+              </div>
+            </div>
+            <p className="text-[10px] text-zinc-600 font-mono mt-1 truncate">
+              {s.command} {s.args.join(' ')}
+            </p>
+            {st?.lastError && (
+              <p className="text-[10.5px] text-red-400/90 mt-1">
+                ⚠ {st.lastError}
+                {' · '}
+                <button
+                  className="underline cursor-pointer"
+                  onClick={() => openStderr(s.id)}
+                >
+                  {t('логи stderr', 'stderr log')}
+                </button>
+              </p>
+            )}
+            {connected && st_tools.length > 0 && (
+              <details className="mt-1">
+                <summary className="text-[10px] text-zinc-500 cursor-pointer hover:text-zinc-300">
+                  {t('инструменты', 'tools')} ({st_tools.length})
+                </summary>
+                <ul className="mt-1 space-y-0.5 text-[10.5px] text-zinc-400">
+                  {st_tools.map((t) => (
+                    <li key={t.qualifiedName} className="font-mono truncate">
+                      <span className="text-blue-400/80">{t.rawName}</span>
+                      {t.description && (
+                        <span className="text-zinc-600"> — {t.description}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )
+      })}
+
+      {/* Editor */}
+      {editing && (
+        <McpServerEditor
+          initial={editing}
+          appLanguage={L}
+          onSave={doSave}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
+      {/* Stderr modal */}
+      {stderrFor && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70" onClick={() => setStderrFor(null)}>
+          <div
+            className="bg-zinc-900 border border-zinc-700 rounded-lg max-w-xl w-full max-h-[70vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-2.5 border-b border-zinc-800 flex items-center justify-between">
+              <span className="text-sm text-zinc-200">stderr — {servers.find((s) => s.id === stderrFor)?.name}</span>
+              <button
+                onClick={() => setStderrFor(null)}
+                className="text-zinc-500 hover:text-zinc-200 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <pre className="p-3 text-[11px] font-mono text-zinc-400 overflow-auto whitespace-pre-wrap flex-1">
+              {stderr || t('(пусто)', '(empty)')}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {/* Add new */}
+      {!editing && (
+        <div className="space-y-2">
+          <button
+            onClick={() => setEditing(newServerFromPreset())}
+            className="text-xs px-3 py-1.5 rounded-lg bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors"
+          >
+            + {t('Добавить сервер', 'Add server')}
+          </button>
+
+          <div className="pt-2 border-t border-zinc-800">
+            <p className="text-[11px] text-zinc-500 mb-2">{t('Популярные пресеты:', 'Popular presets:')}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {MCP_PRESETS.map((p) => (
+                <button
+                  key={p.name}
+                  onClick={() => setEditing(newServerFromPreset(p))}
+                  title={p.description[L]}
+                  className="text-[11px] px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:border-blue-500/50 hover:text-blue-300 cursor-pointer"
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function McpServerEditor({
+  initial,
+  appLanguage,
+  onSave,
+  onCancel,
+}: {
+  initial: McpServerConfig
+  appLanguage: 'ru' | 'en'
+  onSave: (s: McpServerConfig) => void
+  onCancel: () => void
+}) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
+  const [name, setName] = useState(initial.name)
+  const [command, setCommand] = useState(initial.command)
+  const [argsStr, setArgsStr] = useState(initial.args.join(' '))
+  const [envList, setEnvList] = useState<{ k: string; v: string }[]>(
+    Object.entries(initial.env || {}).map(([k, v]) => ({ k, v })),
+  )
+  const [enabled, setEnabled] = useState(initial.enabled)
+
+  function save() {
+    // Split on whitespace but respect simple quoting ("a b" → a b as one arg).
+    // Matches most copy-pasted command lines. For edge cases users can edit
+    // the underlying config file directly — this is a 95%-case UI.
+    const args: string[] = []
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(argsStr)) !== null) {
+      args.push(m[1] ?? m[2] ?? m[3])
+    }
+    const env: Record<string, string> = {}
+    for (const { k, v } of envList) {
+      if (k.trim()) env[k.trim()] = v
+    }
+    onSave({
+      ...initial,
+      name: name.trim() || 'server',
+      command: command.trim(),
+      args,
+      env,
+      enabled,
+    })
+  }
+
+  return (
+    <div className="p-3 rounded-lg border border-blue-500/30 bg-blue-500/5 space-y-2">
+      <div>
+        <label className="text-[11px] text-zinc-500 block mb-1">{t('Имя', 'Name')}</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded focus:border-blue-500 outline-none font-mono"
+          placeholder="my-mcp-server"
+        />
+      </div>
+      <div>
+        <label className="text-[11px] text-zinc-500 block mb-1">{t('Команда', 'Command')}</label>
+        <input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          className="w-full px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded focus:border-blue-500 outline-none font-mono"
+          placeholder="npx"
+        />
+      </div>
+      <div>
+        <label className="text-[11px] text-zinc-500 block mb-1">{t('Аргументы', 'Arguments')}</label>
+        <input
+          value={argsStr}
+          onChange={(e) => setArgsStr(e.target.value)}
+          className="w-full px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded focus:border-blue-500 outline-none font-mono"
+          placeholder="-y @modelcontextprotocol/server-filesystem /path"
+        />
+      </div>
+      <div>
+        <label className="text-[11px] text-zinc-500 block mb-1">
+          {t('Переменные окружения', 'Environment variables')}
+        </label>
+        {envList.map((p, i) => (
+          <div key={i} className="flex gap-1 mb-1">
+            <input
+              value={p.k}
+              onChange={(e) => {
+                const next = [...envList]
+                next[i] = { ...next[i], k: e.target.value }
+                setEnvList(next)
+              }}
+              className="flex-1 px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded focus:border-blue-500 outline-none font-mono"
+              placeholder="KEY"
+            />
+            <input
+              value={p.v}
+              onChange={(e) => {
+                const next = [...envList]
+                next[i] = { ...next[i], v: e.target.value }
+                setEnvList(next)
+              }}
+              type="password"
+              className="flex-[2] px-2 py-1 text-xs bg-zinc-900 border border-zinc-700 rounded focus:border-blue-500 outline-none font-mono"
+              placeholder="value"
+            />
+            <button
+              onClick={() => setEnvList(envList.filter((_, j) => j !== i))}
+              className="px-2 text-zinc-500 hover:text-red-400 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <button
+          onClick={() => setEnvList([...envList, { k: '', v: '' }])}
+          className="text-[11px] px-2 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 cursor-pointer"
+        >
+          + env
+        </button>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        {t('Включён', 'Enabled')}
+      </label>
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="text-xs px-3 py-1 rounded text-zinc-400 hover:text-zinc-200 cursor-pointer"
+        >
+          {t('Отмена', 'Cancel')}
+        </button>
+        <button
+          onClick={save}
+          disabled={!command.trim()}
+          className="text-xs px-3 py-1 rounded bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 cursor-pointer disabled:opacity-40"
+        >
+          {t('Сохранить', 'Save')}
         </button>
       </div>
     </div>

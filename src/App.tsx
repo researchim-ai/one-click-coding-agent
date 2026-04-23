@@ -497,6 +497,10 @@ export function App() {
                   contextUsage={contextUsage}
                   appLanguage={appLanguage}
                   onRestoreCheckpoint={restoreCheckpoint}
+                  onSlashAction={(actionId) => {
+                    if (actionId === 'clear-chat') resetChat()
+                    else if (actionId === 'new-session') newSession()
+                  }}
                 />
               </div>
             )}

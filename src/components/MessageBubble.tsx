@@ -61,23 +61,33 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
 
       {hasTools && (
         <div className="space-y-1 my-1">
-          {message.toolCalls!.map((tc, i) => (
-            <ToolCallBlock
-              key={i}
-              name={tc.name}
-              args={tc.args}
-              result={tc.result}
-              approvalId={tc.approvalId}
-              approvalStatus={tc.approvalStatus}
-              onApprove={onApprove}
-              onDeny={onDeny}
-              appLanguage={L}
-              checkpointSha={tc.checkpointSha}
-              checkpointLabel={tc.checkpointLabel}
-              checkpointRestored={tc.checkpointRestored}
-              onRestoreCheckpoint={onRestoreCheckpoint}
-            />
-          ))}
+          {message.toolCalls!.map((tc, i) => {
+            // Hide the chip when its SHA matches the previous tool's SHA in
+            // this same assistant turn — that means none of those tools
+            // actually mutated anything between each other, so repeating the
+            // "restore to abc12345" button on every card is just noise.
+            // The first occurrence keeps its chip so the user can still go
+            // back to the state before this whole sequence.
+            const prev = i > 0 ? message.toolCalls![i - 1] : undefined
+            const suppressCheckpoint = !!(tc.checkpointSha && prev?.checkpointSha === tc.checkpointSha)
+            return (
+              <ToolCallBlock
+                key={i}
+                name={tc.name}
+                args={tc.args}
+                result={tc.result}
+                approvalId={tc.approvalId}
+                approvalStatus={tc.approvalStatus}
+                onApprove={onApprove}
+                onDeny={onDeny}
+                appLanguage={L}
+                checkpointSha={suppressCheckpoint ? undefined : tc.checkpointSha}
+                checkpointLabel={tc.checkpointLabel}
+                checkpointRestored={tc.checkpointRestored}
+                onRestoreCheckpoint={onRestoreCheckpoint}
+              />
+            )
+          })}
         </div>
       )}
 

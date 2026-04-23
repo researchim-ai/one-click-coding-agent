@@ -1,5 +1,6 @@
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool, getBuiltinToolDefinitions } from './tools'
 import { createCheckpoint, describeToolForCheckpoint } from './checkpoints'
+import { loadProjectRules } from './project-rules'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
 import * as crypto from 'crypto'
@@ -20,6 +21,21 @@ export interface AgentBridge {
   queryActualCtxSize(): Promise<void>
   isCancelRequested(): boolean
   notifyWorkspaceChanged(): void
+  /** MCP tool definitions, namespaced `mcp__<slug>__<tool>`. Snapshot from
+   *  the main process — we don't refresh mid-run; new servers picked up
+   *  on the next message. */
+  listMcpToolDefs(): McpToolSnapshot[]
+  /** Invoke an MCP tool by qualified name. Rejects if server is down or
+   *  the tool isn't registered. */
+  callMcpTool(qualifiedName: string, args: Record<string, any>): Promise<string>
+}
+
+/** Snapshot of one MCP tool, shape kept minimal so it crosses worker
+ *  boundaries cheaply. */
+export interface McpToolSnapshot {
+  qualifiedName: string
+  description: string
+  inputSchema: any
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +65,65 @@ const CHECKPOINT_TRIGGER_TOOLS = new Set<string>([
   COMMAND_TOOL,
 ])
 
+/** First-token allowlist for shell commands we're confident are readonly. If
+ *  the whole command is made of these, we skip the checkpoint — otherwise the
+ *  user ends up with a snapshot chip on every `grep`, `ls`, `cat`, etc.,
+ *  which is pure visual noise. When in doubt we DO snapshot. */
+const READONLY_COMMANDS = new Set<string>([
+  'ls', 'll', 'la', 'dir',
+  'cat', 'head', 'tail', 'less', 'more', 'nl',
+  'wc', 'file', 'stat', 'du', 'df', 'tree',
+  'grep', 'egrep', 'fgrep', 'rg', 'ack',
+  'find', 'fd', 'locate', 'which', 'whereis', 'type', 'command',
+  'pwd', 'whoami', 'id', 'uname', 'hostname', 'date', 'uptime', 'realpath', 'basename', 'dirname',
+  'ps', 'env', 'printenv', 'echo', 'printf', 'true', 'false',
+  'readlink', 'md5sum', 'sha1sum', 'sha256sum',
+  'diff', 'cmp', 'sort', 'uniq', 'awk', 'sed', // sed is only readonly without -i, see below
+  'node', 'python', 'python3', 'ruby', // interpreters w/ -e/-c might write; we require no redirects (handled below)
+])
+
+/** `git` subcommands that don't mutate working tree or index. */
+const READONLY_GIT_SUBCOMMANDS = new Set<string>([
+  'status', 'log', 'diff', 'show', 'blame', 'branch', 'remote', 'rev-parse',
+  'ls-files', 'ls-tree', 'describe', 'config', 'tag', 'shortlog', 'reflog',
+  'cat-file', 'fsck', 'count-objects', 'grep',
+])
+
+function looksReadonlyCommand(command: string): boolean {
+  const s = (command ?? '').trim()
+  if (!s) return true
+  // Any redirection, pipe-into-mutating-tool, or command-substitution escape
+  // hatch → we can't reason about it safely, assume destructive.
+  if (/[>]|<\(|\$\(|`|\btee\b|\bxargs\b|\bmv\b|\brm\b|\bcp\b|\bmkdir\b|\btouch\b|\bln\b|\bchmod\b|\bchown\b|\binstall\b|\bdd\b|\btruncate\b|\brsync\b|\bpip\b|\bnpm\b|\byarn\b|\bpnpm\b|\bmake\b|\bcargo\b|\bgo\s+build\b|\bgo\s+install\b/i.test(s)) {
+    return false
+  }
+  // sed -i mutates in place; plain sed is fine.
+  if (/\bsed\b.*\s-i\b/.test(s)) return false
+  // Every segment (separated by && / || / ; / |) must be readonly.
+  const segments = s.split(/&&|\|\||;|\|/).map((p) => p.trim()).filter(Boolean)
+  return segments.every(segmentIsReadonly)
+}
+
+function segmentIsReadonly(seg: string): boolean {
+  let s = seg.trim()
+  if (!s) return true
+  // Strip leading `cd <path>` — pure directory change never writes workspace
+  // files. `cd X && rest` is handled by the outer split, but within a single
+  // segment we also recognise it in case someone didn't use &&.
+  const cdOnly = s.match(/^cd\s+\S+$/)
+  if (cdOnly) return true
+  const cdThen = s.match(/^cd\s+\S+\s+(.+)$/)
+  if (cdThen) s = cdThen[1].trim()
+
+  const head = s.split(/\s+/)[0] ?? ''
+  if (!head) return false
+  if (head === 'git') {
+    const sub = s.split(/\s+/)[1] ?? ''
+    return READONLY_GIT_SUBCOMMANDS.has(sub)
+  }
+  return READONLY_COMMANDS.has(head)
+}
+
 /** Take a shadow-git snapshot before a destructive tool runs, so the user
  *  can one-click revert. Any failure is swallowed — checkpoints are a "nice
  *  to have", never a reason to block an actual agent action. */
@@ -58,6 +133,12 @@ function maybeCheckpoint(
   workspace: string,
 ): { sha: string; label: string; timestampMs: number } | undefined {
   if (!CHECKPOINT_TRIGGER_TOOLS.has(toolName)) return undefined
+  // Skip pure read-only shell commands (grep/ls/cat/git status/…): nothing to
+  // roll back, and users were (rightly) confused by a "restore" chip on a
+  // plain `grep`.
+  if (toolName === COMMAND_TOOL && looksReadonlyCommand(String(toolArgs?.command ?? ''))) {
+    return undefined
+  }
   try {
     const cp = createCheckpoint(workspace, describeToolForCheckpoint(toolName, toolArgs))
     if (!cp) return undefined
@@ -297,9 +378,30 @@ function getAllTools(): any[] {
     },
   }))
   const builtins = getBuiltinToolDefinitions(cfg)
-  const all = [...builtins, ...customDefs]
+
+  // MCP tools: whatever the main-process MCP manager has discovered from
+  // currently-connected servers, exposed to the LLM as `mcp__<slug>__<tool>`.
+  // Descriptions are tagged with a "[MCP: server]" prefix so the model knows
+  // these are user-provisioned integrations — empirically this nudges
+  // smaller models to use them more intentionally.
+  const mcpDefs = currentBridge!.listMcpToolDefs().map((t) => ({
+    type: 'function',
+    function: {
+      name: t.qualifiedName,
+      description: t.description || `MCP tool: ${t.qualifiedName}`,
+      parameters: t.inputSchema && typeof t.inputSchema === 'object'
+        ? t.inputSchema
+        : { type: 'object', properties: {} },
+    },
+  }))
+
+  const all = [...builtins, ...customDefs, ...mcpDefs]
   // On small contexts, use compact descriptions to save ~40% tool overhead
   return ctxTokens() < 16384 ? compactToolDefs(all) : all
+}
+
+function isMcpTool(name: string): boolean {
+  return typeof name === 'string' && name.startsWith('mcp__')
 }
 
 interface Message {
@@ -2046,6 +2148,16 @@ function getProjectContext(ws: string): string {
       ctx += `Type: ${detected.join(', ')}\n`
     }
 
+    // Project rules (AGENTS.md / CLAUDE.md / .cursorrules / ...) — highest-
+    // value piece of the prompt, put it FIRST so the model sees it before
+    // the directory tree drowns attention.
+    const rules = loadProjectRules(ws)
+    if (rules.content) {
+      ctx = rules.content + '\n' + ctx
+      const fileList = rules.files.map((f) => f.relativePath).join(', ')
+      debugLog('RULES', `loaded ${rules.files.length} rule file(s) (${rules.truncated ? 'truncated, ' : ''}total bytes=${rules.files.reduce((a, f) => a + f.bytes, 0)}): ${fileList}`)
+    }
+
     projectContextCache = { ws, ctx, ts: Date.now() }
     return budgetTrimProjectContext(ctx)
   } catch {
@@ -2379,6 +2491,12 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
           if (isCustom) {
             const ct = recoveredCustomTools.find((t: any) => t.name === tc.name)
             result = ct ? executeCustomTool(ct, tc.args, workspace) : `Error: custom tool "${tc.name}" not found`
+          } else if (isMcpTool(tc.name)) {
+            try {
+              result = await currentBridge!.callMcpTool(tc.name, tc.args)
+            } catch (err: any) {
+              result = `[MCP error] ${err?.message ?? String(err)}`
+            }
           } else {
             result = executeTool(tc.name, tc.args, workspace)
           }
@@ -2543,8 +2661,13 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
       let result: string
       const customTools = doGetConfig().customTools
       const isCustom = customTools.some((ct) => ct.name === toolName)
+      const isMcp = isMcpTool(toolName)
 
-      const needsApproval = needsApprovalForTool(toolName, isCustom)
+      const needsApproval = needsApprovalForTool(toolName, isCustom) && !isMcp
+      // NB: MCP tools aren't gated by the built-in approval toggle — if a
+      // user wired up a destructive MCP server, that's on them (and the
+      // server itself usually has its own permission model).
+
       if (needsApproval) {
         const approved = await doRequestApproval( toolName, toolArgs)
         if (approved) {
@@ -2557,6 +2680,15 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
         } else {
           result = `[Denied by user] Operation "${toolName}" was not approved.`
         }
+      } else if (isMcp) {
+        try {
+          result = await currentBridge!.callMcpTool(toolName, toolArgs)
+        } catch (err: any) {
+          result = `[MCP error] ${err?.message ?? String(err)}`
+        }
+      } else if (isCustom) {
+        const ct = customTools.find((t) => t.name === toolName)!
+        result = executeCustomTool(ct, toolArgs, workspace)
       } else {
         result = executeTool(toolName, toolArgs, workspace)
       }

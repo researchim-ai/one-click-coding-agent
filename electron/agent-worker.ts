@@ -6,7 +6,7 @@
 
 import { parentPort } from 'worker_threads'
 import fs from 'fs'
-import { runAgent, type AgentBridge, type Session } from './agent'
+import { runAgent, type AgentBridge, type McpToolSnapshot, type Session } from './agent'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
 
@@ -16,6 +16,7 @@ let workerCancelRequested = false
 let workerCtxSize = 32768
 const pendingApprovals = new Map<string, (approved: boolean) => void>()
 const pendingQueryCtx = new Map<string, () => void>()
+const pendingMcpCalls = new Map<string, { resolve: (v: string) => void; reject: (e: Error) => void }>()
 
 function createWorkerBridge(payload: {
   message: string
@@ -24,6 +25,7 @@ function createWorkerBridge(payload: {
   session: Session
   apiUrl: string
   ctxSize: number
+  mcpToolDefs: McpToolSnapshot[]
 }): AgentBridge {
   let session = { ...payload.session }
   workerCtxSize = payload.ctxSize
@@ -71,6 +73,16 @@ function createWorkerBridge(payload: {
     notifyWorkspaceChanged() {
       parentPort!.postMessage({ type: 'workspace-changed' })
     },
+    listMcpToolDefs(): McpToolSnapshot[] {
+      return payload.mcpToolDefs
+    },
+    async callMcpTool(qualifiedName: string, args: Record<string, any>): Promise<string> {
+      const id = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      return new Promise((resolve, reject) => {
+        pendingMcpCalls.set(id, { resolve, reject })
+        parentPort!.postMessage({ type: 'mcp-call', id, qualifiedName, args })
+      })
+    },
   }
 }
 
@@ -96,9 +108,18 @@ parentPort.on('message', async (msg: any) => {
     }
     return
   }
+  if (msg.type === 'mcp-call-result') {
+    const pending = pendingMcpCalls.get(msg.id)
+    if (pending) {
+      pendingMcpCalls.delete(msg.id)
+      if (msg.error) pending.reject(new Error(msg.error))
+      else pending.resolve(typeof msg.result === 'string' ? msg.result : String(msg.result ?? ''))
+    }
+    return
+  }
   if (msg.type === 'run') {
     workerCancelRequested = false
-    const { message, workspace, config, session: payloadSession, apiUrl, ctxSize, sessionPath } = msg.payload
+    const { message, workspace, config, session: payloadSession, apiUrl, ctxSize, sessionPath, mcpToolDefs } = msg.payload
     let session: Session
     if (sessionPath) {
       const raw = await fs.promises.readFile(sessionPath, 'utf-8')
@@ -106,7 +127,7 @@ parentPort.on('message', async (msg: any) => {
     } else {
       session = payloadSession
     }
-    const bridge = createWorkerBridge({ message, workspace, config, session, apiUrl, ctxSize })
+    const bridge = createWorkerBridge({ message, workspace, config, session, apiUrl, ctxSize, mcpToolDefs: mcpToolDefs ?? [] })
     try {
       const result = await runAgent(message, workspace, bridge)
       parentPort!.postMessage({ type: 'done', result, session: bridge.getSession() })

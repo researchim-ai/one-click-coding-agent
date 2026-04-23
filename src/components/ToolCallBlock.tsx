@@ -122,11 +122,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       )}
 
       {checkpointSha && !isPending && isComplete && !isError && (
-        <div className="px-2.5 py-1 bg-zinc-900/40 border-t border-zinc-800/30 flex items-center gap-2 text-[10.5px]">
-          <span className="text-zinc-600" title={checkpointLabel ?? ''}>
-            {t('снимок', 'snapshot')} <span className="font-mono text-zinc-500">{checkpointSha.slice(0, 8)}</span>
-          </span>
-          <div className="flex-1" />
+        <div className="px-2.5 py-0.5 border-t border-zinc-800/30 flex items-center justify-end gap-2 text-[10.5px]">
           {checkpointRestored ? (
             <span className="text-emerald-400/80">
               {t('восстановлено ✓', 'restored ✓')}
@@ -136,8 +132,11 @@ export const ToolCallBlock = memo(function ToolCallBlock({
               <button
                 onClick={() => setRestoreMenu((v) => !v)}
                 disabled={restoring}
-                className="px-2 py-0.5 rounded bg-zinc-800/60 hover:bg-zinc-700 text-zinc-300 cursor-pointer transition-colors disabled:opacity-50"
-                title={t('Откатить к этому снимку', 'Roll back to this snapshot')}
+                className="px-1.5 py-0.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/60 cursor-pointer transition-colors disabled:opacity-50"
+                title={
+                  (checkpointLabel ? `${checkpointLabel}\n` : '') +
+                  `${t('снимок', 'snapshot')} ${checkpointSha.slice(0, 10)}`
+                }
               >
                 {restoring ? t('откат…', 'restoring…') : t('↩ откатить', '↩ restore')}
               </button>

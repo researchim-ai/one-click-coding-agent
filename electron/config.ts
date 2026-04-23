@@ -15,6 +15,25 @@ export interface CustomTool {
   enabled: boolean
 }
 
+/** One user-configured MCP (Model Context Protocol) server. We currently
+ *  support stdio transport only — the overwhelming majority of open-source
+ *  MCP servers ship that way, and it sidesteps all the auth/port-selection
+ *  headaches of the HTTP transport for a local app. */
+export interface McpServerConfig {
+  id: string
+  /** Display name shown in UI and used to namespace tool names. Slugified
+   *  internally for the `mcp__<slug>__<tool>` prefix. */
+  name: string
+  /** Executable path or command (e.g. `npx`, `uvx`, `/usr/local/bin/my-srv`). */
+  command: string
+  /** Command-line args. Passed verbatim — quote-handling is the user's job. */
+  args: string[]
+  /** Extra env vars merged on top of the process env. Values may contain
+   *  things like API keys — callers should treat this as sensitive. */
+  env?: Record<string, string>
+  enabled: boolean
+}
+
 export interface AppConfig {
   lastQuant: string
   ctxSize: number | null
@@ -24,6 +43,7 @@ export interface AppConfig {
   searxngBaseUrl: string | null
   appLanguage: AppLanguage
   customTools: CustomTool[]
+  mcpServers: McpServerConfig[]
   systemPrompt: string | null
   summarizePrompt: string | null
   maxIterations: number
@@ -47,6 +67,7 @@ const DEFAULT_CONFIG: AppConfig = {
   searxngBaseUrl: null,
   appLanguage: 'ru',
   customTools: [],
+  mcpServers: [],
   systemPrompt: null,
   summarizePrompt: null,
   maxIterations: 200,
