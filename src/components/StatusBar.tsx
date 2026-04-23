@@ -5,9 +5,12 @@ interface Props {
   status: AppStatus | null
   /** Last measured tokens per second from LLM stream (shown in status bar). */
   tokensPerSecond?: number | null
+  appLanguage?: 'ru' | 'en'
 }
 
-export function StatusBar({ status, tokensPerSecond }: Props) {
+export function StatusBar({ status, tokensPerSecond, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const [resources, setResources] = useState<SystemResources | null>(null)
   const online = status?.serverRunning && status?.serverHealth?.status === 'ok'
 
@@ -31,7 +34,7 @@ export function StatusBar({ status, tokensPerSecond }: Props) {
         </span>
       )}
       {tokensPerSecond != null && (
-        <span className="text-emerald-400" title="Токенов в секунду (последний ответ)">
+        <span className="text-emerald-400" title={t('Токенов в секунду (последний ответ)', 'Tokens per second (last response)')}>
           {tokensPerSecond} tok/s
         </span>
       )}

@@ -88,11 +88,24 @@ export interface ModelVariant {
   sizeMb: number
   quality: number
   repoId?: string
+  family: string
+}
+
+export interface ModelFamily {
+  id: string
+  label: string
+  description: string
+  repoId: string
+  defaultQuant: string
+  filenameTag: string
+  recommended?: boolean
 }
 
 export interface ModelVariantInfo extends ModelVariant {
   fits: boolean
   maxCtx: number
+  selectableMaxCtx: number
+  fullGpuMaxCtx: number
   mode: 'cpu' | 'hybrid' | 'full_gpu'
   recommended: boolean
 }
@@ -105,4 +118,13 @@ export interface ToolInfo {
   id?: string
   command?: string
   parameters?: { name: string; description: string; required: boolean }[]
+}
+
+export interface WebSearchStatus {
+  provider: import('./config').WebSearchProvider
+  dockerAvailable: boolean
+  customUrlConfigured: boolean
+  effectiveBaseUrl: string | null
+  healthy: boolean
+  detail: string
 }

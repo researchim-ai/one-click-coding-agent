@@ -1,7 +1,10 @@
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
-import type { CustomTool } from './config'
+import type { AppConfig, CustomTool } from './config'
+import { getWebSearchStatus, loadWebSearchConfig, resolveWebSearchBaseUrl, shouldEnableWebSearchTool } from './searxng'
+import { fetchUrl as fetchUrlImpl } from './url-fetch'
+import * as searchCache from './search-cache'
 
 export const TOOL_DEFINITIONS = [
   {
@@ -158,7 +161,56 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'search_web',
+      description:
+        'Search the web through a configured SearXNG instance and return structured results with titles, URLs, snippets, engines, and optional dates. Use this to look up library documentation, bug reports, or examples from the internet.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Web search query, for example "react useEffect cleanup function".' },
+          max_results: { type: 'number', description: 'Maximum number of results to return (default: 5, max: 10).' },
+          categories: { type: 'string', description: 'Optional SearXNG categories, for example "general", "it", or comma-separated values.' },
+          language: { type: 'string', description: 'Optional search language, for example "en" or "ru".' },
+          time_range: { type: 'string', description: 'Optional time range such as "day", "month", or "year".' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch_url',
+      description:
+        'Fetch a web page and return readable markdown via Mozilla Readability. Useful for reading library documentation, blog posts, or GitHub README files. For binary (PDF) responses the tool reports the content-type so you can decide how to handle it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full http(s):// URL.' },
+          format: { type: 'string', description: 'Output format: "markdown" (default), "text", or "html".' },
+        },
+        required: ['url'],
+      },
+    },
+  },
 ]
+
+export function getBuiltinToolDefinitions(
+  cfg?: Pick<AppConfig, 'webSearchProvider' | 'searxngBaseUrl'> | null,
+): typeof TOOL_DEFINITIONS {
+  const searchEnabled = shouldEnableWebSearchTool({
+    webSearchProvider: cfg?.webSearchProvider ?? (cfg?.searxngBaseUrl ? 'custom-searxng' : 'disabled'),
+    searxngBaseUrl: cfg?.searxngBaseUrl ?? null,
+  })
+  return TOOL_DEFINITIONS.filter((tool) => {
+    if (tool.function.name === 'search_web' && !searchEnabled) return false
+    if (tool.function.name === 'fetch_url' && !searchEnabled) return false
+    return true
+  })
+}
 
 const IGNORED_DIRS = new Set([
   'node_modules', '.git', '__pycache__', '.next', '.nuxt',
@@ -201,6 +253,10 @@ export function executeTool(name: string, args: Record<string, any>, workspace: 
         return createDir(args.path, workspace)
       case 'delete_file':
         return deleteFile(args.path, workspace)
+      case 'search_web':
+        return searchWeb(args.query, args.max_results, args.categories, args.language, args.time_range)
+      case 'fetch_url':
+        return fetchUrlTool(args.url, args.format)
       default:
         return `Unknown tool: ${name}`
     }
@@ -464,4 +520,155 @@ export function executeCustomTool(
     const result = out.length > 80000 ? out.slice(0, 80000) + '\n… [truncated]' : out
     return `Exit code: ${e.status ?? -1}\n${result}`
   }
+}
+
+// ---------------------------------------------------------------------------
+// Web search tools — SearXNG + simple URL fetch with readability.
+// ---------------------------------------------------------------------------
+
+function runNodeScript(source: string, args: string[]): string {
+  return execFileSync(process.execPath, ['-e', source, ...args], {
+    encoding: 'utf-8',
+    timeout: 120000,
+    maxBuffer: 1024 * 1024 * 10,
+    env: {
+      ...process.env,
+      FORCE_COLOR: '0',
+      ELECTRON_RUN_AS_NODE: '1',
+    },
+  })
+}
+
+function detectFreshnessHints(rawQuery: string): {
+  freshness: boolean
+  today: boolean
+  week: boolean
+  month: boolean
+  year: boolean
+} {
+  const q = String(rawQuery ?? '').toLowerCase()
+  const freshness = /(latest|recent|newest|fresh|today|this week|this month|this year|last week|last month|последн|свеж|новейш|сегодня|свежие|за сегодня|за неделю|за месяц|на этой неделе|в этом месяце|в этом году)/.test(q)
+  return {
+    freshness,
+    today: /(today|сегодня|за сегодня)/.test(q),
+    week: /(this week|last week|за неделю|на этой неделе)/.test(q),
+    month: /(this month|last month|за месяц|в этом месяце)/.test(q),
+    year: /(this year|в этом году|за год)/.test(q),
+  }
+}
+
+function searchWeb(
+  query: string,
+  maxResults: number | undefined,
+  categories: string | undefined,
+  language: string | undefined,
+  timeRange: string | undefined,
+): string {
+  const trimmedQuery = String(query ?? '').trim()
+  if (!trimmedQuery) return 'Error: query is required.'
+
+  const webSearchCfg = loadWebSearchConfig()
+  let searxngBaseUrl: string | null = null
+  try {
+    searxngBaseUrl = resolveWebSearchBaseUrl(webSearchCfg, true)
+  } catch (e: any) {
+    const message = String(e?.message || e).trim()
+    return `Error: failed to prepare SearXNG backend. ${message}`
+  }
+  if (!searxngBaseUrl) {
+    const status = getWebSearchStatus(webSearchCfg)
+    return `Error: web search is unavailable. ${status.detail}`
+  }
+
+  const freshnessHints = detectFreshnessHints(trimmedQuery)
+  const limit = Math.max(1, Math.min(10, Number(maxResults) || 5))
+  const params = new URLSearchParams({
+    q: trimmedQuery,
+    format: 'json',
+  })
+  if (categories && String(categories).trim()) params.set('categories', String(categories).trim())
+  if (language && String(language).trim()) params.set('language', String(language).trim())
+  const effectiveTimeRange = String(timeRange ?? '').trim()
+    || (freshnessHints.today ? 'day' : freshnessHints.week || freshnessHints.month ? 'month' : freshnessHints.year ? 'year' : '')
+  if (effectiveTimeRange) params.set('time_range', effectiveTimeRange)
+
+  const script = `
+const baseUrl = process.argv[1]
+const queryString = process.argv[2]
+fetch(baseUrl + '/search?' + queryString, {
+  headers: { 'User-Agent': 'one-click-coding-agent/0.1', Accept: 'application/json' },
+}).then(async (res) => {
+  if (!res.ok) throw new Error('HTTP ' + res.status)
+  const json = await res.json()
+  process.stdout.write(JSON.stringify(json))
+}).catch((err) => {
+  console.error(String(err?.message || err))
+  process.exit(1)
+})
+`
+
+  let payload: any
+  try {
+    const out = runNodeScript(script, [searxngBaseUrl, params.toString()])
+    payload = JSON.parse(out)
+  } catch (e: any) {
+    const stderr = String(e?.stderr || e?.message || e).trim()
+    return `Error: failed to search via SearXNG. ${stderr}`
+  }
+
+  const results = Array.isArray(payload?.results) ? payload.results.slice(0, limit) : []
+  if (results.length === 0) return `No web results found for "${trimmedQuery}".`
+
+  const lines = results.map((entry: any, idx: number) => {
+    const title = String(entry?.title || 'Untitled').trim()
+    const url = String(entry?.url || entry?.link || '').trim()
+    const snippet = String(entry?.content || entry?.snippet || '').replace(/\s+/g, ' ').trim()
+    const engines = Array.isArray(entry?.engines)
+      ? entry.engines.join(', ')
+      : String(entry?.engine || entry?.source || entry?.category || '').trim()
+    const published = String(entry?.publishedDate || entry?.published || entry?.date || '').trim()
+    return [
+      `${idx + 1}. ${title}`,
+      url ? `   URL: ${url}` : null,
+      engines ? `   Engines: ${engines}` : null,
+      published ? `   Published: ${published}` : null,
+      snippet ? `   Snippet: ${snippet}` : null,
+    ].filter(Boolean).join('\n')
+  })
+
+  return `Found ${results.length} web result(s) for "${trimmedQuery}"${effectiveTimeRange ? ` (time_range=${effectiveTimeRange})` : ''}:\n\n${lines.join('\n\n')}`
+}
+
+function fetchUrlTool(url: string, format: string | undefined): string {
+  const u = String(url ?? '').trim()
+  if (!u) return 'Error: url is required.'
+  if (!/^https?:\/\//i.test(u)) return 'Error: only http(s) URLs are supported.'
+
+  const fmt = (format === 'html' || format === 'text' || format === 'markdown') ? format : 'markdown'
+
+  const cacheKey = { url: u, format: fmt }
+  const cached = searchCache.get('fetch_url', cacheKey)
+  if (cached) return `[cached]\n${cached}`
+
+  const result = fetchUrlImpl(u, fmt)
+  if ('error' in result && result.error) {
+    if (result.isBinary && result.contentTypeHint === 'pdf') {
+      return `fetch_url: remote returned a PDF (Content-Type: ${result.contentType}). Save the file with execute_command if you need the binary.`
+    }
+    return `Error: fetch_url failed — ${result.error}`
+  }
+  const page = result as any
+  const excerpt = (page.content || '').length > 32000 ? page.content.slice(0, 32000) + '\n… [truncated]' : page.content
+  const header = [
+    `Title: ${page.title}`,
+    `URL: ${page.finalUrl}`,
+    page.byline ? `Byline: ${page.byline}` : null,
+    page.siteName ? `Site: ${page.siteName}` : null,
+    page.publishedTime ? `Published: ${page.publishedTime}` : null,
+    `Format: ${fmt}`,
+    `Length: ${page.length} chars`,
+  ].filter(Boolean).join('\n')
+  const out = `${header}\n\n---\n\n${excerpt}`
+  searchCache.set('fetch_url', cacheKey, out)
+  return out
 }

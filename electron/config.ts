@@ -3,6 +3,9 @@ import path from 'path'
 import os from 'os'
 import type { GpuMode } from './types'
 
+export type WebSearchProvider = 'disabled' | 'managed-searxng' | 'custom-searxng'
+export type AppLanguage = 'ru' | 'en'
+
 export interface CustomTool {
   id: string
   name: string
@@ -17,6 +20,9 @@ export interface AppConfig {
   ctxSize: number | null
   gpuMode: GpuMode
   gpuIndex: number | null
+  webSearchProvider: WebSearchProvider
+  searxngBaseUrl: string | null
+  appLanguage: AppLanguage
   customTools: CustomTool[]
   systemPrompt: string | null
   summarizePrompt: string | null
@@ -37,6 +43,9 @@ const DEFAULT_CONFIG: AppConfig = {
   ctxSize: null,
   gpuMode: 'single',
   gpuIndex: 0,
+  webSearchProvider: 'disabled',
+  searxngBaseUrl: null,
+  appLanguage: 'ru',
   customTools: [],
   systemPrompt: null,
   summarizePrompt: null,

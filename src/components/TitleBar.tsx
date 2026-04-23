@@ -2,10 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 
 interface TitleBarProps {
   children?: React.ReactNode
+  appLanguage?: 'ru' | 'en'
 }
 
-export function TitleBar({ children }: TitleBarProps) {
+export function TitleBar({ children, appLanguage = 'ru' }: TitleBarProps) {
   const [maximized, setMaximized] = useState(false)
+  const L = appLanguage
+  const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
 
   useEffect(() => {
     window.api.winIsMaximized().then(setMaximized)
@@ -28,14 +31,14 @@ export function TitleBar({ children }: TitleBarProps) {
         <button
           onClick={() => window.api.winMinimize()}
           className="w-8 h-7 flex items-center justify-center rounded hover:bg-zinc-700/60 text-zinc-500 hover:text-zinc-200 cursor-pointer transition-colors"
-          title="Свернуть"
+          title={t('Свернуть', 'Minimize')}
         >
           <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1" /></svg>
         </button>
         <button
           onClick={handleMaximize}
           className="w-8 h-7 flex items-center justify-center rounded hover:bg-zinc-700/60 text-zinc-500 hover:text-zinc-200 cursor-pointer transition-colors"
-          title={maximized ? 'Восстановить' : 'Развернуть'}
+          title={maximized ? t('Восстановить', 'Restore') : t('Развернуть', 'Maximize')}
         >
           {maximized ? (
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
@@ -51,7 +54,7 @@ export function TitleBar({ children }: TitleBarProps) {
         <button
           onClick={() => window.api.winClose()}
           className="w-8 h-7 flex items-center justify-center rounded hover:bg-red-600/80 text-zinc-500 hover:text-white cursor-pointer transition-colors"
-          title="Закрыть"
+          title={t('Закрыть', 'Close')}
         >
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
             <line x1="1" y1="1" x2="9" y2="9" />

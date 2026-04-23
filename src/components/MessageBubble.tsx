@@ -9,6 +9,7 @@ interface Props {
   message: ChatMessage
   onApprove?: (id: string) => void
   onDeny?: (id: string) => void
+  appLanguage?: 'ru' | 'en'
 }
 
 const rehypePlugins = [rehypeHighlight] as any[]
@@ -17,7 +18,8 @@ const MemoMarkdown = memo(function MemoMarkdown({ content }: { content: string }
   return <Markdown rehypePlugins={rehypePlugins}>{content}</Markdown>
 })
 
-export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny }: Props) {
+export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
   if (message.role === 'status') {
     return (
       <div className="text-center text-zinc-600 text-[11px] py-0.5 animate-[fadeIn_0.2s] font-mono">
@@ -54,7 +56,7 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
 
   return (
     <div className="self-start max-w-full animate-[fadeIn_0.2s]">
-      {hasThinking && <ThinkingBlock content={message.thinking!} live={thinkingLive} />}
+      {hasThinking && <ThinkingBlock content={message.thinking!} live={thinkingLive} appLanguage={L} />}
 
       {hasTools && (
         <div className="space-y-1 my-1">
@@ -68,6 +70,7 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
               approvalStatus={tc.approvalStatus}
               onApprove={onApprove}
               onDeny={onDeny}
+              appLanguage={L}
             />
           ))}
         </div>
@@ -80,7 +83,7 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
               {message.streamingFile!.toolName === 'edit_file' ? '✏️' : message.streamingFile!.toolName === 'append_file' ? '📎' : '📝'}
             </span>
             <span className="text-[11px] text-zinc-400 font-mono truncate">{message.streamingFile!.path || '...'}</span>
-            <span className="text-[10px] text-zinc-600 ml-auto shrink-0">{streamLines} строк</span>
+            <span className="text-[10px] text-zinc-600 ml-auto shrink-0">{streamLines} {L === 'ru' ? 'строк' : 'lines'}</span>
             {!message.streamingFile!.done && (
               <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse shrink-0" />
             )}

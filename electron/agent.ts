@@ -1,4 +1,4 @@
-import { TOOL_DEFINITIONS, executeTool, executeCustomTool } from './tools'
+import { TOOL_DEFINITIONS, executeTool, executeCustomTool, getBuiltinToolDefinitions } from './tools'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
 import * as crypto from 'crypto'
@@ -252,7 +252,8 @@ function compactToolDefs(tools: any[]): any[] {
 }
 
 function getAllTools(): any[] {
-  const customTools = doGetConfig().customTools.filter((t) => t.enabled)
+  const cfg = doGetConfig()
+  const customTools = cfg.customTools.filter((t) => t.enabled)
   const customDefs = customTools.map((ct) => ({
     type: 'function',
     function: {
@@ -267,7 +268,8 @@ function getAllTools(): any[] {
       },
     },
   }))
-  const all = [...TOOL_DEFINITIONS, ...customDefs]
+  const builtins = getBuiltinToolDefinitions(cfg)
+  const all = [...builtins, ...customDefs]
   // On small contexts, use compact descriptions to save ~40% tool overhead
   return ctxTokens() < 16384 ? compactToolDefs(all) : all
 }
@@ -2271,6 +2273,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
             const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
             if (fsModTools.has(repairName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+              invalidateProjectContextCache()
               try { currentBridge!.notifyWorkspaceChanged() } catch {}
             }
 
@@ -2352,6 +2355,12 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
           const uiResult = result.length > 5000 ? result.slice(0, 5000) + '\n… [truncated]' : result
           doEmit( { type: 'tool_result', name: tc.name, result: uiResult })
+
+          const fsModToolsText = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
+          if (fsModToolsText.has(tc.name) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+            invalidateProjectContextCache()
+            try { currentBridge!.notifyWorkspaceChanged() } catch {}
+          }
 
           // Build proper tool_calls message format
           const callId = `text_tc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`

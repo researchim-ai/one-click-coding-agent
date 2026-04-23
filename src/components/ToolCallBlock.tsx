@@ -8,6 +8,7 @@ interface Props {
   approvalStatus?: 'pending' | 'approved' | 'denied'
   onApprove?: (id: string) => void
   onDeny?: (id: string) => void
+  appLanguage?: 'ru' | 'en'
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -42,7 +43,9 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
   }
 }
 
-export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, approvalId, approvalStatus, onApprove, onDeny }: Props) {
+export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, approvalId, approvalStatus, onApprove, onDeny, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const [expanded, setExpanded] = useState(false)
   const icon = TOOL_ICONS[name] ?? '◦'
   const brief = formatArgs(name, args)
@@ -76,18 +79,18 @@ export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, a
 
       {isPending && approvalId && (
         <div className="flex items-center gap-2 px-2.5 py-2 bg-amber-500/5 border-t border-amber-500/15">
-          <span className="text-[11px] text-amber-300/80 flex-1">Разрешить выполнение?</span>
+          <span className="text-[11px] text-amber-300/80 flex-1">{t('Разрешить выполнение?', 'Allow execution?')}</span>
           <button
             onClick={() => onApprove?.(approvalId)}
             className="px-2.5 py-1 bg-emerald-600/80 hover:bg-emerald-500 text-white text-[11px] rounded font-medium cursor-pointer transition-colors"
           >
-            Да
+            {t('Да', 'Yes')}
           </button>
           <button
             onClick={() => onDeny?.(approvalId)}
             className="px-2.5 py-1 bg-zinc-700/60 hover:bg-zinc-600 text-zinc-300 text-[11px] rounded font-medium cursor-pointer transition-colors"
           >
-            Нет
+            {t('Нет', 'No')}
           </button>
         </div>
       )}

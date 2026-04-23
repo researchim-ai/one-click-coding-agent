@@ -24,11 +24,13 @@ if (process.env.ELECTRON_NO_SANDBOX || process.argv.includes('--no-sandbox')) {
   app.commandLine.appendSwitch('disable-gpu-sandbox')
   app.disableHardwareAcceleration()
 }
-import { detect, evaluateVariants, loadModelArch, getArch, applyGpuPreferences } from './resources'
+import { detect, evaluateVariants, loadModelArch, getArch, applyGpuPreferences, computeOptimalArgs } from './resources'
 import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
 import * as config from './config'
 import { TOOL_DEFINITIONS } from './tools'
+import { MODEL_FAMILIES } from './resources'
+import { ensureWebSearchBackend, getWebSearchStatus } from './searxng'
 import {
   runAgent, resetAgent, setWorkspace, cancelAgent,
   createSession, switchSession, listSessions, deleteSession,
@@ -61,13 +63,226 @@ function scheduleWorkspaceChangedNotify(): void {
   }, WORKSPACE_CHANGED_DEBOUNCE_MS)
 }
 
+let ensureServerInFlight: Promise<void> | null = null
+
+/** Quick TCP-level probe — `isRunning()` only tells us the child process hasn't
+ *  died, but the HTTP server can be unreachable (zombie process, port still
+ *  bound but accept loop gone, early-init crash) and the worker would just get
+ *  `fetch failed`. We want to catch that before kicking off a request. */
+async function probeServerReachable(): Promise<boolean> {
+  const url = `${serverManager.llamaApiUrl()}/health`
+  const startedAt = Date.now()
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(2500) })
+    const body = await r.text().catch(() => '')
+    const ok = r.ok || r.status < 500
+    console.log(`[probe] GET ${url} -> ${r.status} (${Date.now() - startedAt}ms), ok=${ok}, body=${body.slice(0, 160)}`)
+    return ok
+  } catch (e: any) {
+    console.log(`[probe] GET ${url} FAILED (${Date.now() - startedAt}ms): ${e?.name ?? ''} ${e?.message ?? e}`)
+    return false
+  }
+}
+
+/** Make sure llama-server is up before running the agent. Auto-starts it if it
+ *  isn't, so `send-message` never silently fails with `fetch failed` when the
+ *  process died (crash, app restart race, user stopped it, etc).
+ *
+ *  We check both the process handle AND a live `/health` probe — llama.cpp can
+ *  get into weird zombie states (socket still bound, accept loop dead) that
+ *  `isRunning()` alone wouldn't catch. */
+async function ensureLlamaServerRunning(): Promise<void> {
+  if (ensureServerInFlight) {
+    console.log('[ensure-server] already in flight, awaiting existing promise')
+    return ensureServerInFlight
+  }
+
+  const alive = serverManager.isRunning()
+  const pid = serverManager.getServerProcessPid()
+  console.log(`[ensure-server] enter: isRunning=${alive}, pid=${pid}`)
+
+  // If the process is alive AND the socket is reachable, we're done.
+  if (alive) {
+    const reachable = await probeServerReachable()
+    if (reachable) {
+      console.log('[ensure-server] process alive AND reachable — no-op')
+      return
+    }
+    console.log('[ensure-server] process alive but socket NOT reachable — will restart')
+  }
+
+  ensureServerInFlight = (async () => {
+    // Process might be alive but wedged — tear it down before starting a new
+    // one so we don't fight over the port.
+    if (serverManager.isRunning()) {
+      console.log('[ensure-server] stopping wedged process…')
+      serverManager.stop()
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+
+    if (!serverManager.isReady()) {
+      if (!mainWindow) throw new Error('llama-server не установлен')
+      console.log('[ensure-server] binary missing, downloading…')
+      await serverManager.ensureBinary(mainWindow)
+    }
+
+    const modelPath = modelManager.getModelPath()
+    if (!modelPath) {
+      throw new Error(`Модель не найдена на диске. Квант: ${modelManager.getSelectedQuant()}. Запустите установку через окно настроек.`)
+    }
+
+    loadModelArch(modelPath)
+    const ctxSize = config.get('ctxSize')
+    const quant = modelManager.getSelectedQuant()
+
+    // Retry loop: if the server crashes with OOM (Vulkan/CUDA allocate fail),
+    // progressively offload more layers to CPU/RAM until it starts cleanly.
+    // 1.0 = what the calculator picked, each attempt halves nGpuLayers, then 0.
+    const cfg = config.load()
+    const res = applyGpuPreferences(detect(), cfg.gpuMode, cfg.gpuIndex)
+    const baseArgs = computeOptimalArgs(res, quant, ctxSize)
+    const arch = getArch()
+    const fullLayers = Math.min(baseArgs.nGpuLayers === 999 ? arch.blockCount : baseArgs.nGpuLayers, arch.blockCount)
+    let schedule = [
+      fullLayers,
+      Math.floor(fullLayers * 0.75),
+      Math.floor(fullLayers * 0.5),
+      Math.floor(fullLayers * 0.25),
+      0,
+    ].filter((v, i, a) => v >= 0 && a.indexOf(v) === i)
+
+    // If the previous run crashed with OOM, skip layer counts >= whatever we
+    // tried last — going back to them is guaranteed to OOM again.
+    const prevReason = serverManager.getLastCrashReason()
+    const prevArgs = serverManager.getLastLaunchArgs()
+    if (prevReason === 'oom' && prevArgs) {
+      const prevN = prevArgs.nGpuLayers === 999 ? arch.blockCount : prevArgs.nGpuLayers
+      const trimmed = schedule.filter((v) => v < prevN)
+      if (trimmed.length > 0) {
+        console.log(`[ensure-server] previous run OOM'd at nGpuLayers=${prevN}, skipping higher attempts. schedule=${trimmed.join(',')}`)
+        schedule = trimmed
+      }
+    }
+    const layerSchedule = schedule
+
+    let lastErr: any = null
+    for (let attempt = 0; attempt < layerSchedule.length; attempt++) {
+      const n = layerSchedule[attempt]
+      const attemptArgs = attempt === 0 && baseArgs.nGpuLayers === 999
+        ? baseArgs   // keep 999 ("all") sentinel on first try — lets llama.cpp spill safely.
+        : { ...baseArgs, nGpuLayers: n, flashAttn: n > 0 ? baseArgs.flashAttn : false }
+
+      console.log(`[ensure-server] attempt ${attempt + 1}/${layerSchedule.length}: quant=${quant}, ctx=${attemptArgs.ctxSize}, nGpuLayers=${attemptArgs.nGpuLayers} (full=${fullLayers})`)
+      if (mainWindow) {
+        try {
+          mainWindow.webContents.send('agent-event', {
+            type: 'status',
+            content: attempt === 0
+              ? `⏳ Запускаю llama.cpp (ctx=${attemptArgs.ctxSize}, GPU-слоёв: ${attemptArgs.nGpuLayers})…`
+              : `⚠ Не хватило VRAM — пробую с ${attemptArgs.nGpuLayers} GPU-слоями (остальное в RAM)…`,
+          })
+        } catch {}
+      }
+
+      try {
+        serverManager.start(modelPath, mainWindow ?? undefined, attemptArgs, quant, ctxSize)
+        const spawnedPid = serverManager.getServerProcessPid()
+        console.log(`[ensure-server] waiting for /health ok (pid=${spawnedPid}, timeout=300s)…`)
+        await serverManager.waitReady(300, mainWindow ?? undefined)
+        console.log(`[ensure-server] READY: pid=${spawnedPid}, actual_ctx=${serverManager.getCtxSize()}, nGpuLayers=${attemptArgs.nGpuLayers}`)
+        return
+      } catch (err: any) {
+        lastErr = err
+        // Clean up before next attempt
+        if (serverManager.isRunning()) serverManager.stop()
+        // Give the exit handler a moment to fire + scan log for OOM markers.
+        await new Promise((r) => setTimeout(r, 1200))
+        const reason = serverManager.getLastCrashReason()
+        console.error(`[ensure-server] attempt ${attempt + 1} failed: ${err?.message ?? err} (crashReason=${reason})`)
+        // Only retry for OOM; other errors (missing binary, bad model) won't
+        // be fixed by fewer GPU layers, so fail fast.
+        if (reason !== 'oom') throw err
+        if (attempt + 1 >= layerSchedule.length) break
+      }
+    }
+    throw lastErr ?? new Error('llama-server не стартовал (OOM)')
+  })().finally(() => { ensureServerInFlight = null })
+
+  return ensureServerInFlight
+}
+
+/** Kick the server off as soon as the app launches — if the binary and the
+ *  model are already on disk, the user shouldn't have to click anything to
+ *  get back to chatting after an app restart. Non-blocking: we just start it
+ *  in the background and let the status poll flip the UI out of the wizard
+ *  once /health comes back ok. */
+function scheduleAutoStartServer(): void {
+  setImmediate(async () => {
+    try {
+      if (serverManager.isRunning()) return
+      if (!serverManager.isReady()) {
+        console.log('[auto-start] skipped: llama-server binary not installed yet')
+        return
+      }
+      const modelPath = modelManager.getModelPath()
+      if (!modelPath) {
+        console.log('[auto-start] skipped: model not downloaded yet')
+        return
+      }
+      console.log('[auto-start] llama-server binary + model ready, starting in background')
+      await ensureLlamaServerRunning()
+      console.log('[auto-start] llama-server is up and serving requests')
+    } catch (err: any) {
+      // Swallow: the user will see whatever state the SetupWizard is in, and
+      // the on-demand path in `send-message` will retry with a visible error
+      // if they try to chat.
+      console.error('[auto-start] failed:', err?.message ?? err)
+    }
+  })
+}
+
+/** When a stream fetch blows up with "fetch failed" it almost always means
+ *  llama-server crashed or closed the connection. `/health` and the process
+ *  handle can lie for a few seconds (zombie state), so before we re-emit the
+ *  error to the UI we tail the server log and tack the real reason on. */
+function enrichAgentEvent(event: any): any {
+  if (!event || event.type !== 'error' || typeof event.content !== 'string') return event
+  const msg = event.content
+  const isFetchErr = /fetch failed/i.test(msg) || /ECONNREFUSED|ECONNRESET|socket hang up/i.test(msg)
+  if (!isFetchErr) return event
+
+  const exit = serverManager.getLastExitInfo()
+  const pid = serverManager.getServerProcessPid()
+  const alive = serverManager.isRunning()
+  const tail = serverManager.getServerLogTail(25) || '(пусто)'
+
+  console.log(`[agent-error] fetch failed. serverRunning=${alive}, pid=${pid}, exit=${JSON.stringify(exit)}`)
+  console.log(`[agent-error] server log tail:\n${tail}`)
+
+  let diag = `\n\n— diagnostics —\nllama-server: ${alive ? 'alive' : 'dead'}`
+  if (pid) diag += `, pid=${pid}`
+  if (exit) {
+    const ago = ((Date.now() - exit.at) / 1000).toFixed(1)
+    diag += `\nlast exit: code=${exit.code}, signal=${exit.signal ?? '—'}, ${ago}s назад`
+  }
+  diag += `\nserver log tail (последние ${tail.split('\n').length} строк, полный файл: ${serverManager.serverLogPath()}):\n${tail}`
+
+  // Kick off a restart so the NEXT message has a live server. Non-blocking.
+  if (!alive) {
+    console.log('[agent-error] scheduling server restart after fetch failed')
+    ensureLlamaServerRunning().catch((e) => console.error('[agent-error] restart failed:', e?.message ?? e))
+  }
+
+  return { ...event, content: `${msg}${diag}` }
+}
+
 function getAgentWorker(): Worker {
   if (!agentWorker) {
     const workerPath = path.join(__dirname, 'agent-worker.js')
     agentWorker = new Worker(workerPath, { stdout: true, stderr: true })
     agentWorker.on('message', (msg: any) => {
       if (msg.type === 'emit' && mainWindow) {
-        try { mainWindow.webContents.send('agent-event', msg.event) } catch {}
+        try { mainWindow.webContents.send('agent-event', enrichAgentEvent(msg.event)) } catch {}
       } else if (msg.type === 'approval' && mainWindow) {
         const handler = (_: any, responseId: string, approved: boolean) => {
           if (responseId === msg.approvalId) {
@@ -143,30 +358,124 @@ function sendMenuAction(action: string, payload?: unknown) {
   }
 }
 
+const MENU_STRINGS: Record<config.AppLanguage, Record<string, string>> = {
+  ru: {
+    about: 'О программе',
+    quit: 'Выход',
+    file: 'Файл',
+    openFolder: 'Открыть папку…',
+    chooseFolder: 'Выберите папку проекта',
+    recent: 'Недавние',
+    noRecent: '(нет недавних проектов)',
+    agent: 'Агент',
+    newChat: 'Новый чат',
+    stopRequest: 'Остановить запрос',
+    resetContext: 'Сброс контекста',
+    settings: 'Настройки',
+    settingsModel: 'Модель и контекст…',
+    settingsTools: 'Инструменты…',
+    settingsPrompts: 'Промпты агента…',
+    settingsWebSearch: 'Веб-поиск…',
+    resetAll: 'Сбросить всё по умолчанию',
+    resetTitle: 'Сброс настроек',
+    resetMessage: 'Все настройки будут сброшены к значениям по умолчанию: квантизация, контекст, промпты, пользовательские инструменты.',
+    resetCancel: 'Отмена',
+    resetConfirm: 'Сбросить',
+    edit: 'Правка',
+    undo: 'Отменить',
+    redo: 'Повторить',
+    cut: 'Вырезать',
+    copy: 'Копировать',
+    paste: 'Вставить',
+    selectAll: 'Выделить всё',
+    view: 'Вид',
+    terminal: 'Терминал',
+    sidebar: 'Боковая панель',
+    reload: 'Перезагрузить',
+    devTools: 'Инструменты разработчика',
+    resetZoom: 'Сбросить масштаб',
+    zoomIn: 'Увеличить',
+    zoomOut: 'Уменьшить',
+    fullscreen: 'Полноэкранный режим',
+    help: 'Помощь',
+    github: 'GitHub репозиторий',
+    language: 'Язык',
+    languageRu: 'Русский',
+    languageEn: 'English',
+  },
+  en: {
+    about: 'About',
+    quit: 'Quit',
+    file: 'File',
+    openFolder: 'Open folder…',
+    chooseFolder: 'Choose project folder',
+    recent: 'Recent',
+    noRecent: '(no recent projects)',
+    agent: 'Agent',
+    newChat: 'New chat',
+    stopRequest: 'Stop request',
+    resetContext: 'Reset context',
+    settings: 'Settings',
+    settingsModel: 'Model & context…',
+    settingsTools: 'Tools…',
+    settingsPrompts: 'Agent prompts…',
+    settingsWebSearch: 'Web search…',
+    resetAll: 'Reset everything to defaults',
+    resetTitle: 'Reset settings',
+    resetMessage: 'All settings will be reset to defaults: quantization, context, prompts, custom tools.',
+    resetCancel: 'Cancel',
+    resetConfirm: 'Reset',
+    edit: 'Edit',
+    undo: 'Undo',
+    redo: 'Redo',
+    cut: 'Cut',
+    copy: 'Copy',
+    paste: 'Paste',
+    selectAll: 'Select All',
+    view: 'View',
+    terminal: 'Terminal',
+    sidebar: 'Sidebar',
+    reload: 'Reload',
+    devTools: 'Developer Tools',
+    resetZoom: 'Reset zoom',
+    zoomIn: 'Zoom in',
+    zoomOut: 'Zoom out',
+    fullscreen: 'Fullscreen',
+    help: 'Help',
+    github: 'GitHub repository',
+    language: 'Language',
+    languageRu: 'Русский',
+    languageEn: 'English',
+  },
+}
+
 function buildAppMenu() {
   const isMac = process.platform === 'darwin'
+  const lang = config.get('appLanguage') || 'ru'
+  const t = MENU_STRINGS[lang] ?? MENU_STRINGS.ru
+  const currentLang = config.get('appLanguage') || 'ru'
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac ? [{
       label: app.name,
       submenu: [
-        { role: 'about' as const, label: 'О программе' },
+        { role: 'about' as const, label: t.about },
         { type: 'separator' as const },
         { role: 'hide' as const },
         { role: 'hideOthers' as const },
         { role: 'unhide' as const },
         { type: 'separator' as const },
-        { role: 'quit' as const, label: 'Выход' },
+        { role: 'quit' as const, label: t.quit },
       ],
     }] : []),
     {
-      label: 'Файл',
+      label: t.file,
       submenu: [
         {
-          label: 'Открыть папку…',
+          label: t.openFolder,
           accelerator: 'CmdOrCtrl+O',
           click: async () => {
             const result = await dialog.showOpenDialog(mainWindow!, {
-              title: 'Выберите папку проекта',
+              title: t.chooseFolder,
               properties: ['openDirectory'],
             })
             if (!result.canceled && result.filePaths[0]) {
@@ -179,9 +488,9 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Недавние',
+          label: t.recent,
           submenu: recentWorkspaces.getRecentWorkspaces().length === 0
-            ? [{ label: '(нет недавних проектов)', enabled: false }]
+            ? [{ label: t.noRecent, enabled: false }]
             : recentWorkspaces.getRecentWorkspaces().map((dir) => ({
                 label: path.basename(dir) || dir,
                 click: () => {
@@ -194,35 +503,62 @@ function buildAppMenu() {
       ],
     },
     {
-      label: 'Агент',
+      label: t.agent,
       submenu: [
-        { label: 'Новый чат', accelerator: 'CmdOrCtrl+N', click: () => sendMenuAction('new-chat') },
+        { label: t.newChat, accelerator: 'CmdOrCtrl+N', click: () => sendMenuAction('new-chat') },
         { type: 'separator' },
-        { label: 'Остановить запрос', accelerator: 'Escape', click: () => cancelAgent() },
-        { label: 'Сброс контекста', accelerator: 'CmdOrCtrl+Shift+Delete', click: () => sendMenuAction('reset-context') },
+        { label: t.stopRequest, accelerator: 'Escape', click: () => cancelAgent() },
+        { label: t.resetContext, accelerator: 'CmdOrCtrl+Shift+Delete', click: () => sendMenuAction('reset-context') },
         { type: 'separator' },
         ...(!isMac ? [
-          { role: 'quit' as const, label: 'Выход', accelerator: 'CmdOrCtrl+Q' },
+          { role: 'quit' as const, label: t.quit, accelerator: 'CmdOrCtrl+Q' },
         ] : []),
       ],
     },
     {
-      label: 'Настройки',
+      label: t.settings,
       submenu: [
-        { label: 'Модель и контекст…', click: () => sendMenuAction('settings-model') },
-        { label: 'Инструменты…', click: () => sendMenuAction('settings-tools') },
-        { label: 'Промпты агента…', click: () => sendMenuAction('settings-prompts') },
+        { label: t.settingsModel, click: () => sendMenuAction('settings-model') },
+        { label: t.settingsTools, click: () => sendMenuAction('settings-tools') },
+        { label: t.settingsPrompts, click: () => sendMenuAction('settings-prompts') },
+        { label: t.settingsWebSearch, click: () => sendMenuAction('settings-web-search') },
         { type: 'separator' },
         {
-          label: 'Сбросить всё по умолчанию',
+          label: t.language,
+          submenu: [
+            {
+              label: t.languageRu,
+              type: 'radio' as const,
+              checked: currentLang === 'ru',
+              click: () => {
+                config.set('appLanguage', 'ru')
+                buildAppMenu()
+                try { mainWindow?.webContents.send('app-language-changed', 'ru') } catch {}
+              },
+            },
+            {
+              label: t.languageEn,
+              type: 'radio' as const,
+              checked: currentLang === 'en',
+              click: () => {
+                config.set('appLanguage', 'en')
+                buildAppMenu()
+                try { mainWindow?.webContents.send('app-language-changed', 'en') } catch {}
+              },
+            },
+          ],
+        },
+        { type: 'separator' },
+        {
+          label: t.resetAll,
           click: async () => {
             const result = await dialog.showMessageBox(mainWindow!, {
               type: 'warning',
-              buttons: ['Отмена', 'Сбросить'],
+              buttons: [t.resetCancel, t.resetConfirm],
               defaultId: 0,
               cancelId: 0,
-              title: 'Сброс настроек',
-              message: 'Все настройки будут сброшены к значениям по умолчанию: квантизация, контекст, промпты, пользовательские инструменты.',
+              title: t.resetTitle,
+              message: t.resetMessage,
             })
             if (result.response === 1) {
               config.resetToDefaults()
@@ -233,43 +569,43 @@ function buildAppMenu() {
       ],
     },
     {
-      label: 'Правка',
+      label: t.edit,
       submenu: [
-        { role: 'undo', label: 'Отменить' },
-        { role: 'redo', label: 'Повторить' },
+        { role: 'undo', label: t.undo },
+        { role: 'redo', label: t.redo },
         { type: 'separator' },
-        { role: 'cut', label: 'Вырезать' },
-        { role: 'copy', label: 'Копировать' },
-        { role: 'paste', label: 'Вставить' },
-        { role: 'selectAll', label: 'Выделить всё' },
+        { role: 'cut', label: t.cut },
+        { role: 'copy', label: t.copy },
+        { role: 'paste', label: t.paste },
+        { role: 'selectAll', label: t.selectAll },
       ],
     },
     {
-      label: 'Вид',
+      label: t.view,
       submenu: [
-        { label: 'Терминал', accelerator: 'Ctrl+`', click: () => sendMenuAction('toggle-terminal') },
-        { label: 'Боковая панель', accelerator: 'CmdOrCtrl+B', click: () => sendMenuAction('toggle-sidebar') },
+        { label: t.terminal, accelerator: 'Ctrl+`', click: () => sendMenuAction('toggle-terminal') },
+        { label: t.sidebar, accelerator: 'CmdOrCtrl+B', click: () => sendMenuAction('toggle-sidebar') },
         { type: 'separator' },
-        { role: 'reload', label: 'Перезагрузить' },
-        { role: 'toggleDevTools', label: 'Инструменты разработчика' },
+        { role: 'reload', label: t.reload },
+        { role: 'toggleDevTools', label: t.devTools },
         { type: 'separator' },
-        { role: 'resetZoom', label: 'Сбросить масштаб' },
-        { role: 'zoomIn', label: 'Увеличить' },
-        { role: 'zoomOut', label: 'Уменьшить' },
+        { role: 'resetZoom', label: t.resetZoom },
+        { role: 'zoomIn', label: t.zoomIn },
+        { role: 'zoomOut', label: t.zoomOut },
         { type: 'separator' },
-        { role: 'togglefullscreen', label: 'Полноэкранный режим' },
+        { role: 'togglefullscreen', label: t.fullscreen },
       ],
     },
     {
-      label: 'Помощь',
+      label: t.help,
       submenu: [
         {
-          label: 'GitHub репозиторий',
+          label: t.github,
           click: () => shell.openExternal('https://github.com'),
         },
         { type: 'separator' },
         ...(!isMac ? [
-          { role: 'about' as const, label: 'О программе' },
+          { role: 'about' as const, label: t.about },
         ] : []),
       ],
     },
@@ -319,6 +655,10 @@ app.whenReady().then(() => {
   createWindow()
   // Pre-create agent worker so first send-message doesn't block on Worker load
   setImmediate(() => { try { getAgentWorker() } catch {} })
+  // Auto-start llama-server in the background if everything was already set
+  // up in a previous session — the user shouldn't have to re-trigger the
+  // setup wizard on every cold start.
+  scheduleAutoStartServer()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -345,8 +685,40 @@ function registerIpcHandlers() {
     return evaluateVariants(applyGpuPreferences(detect(), cfg.gpuMode, cfg.gpuIndex))
   })
 
+  ipcMain.handle('get-model-families', () => MODEL_FAMILIES)
+
   ipcMain.handle('select-model-variant', (_e, quant: string) => {
     modelManager.setSelectedQuant(quant)
+  })
+
+  ipcMain.handle('get-web-search-status', (_e, override?: Partial<config.AppConfig>) => {
+    const cfg = { ...config.load(), ...(override || {}) }
+    return getWebSearchStatus({
+      webSearchProvider: cfg.webSearchProvider,
+      searxngBaseUrl: cfg.searxngBaseUrl,
+    })
+  })
+
+  ipcMain.handle('ensure-web-search', async (_e, override?: Partial<config.AppConfig>) => {
+    const cfg = { ...config.load(), ...(override || {}) }
+    return await ensureWebSearchBackend({
+      webSearchProvider: cfg.webSearchProvider,
+      searxngBaseUrl: cfg.searxngBaseUrl,
+    })
+  })
+
+  ipcMain.handle('set-app-language', (_e, lang: config.AppLanguage) => {
+    if (lang !== 'ru' && lang !== 'en') return config.load()
+    const updated = config.save({ appLanguage: lang })
+    buildAppMenu()
+    try { mainWindow?.webContents.send('app-language-changed', lang) } catch {}
+    return updated
+  })
+
+  ipcMain.handle('open-external-url', async (_e, url: string) => {
+    if (typeof url !== 'string') return false
+    if (!/^https?:\/\//i.test(url)) return false
+    try { await shell.openExternal(url); return true } catch { return false }
   })
 
   ipcMain.handle('get-config', () => config.load())
@@ -452,13 +824,14 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('start-server', async () => {
-    const modelPath = modelManager.getModelPath()
-    if (!modelPath) throw new Error('Модель не скачана')
-    if (!serverManager.isReady()) throw new Error('llama-server не установлен')
-    loadModelArch(modelPath)
-    const ctxSize = config.get('ctxSize')
-    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
-    await serverManager.waitReady(300, mainWindow ?? undefined)
+    // Idempotent: UI triggers this on mount even when auto-start already kicked
+    // in, and racing two starts produced a noisy "Server already running" error
+    // that surfaced as "can't start server" in the setup wizard.
+    if (serverManager.isRunning() && await probeServerReachable()) {
+      console.log('[start-server] server already running and reachable, no-op')
+      return
+    }
+    await ensureLlamaServerRunning()
   })
 
   ipcMain.handle('stop-server', () => {
@@ -492,6 +865,42 @@ function registerIpcHandlers() {
 
   ipcMain.handle('send-message', async (_e, msg: string, workspace: string) => {
     if (!mainWindow) throw new Error('No window')
+
+    console.log(`[send-message] incoming: workspace=${workspace}, msgLen=${msg?.length ?? 0}`)
+
+    // Ensure llama-server is actually up before sending the prompt: the worker
+    // does a bare `fetch()` and without this guard a stopped/crashed server
+    // just produces a cryptic `TypeError: fetch failed` in the chat.
+    try {
+      const processAlive = serverManager.isRunning()
+      const reachable = processAlive && await probeServerReachable()
+      console.log(`[send-message] preflight: processAlive=${processAlive}, reachable=${reachable}, pid=${serverManager.getServerProcessPid()}`)
+      if (!reachable) {
+        try { mainWindow.webContents.send('agent-event', { type: 'status', content: '⏳ Запускаю llama.cpp сервер…' }) } catch {}
+      }
+      await ensureLlamaServerRunning()
+      // Final sanity check — if /health STILL doesn't answer, don't hand off
+      // to the worker (it would just loop into `fetch failed` and land us
+      // back here through enrichAgentEvent).
+      const finalReach = await probeServerReachable()
+      console.log(`[send-message] post-ensure: reachable=${finalReach}, pid=${serverManager.getServerProcessPid()}`)
+      if (!finalReach) {
+        throw new Error('сервер запустился, но /health недоступен')
+      }
+    } catch (err: any) {
+      const reason = String(err?.message ?? err)
+      const tail = serverManager.getServerLogTail(20)
+      console.error(`[send-message] server unavailable: ${reason}`)
+      if (tail) console.error(`[send-message] server log tail:\n${tail}`)
+      try {
+        mainWindow.webContents.send('agent-event', {
+          type: 'error',
+          content: `llama.cpp сервер не запущен — ${reason}.\n\nПоследние строки server-лога (${serverManager.serverLogPath()}):\n${tail || '(пусто)'}\n\nОткрой «Настройки → Модель и контекст», чтобы перезапустить сервер.`,
+        })
+      } catch {}
+      return `Server unavailable: ${reason}`
+    }
+
     return new Promise<string>((resolve) => {
       pendingSendResolve = resolve
       setImmediate(async () => {

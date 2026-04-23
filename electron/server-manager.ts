@@ -10,6 +10,28 @@ import type { ServerLaunchArgs } from './types'
 
 let lastServerLog: string[] = []
 let activeCtxSize = 0
+let serverLogStream: fs.WriteStream | null = null
+let lastExitInfo: { code: number | null; signal: string | null; at: number } | null = null
+let lastCrashReason: 'oom' | 'other' | null = null
+let lastLaunchArgs: ServerLaunchArgs | null = null
+
+// Signatures that indicate the server ran out of VRAM / device memory and
+// needs fewer GPU layers (or CPU-only) to recover.
+const OOM_SIGNATURES: RegExp[] = [
+  /ErrorOutOfDeviceMemory/i,
+  /vk::SystemError/i,
+  /ggml_vk_create_buffer_device/i,
+  /cudaErrorMemoryAllocation/i,
+  /CUDA error.*out of memory/i,
+  /out of memory/i,
+  /failed to allocate device memory/i,
+]
+
+function logLooksLikeOOM(): boolean {
+  // Scan last ~200 lines — OOM message usually lands right before exit.
+  const tail = lastServerLog.slice(-200)
+  return tail.some((line) => OOM_SIGNATURES.some((re) => re.test(line)))
+}
 
 const LLAMA_HOST = '127.0.0.1'
 const LLAMA_PORT = 7863
@@ -19,7 +41,37 @@ export function llamaApiUrl(): string {
   return `http://${LLAMA_HOST}:${LLAMA_PORT}`
 }
 
+export function serverLogPath(): string {
+  return path.join(dataDir(), 'llama-server.log')
+}
+
 let serverProcess: ChildProcess | null = null
+
+export function getServerProcessPid(): number | null {
+  return serverProcess?.pid ?? null
+}
+
+export function getLastExitInfo(): { code: number | null; signal: string | null; at: number } | null {
+  return lastExitInfo
+}
+
+export function getLastCrashReason(): 'oom' | 'other' | null {
+  return lastCrashReason
+}
+
+export function getLastLaunchArgs(): ServerLaunchArgs | null {
+  return lastLaunchArgs
+}
+
+export function resetCrashState(): void {
+  lastCrashReason = null
+}
+
+/** Tail of the in-memory server log ring buffer, for slapping into error
+ *  messages when /v1/chat/completions suddenly goes away. */
+export function getServerLogTail(lines = 40): string {
+  return lastServerLog.slice(-lines).join('\n')
+}
 
 function binDir(): string {
   return path.join(dataDir(), 'llama-bin')
@@ -368,6 +420,8 @@ export function start(
   const selectedGpu = effectiveResources.gpus[0] ?? null
   const la = args ?? computeOptimalArgs(effectiveResources, quant, userCtxSize)
   activeCtxSize = la.ctxSize
+  lastLaunchArgs = la
+  lastCrashReason = null
   const cmdArgs = [
     '--model', modelPath,
     '--host', LLAMA_HOST,
@@ -393,6 +447,23 @@ export function start(
   if (la.flashAttn) cmdArgs.push('--flash-attn', 'on')
 
   lastServerLog = []
+  lastExitInfo = null
+
+  // Rotate + open a persistent log file so crashes aren't lost when the in-memory
+  // ring buffer wraps or after the process dies. This is the thing we surface
+  // inside "fetch failed" errors now.
+  try { serverLogStream?.end() } catch {}
+  serverLogStream = null
+  try {
+    fs.mkdirSync(dataDir(), { recursive: true })
+    serverLogStream = fs.createWriteStream(serverLogPath(), { flags: 'a' })
+    serverLogStream.write(`\n===== ${new Date().toISOString()} spawn llama-server =====\n`)
+    serverLogStream.write(`cmd: ${bin} ${cmdArgs.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}\n`)
+    serverLogStream.write(`env.CUDA_VISIBLE_DEVICES=${(cfg.gpuMode === 'single' && selectedGpu) ? selectedGpu.index : '<unset>'}\n`)
+  } catch (e: any) {
+    console.error('[server-manager] Cannot open server log file:', e?.message ?? e)
+  }
+
   if (win) {
     emitBuild(win, `Запуск: ${path.basename(bin)}`)
     emitBuild(win, 'GGML_CUDA_DISABLE_GRAPHS=1 (multi-GPU stability)')
@@ -417,21 +488,41 @@ export function start(
     delete spawnEnv.GGML_VK_VISIBLE_DEVICES
   }
   serverProcess = spawn(bin, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false, env: spawnEnv })
+  console.log(`[server-manager] spawned llama-server pid=${serverProcess.pid}, ctx=${la.ctxSize}, nGpuLayers=${la.nGpuLayers}`)
 
   const handleOutput = (data: Buffer) => {
-    const lines = data.toString().split('\n').filter(Boolean)
+    const text = data.toString()
+    try { serverLogStream?.write(text) } catch {}
+    const lines = text.split('\n').filter(Boolean)
     for (const line of lines) {
       lastServerLog.push(line)
-      if (lastServerLog.length > 200) lastServerLog.shift()
+      if (lastServerLog.length > 400) lastServerLog.shift()
       if (win) emitBuild(win, `[server] ${line}`)
+      // Mark OOM as soon as the signature shows up — Vulkan sometimes throws
+      // but the process lingers a bit before SIGABRT, and we want to trigger
+      // a retry fast instead of waiting for the whole "fetch failed" round trip.
+      if (lastCrashReason !== 'oom' && OOM_SIGNATURES.some((re) => re.test(line))) {
+        lastCrashReason = 'oom'
+        console.log(`[server-manager] detected OOM signature in server output: ${line.trim().slice(0, 160)}`)
+      }
     }
   }
 
   serverProcess.stdout?.on('data', handleOutput)
   serverProcess.stderr?.on('data', handleOutput)
-  serverProcess.on('exit', (code) => {
+  serverProcess.on('exit', (code, signal) => {
+    lastExitInfo = { code, signal, at: Date.now() }
+    const pid = serverProcess?.pid
+    const crashed = code !== 0 || signal !== null
+    lastCrashReason = crashed ? (logLooksLikeOOM() ? 'oom' : 'other') : null
+    console.log(`[server-manager] llama-server exited: pid=${pid}, code=${code}, signal=${signal}, crashReason=${lastCrashReason ?? 'clean'}`)
+    try {
+      serverLogStream?.write(`\n===== ${new Date().toISOString()} exit code=${code} signal=${signal} =====\n`)
+      serverLogStream?.end()
+    } catch {}
+    serverLogStream = null
     if (win && code !== null && code !== 0) {
-      emitBuild(win, `llama-server завершился с кодом ${code}`)
+      emitBuild(win, `llama-server завершился с кодом ${code}${signal ? ` (signal ${signal})` : ''}`)
     }
     serverProcess = null
   })

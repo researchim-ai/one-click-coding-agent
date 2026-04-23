@@ -37,7 +37,27 @@ export function App() {
   const [breadcrumbExpandTo, setBreadcrumbExpandTo] = useState<string | null>(null)
   const [fileMenuOpen, setFileMenuOpen] = useState(false)
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
+  const [appLanguage, setAppLanguage] = useState<'ru' | 'en'>('ru')
   const fileMenuRef = useRef<HTMLDivElement>(null)
+  const L = appLanguage === 'ru'
+
+  useEffect(() => {
+    if (!window.api?.getConfig) return
+    window.api.getConfig().then((cfg) => {
+      if (cfg?.appLanguage === 'en' || cfg?.appLanguage === 'ru') setAppLanguage(cfg.appLanguage)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!window.api?.onAppLanguageChanged) return
+    const unsub = window.api.onAppLanguageChanged((lang) => setAppLanguage(lang))
+    return unsub
+  }, [])
+
+  const handleLanguageChange = useCallback((lang: 'ru' | 'en') => {
+    setAppLanguage(lang)
+    window.api?.setAppLanguage?.(lang).catch(() => {})
+  }, [])
 
   useEffect(() => {
     setBreadcrumbExpandTo(null)
@@ -135,6 +155,16 @@ export function App() {
   })
 
   const serverOnline = status?.serverRunning === true && status?.serverHealth?.status === 'ok'
+
+  // Once the server has been online in this session (or the user manually
+  // completed the setup wizard), don't yank them back to the wizard just
+  // because /health went `loading model` or the agent is restarting the
+  // server — that's what was throwing the user to the pre-start page
+  // mid-chat.
+  useEffect(() => {
+    if (serverOnline && !setupDone) setSetupDone(true)
+  }, [serverOnline, setupDone])
+
   const showSetup = !setupDone && !serverOnline
 
   const handleSetupComplete = () => {
@@ -217,6 +247,10 @@ export function App() {
           setSettingsTab('prompts')
           setSettingsOpen(true)
           break
+        case 'settings-web-search':
+          setSettingsTab('web-search')
+          setSettingsOpen(true)
+          break
         case 'defaults-reset':
           setSettingsOpen(false)
           break
@@ -235,13 +269,13 @@ export function App() {
     <div className="h-screen flex flex-col bg-zinc-950 text-zinc-50">
       {/* Title bar with window controls */}
       {showSetup ? (
-        <TitleBar>
+        <TitleBar appLanguage={appLanguage}>
           <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
             ⚡ One-Click Agent
           </span>
         </TitleBar>
       ) : (
-        <TitleBar>
+        <TitleBar appLanguage={appLanguage}>
           <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
             ⚡ One-Click Agent
           </span>
@@ -250,9 +284,9 @@ export function App() {
               type="button"
               onClick={() => setFileMenuOpen((v) => !v)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/80 cursor-pointer transition-colors"
-              title="Файл"
+              title={L ? 'Файл' : 'File'}
             >
-              Файл
+              {L ? 'Файл' : 'File'}
             </button>
             {fileMenuOpen && (
               <div className="absolute left-0 top-full mt-0.5 z-50 min-w-[200px] py-1 bg-zinc-900 border border-zinc-700 rounded-md shadow-lg">
@@ -265,12 +299,12 @@ export function App() {
                     if (dir?.trim()) setWorkspace(dir.trim())
                   }}
                 >
-                  Открыть папку…
+                  {L ? 'Открыть папку…' : 'Open folder…'}
                 </button>
                 <div className="border-t border-zinc-700/80 my-1" />
-                <div className="px-2 py-0.5 text-[10px] text-zinc-500 uppercase tracking-wider">Недавние</div>
+                <div className="px-2 py-0.5 text-[10px] text-zinc-500 uppercase tracking-wider">{L ? 'Недавние' : 'Recent'}</div>
                 {recentWorkspaces.length === 0 ? (
-                  <div className="px-3 py-1.5 text-[11px] text-zinc-500">Нет недавних проектов</div>
+                  <div className="px-3 py-1.5 text-[11px] text-zinc-500">{L ? 'Нет недавних проектов' : 'No recent projects'}</div>
                 ) : (
                   recentWorkspaces.map((dir) => (
                     <button
@@ -294,18 +328,18 @@ export function App() {
             onClick={() => { setSettingsTab('model'); setSettingsOpen(true) }}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/80 cursor-pointer transition-colors"
             style={{ WebkitAppRegion: 'no-drag' } as any}
-            title="Настройки (модель, контекст, инструменты)"
+            title={L ? 'Настройки (модель, контекст, инструменты)' : 'Settings (model, context, tools)'}
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
-            Настройки
+            {L ? 'Настройки' : 'Settings'}
           </button>
         </TitleBar>
       )}
 
-      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} initialTab={settingsTab} />
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} initialTab={settingsTab} appLanguage={appLanguage} />
 
       <div className="flex flex-1 overflow-hidden">
         {/* File tree sidebar */}
@@ -313,10 +347,10 @@ export function App() {
           <button
             onClick={() => sidebar.setCollapsed(false)}
             className="w-10 bg-[#0d1117] border-r border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
-            title="Развернуть панель"
+            title={L ? 'Развернуть панель' : 'Expand panel'}
           >
             <span className="text-sm">⚡</span>
-            <span className="text-[10px] text-zinc-600 [writing-mode:vertical-lr] rotate-180">Файлы</span>
+            <span className="text-[10px] text-zinc-600 [writing-mode:vertical-lr] rotate-180">{L ? 'Файлы' : 'Files'}</span>
           </button>
         ) : (
           <div style={{ width: sidebar.size }} className="shrink-0 flex flex-col overflow-hidden">
@@ -330,6 +364,7 @@ export function App() {
               onOpenDiff={handleOpenDiff}
               expandToPath={breadcrumbExpandTo ?? activeFilePath ?? null}
               activeFilePath={activeFilePath}
+              appLanguage={appLanguage}
             />
           </div>
         )}
@@ -343,6 +378,8 @@ export function App() {
               downloadProgress={downloadProgress}
               buildStatus={buildStatus}
               onComplete={handleSetupComplete}
+              appLanguage={appLanguage}
+              onLanguageChange={handleLanguageChange}
             />
           </main>
         ) : (
@@ -357,6 +394,7 @@ export function App() {
                     original={diffView.original}
                     modified={diffView.modified}
                     onClose={() => setDiffView(null)}
+                    appLanguage={appLanguage}
                   />
                 ) : (
                   <>
@@ -368,6 +406,7 @@ export function App() {
                       onClose={closeFile}
                       onCloseAll={closeAll}
                       onCloseOthers={closeOthers}
+                      appLanguage={appLanguage}
                     />
                     {activeFile ? (
                       <CodeEditor
@@ -378,12 +417,13 @@ export function App() {
                         onContentChange={(content) => updateFileContent(activeFile.path, content)}
                         onAfterSave={() => refreshFile(activeFile.path)}
                         onBreadcrumbClick={(dirPath) => setBreadcrumbExpandTo(dirPath)}
+                        appLanguage={appLanguage}
                       />
                     ) : (
                       <div className="flex-1 flex items-center justify-center text-zinc-600">
                         <div className="text-center">
                           <div className="text-4xl mb-3 opacity-30">⚡</div>
-                          <p className="text-sm">Выбери файл слева</p>
+                          <p className="text-sm">{L ? 'Выбери файл слева' : 'Select a file from the sidebar'}</p>
                         </div>
                       </div>
                     )}
@@ -401,11 +441,11 @@ export function App() {
                   className="shrink-0 flex flex-col overflow-hidden"
                 >
                   <div className="flex items-center justify-between px-3 py-1 bg-[#0d1117] border-b border-zinc-800/40 shrink-0">
-                    <span className="text-[11px] text-zinc-400 font-semibold">Терминал</span>
+                    <span className="text-[11px] text-zinc-400 font-semibold">{L ? 'Терминал' : 'Terminal'}</span>
                     <button
                       onClick={closeTerminal}
                       className="w-5 h-5 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 cursor-pointer text-[10px]"
-                      title="Закрыть терминал"
+                      title={L ? 'Закрыть терминал' : 'Close terminal'}
                     >
                       ✕
                     </button>
@@ -424,10 +464,10 @@ export function App() {
               <button
                 onClick={() => chat.setCollapsed(false)}
                 className="w-10 bg-[#0d1117] border-l border-zinc-800/60 flex flex-col items-center pt-3 gap-2 shrink-0 cursor-pointer hover:bg-zinc-900/50 transition-colors"
-                title="Развернуть чат"
+                title={L ? 'Развернуть чат' : 'Expand chat'}
               >
                 <span className="text-sm">💬</span>
-                <span className="text-[10px] text-zinc-600 [writing-mode:vertical-lr] rotate-180">Агент</span>
+                <span className="text-[10px] text-zinc-600 [writing-mode:vertical-lr] rotate-180">{L ? 'Агент' : 'Agent'}</span>
               </button>
             ) : (
               <div
@@ -442,6 +482,7 @@ export function App() {
                   onSwitch={switchToSession}
                   onDelete={removeSession}
                   onCollapse={() => chat.setCollapsed(true)}
+                  appLanguage={appLanguage}
                 />
                 <Chat
                   messages={messages}
@@ -453,6 +494,7 @@ export function App() {
                   codeRefs={codeRefs}
                   onRemoveCodeRef={removeCodeRef}
                   contextUsage={contextUsage}
+                  appLanguage={appLanguage}
                 />
               </div>
             )}
@@ -463,7 +505,7 @@ export function App() {
       {/* Status bar */}
       <div className="flex items-center shrink-0">
         <div className="flex-1">
-          <StatusBar status={status} tokensPerSecond={tokensPerSecond} />
+          <StatusBar status={status} tokensPerSecond={tokensPerSecond} appLanguage={appLanguage} />
         </div>
         {!showSetup && (
           <button
@@ -473,10 +515,10 @@ export function App() {
                 ? 'bg-zinc-800/60 text-zinc-300'
                 : 'bg-zinc-950 text-zinc-500 hover:text-zinc-300'
             }`}
-            title="Ctrl+` — Терминал"
+            title={L ? 'Ctrl+` — Терминал' : 'Ctrl+` — Terminal'}
           >
             <span className="text-[9px]">▸</span>
-            Терминал
+            {L ? 'Терминал' : 'Terminal'}
           </button>
         )}
       </div>

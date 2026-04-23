@@ -3,9 +3,11 @@ import { useState, useEffect, useRef, memo } from 'react'
 interface Props {
   content: string
   live?: boolean
+  appLanguage?: 'ru' | 'en'
 }
 
-export const ThinkingBlock = memo(function ThinkingBlock({ content, live }: Props) {
+export const ThinkingBlock = memo(function ThinkingBlock({ content, live, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
   const [manualToggle, setManualToggle] = useState<boolean | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -36,7 +38,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ content, live }: Prop
       >
         <span className="text-[10px] text-zinc-600">{expanded ? '▼' : '▶'}</span>
         <span className="text-[11px] text-zinc-500 font-medium tracking-wide uppercase">
-          {live ? 'размышляет' : 'размышления'}
+          {L === 'ru' ? (live ? 'размышляет' : 'размышления') : (live ? 'thinking' : 'thoughts')}
         </span>
         {live && (
           <span className="flex items-center gap-1 ml-1">
@@ -46,7 +48,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ content, live }: Prop
           </span>
         )}
         {!expanded && !live && isLong && (
-          <span className="text-[10px] text-zinc-600 ml-auto">{lines.length} строк</span>
+          <span className="text-[10px] text-zinc-600 ml-auto">{lines.length} {L === 'ru' ? 'строк' : 'lines'}</span>
         )}
       </button>
 

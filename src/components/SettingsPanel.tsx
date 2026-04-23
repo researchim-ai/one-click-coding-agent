@@ -1,14 +1,19 @@
 import { useState, useEffect, useRef } from 'react'
-import type { ModelVariantInfo, ToolInfo, SystemResources, GpuMode } from '../../electron/types'
-import type { AppConfig, CustomTool } from '../../electron/config'
+import type { ModelVariantInfo, ToolInfo, SystemResources, GpuMode, ModelFamily, WebSearchStatus } from '../../electron/types'
+import type { AppConfig, CustomTool, WebSearchProvider } from '../../electron/config'
 
 interface Props {
   open: boolean
   onClose: () => void
   initialTab?: string
+  appLanguage?: 'ru' | 'en'
 }
 
-type Tab = 'model' | 'agent' | 'tools' | 'prompts'
+type Tab = 'model' | 'agent' | 'tools' | 'prompts' | 'web-search'
+
+function tr(ru: string, en: string, lang: 'ru' | 'en'): string {
+  return lang === 'ru' ? ru : en
+}
 
 const CTX_OPTIONS = [
   { value: 262144, label: '262K' },
@@ -31,8 +36,8 @@ const BITS_COLOR: Record<number, string> = {
   8: 'text-cyan-400',
 }
 
-function formatSize(mb: number): string {
-  return (mb / 1024).toFixed(1) + ' ГБ'
+function formatSize(mb: number, lang: 'ru' | 'en' = 'ru'): string {
+  return (mb / 1024).toFixed(1) + (lang === 'ru' ? ' ГБ' : ' GB')
 }
 
 function formatCtx(tokens: number): string {
@@ -48,12 +53,16 @@ function pickQuantForVariants(variants: ModelVariantInfo[], preferredQuant: stri
     ?? preferredQuant
 }
 
-export function SettingsPanel({ open, onClose, initialTab }: Props) {
+export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
   const [tab, setTab] = useState<Tab>('model')
   const [cfg, setCfg] = useState<AppConfig | null>(null)
   const [variants, setVariants] = useState<ModelVariantInfo[]>([])
   const [resources, setResources] = useState<SystemResources | null>(null)
   const [tools, setTools] = useState<ToolInfo[]>([])
+  const [families, setFamilies] = useState<ModelFamily[]>([])
+  const [selectedFamily, setSelectedFamily] = useState<string>('')
   const [selectedQuant, setSelectedQuant] = useState('')
   const [selectedCtx, setSelectedCtx] = useState<number>(32768)
   const [selectedGpuMode, setSelectedGpuMode] = useState<GpuMode>('single')
@@ -62,6 +71,14 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
   const [saving, setSaving] = useState(false)
   const [editingTool, setEditingTool] = useState<CustomTool | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+
+  // Web search
+  const [wsProvider, setWsProvider] = useState<WebSearchProvider>('disabled')
+  const [wsCustomUrl, setWsCustomUrl] = useState('')
+  const [wsStatus, setWsStatus] = useState<WebSearchStatus | null>(null)
+  const [wsDirty, setWsDirty] = useState(false)
+  const [wsApplying, setWsApplying] = useState(false)
+  const [wsError, setWsError] = useState<string | null>(null)
 
   // Agent params state
   const [maxIterations, setMaxIterations] = useState(200)
@@ -81,7 +98,12 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
 
   useEffect(() => {
     if (initialTab) {
-      const mapped = initialTab === 'prompts' ? 'prompts' : initialTab === 'tools' ? 'tools' : initialTab === 'agent' ? 'agent' : 'model'
+      const mapped: Tab =
+        initialTab === 'prompts' ? 'prompts'
+        : initialTab === 'tools' ? 'tools'
+        : initialTab === 'agent' ? 'agent'
+        : initialTab === 'web-search' ? 'web-search'
+        : 'model'
       setTab(mapped)
     }
   }, [initialTab, open])
@@ -93,7 +115,9 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       window.api.detectResources(),
       window.api.getTools(),
       window.api.getPrompts(),
-    ]).then(async ([c, r, t, p]) => {
+      window.api.getModelFamilies?.() ?? Promise.resolve([] as ModelFamily[]),
+      window.api.getWebSearchStatus?.() ?? Promise.resolve(null as WebSearchStatus | null),
+    ]).then(async ([c, r, toolsList, p, fams, wsSt]) => {
       const gpuMode = c.gpuMode ?? 'single'
       const gpuIndex = c.gpuIndex ?? r.gpus[0]?.index ?? 0
       const v = await window.api.getModelVariants({ gpuMode, gpuIndex })
@@ -101,15 +125,23 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       setCfg(c)
       setResources(r)
       setVariants(v)
-      setTools(t)
+      setTools(toolsList)
+      setFamilies(fams ?? [])
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
       const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q4_K_XL')
       setSelectedQuant(quant)
-      const variant = v.find((vi: ModelVariantInfo) => vi.quant === quant)
-      const max = variant?.maxCtx ?? 32768
+      const variantObj = v.find((vi: ModelVariantInfo) => vi.quant === quant)
+      const max = variantObj?.maxCtx ?? 32768
       setSelectedCtx((c.ctxSize && c.ctxSize > 0) ? Math.min(c.ctxSize, max) : max)
+      setSelectedFamily(variantObj?.family ?? (fams?.[0]?.id ?? ''))
       setDirty(false)
+
+      setWsProvider((c.webSearchProvider as WebSearchProvider) ?? 'disabled')
+      setWsCustomUrl(c.searxngBaseUrl ?? '')
+      setWsStatus(wsSt)
+      setWsDirty(false)
+      setWsError(null)
 
       setMaxIterations(c.maxIterations ?? 200)
       setTemperature(c.temperature ?? 0.3)
@@ -187,11 +219,15 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       const result = await window.api.restartServer()
       setDirty(false)
       if (result?.actualCtx && result.actualCtx < selectedCtx) {
-        alert(`Сервер запущен, но контекст уменьшен: ${Math.round(result.actualCtx / 1024)}K вместо ${Math.round(selectedCtx / 1024)}K (не хватает памяти)`)
+        alert(
+          L === 'ru'
+            ? `Сервер запущен, но контекст уменьшен: ${Math.round(result.actualCtx / 1024)}K вместо ${Math.round(selectedCtx / 1024)}K (не хватает памяти)`
+            : `Server started, but context reduced: ${Math.round(result.actualCtx / 1024)}K instead of ${Math.round(selectedCtx / 1024)}K (not enough memory)`,
+        )
       }
       onClose()
     } catch (e: any) {
-      alert('Ошибка: ' + (e.message ?? e))
+      alert((L === 'ru' ? 'Ошибка: ' : 'Error: ') + (e.message ?? e))
     } finally {
       setSaving(false)
     }
@@ -233,7 +269,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
     setSaving(true)
     try {
       await window.api.resetAllDefaults()
-      const [c, r, t, p] = await Promise.all([
+      const [c, r, toolsList, p] = await Promise.all([
         window.api.getConfig(),
         window.api.detectResources(),
         window.api.getTools(),
@@ -245,7 +281,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       setCfg(c)
       setResources(r)
       setVariants(v)
-      setTools(t)
+      setTools(toolsList)
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
       const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q4_K_XL')
@@ -263,11 +299,31 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
     }
   }
 
+  const handleApplyWebSearch = async () => {
+    setWsApplying(true)
+    setWsError(null)
+    try {
+      const payload: Partial<AppConfig> = { webSearchProvider: wsProvider }
+      if (wsProvider === 'custom-searxng') payload.searxngBaseUrl = wsCustomUrl.trim() || null
+      else payload.searxngBaseUrl = null
+      await window.api.saveConfig(payload)
+      const res = await window.api.ensureWebSearch?.()
+      setWsStatus(res ?? null)
+      if (res && !res.healthy && res.detail) setWsError(res.detail)
+      setWsDirty(false)
+    } catch (e: any) {
+      setWsError(e?.message ?? String(e))
+    } finally {
+      setWsApplying(false)
+    }
+  }
+
   const tabs: { key: Tab; label: string }[] = [
-    { key: 'model', label: 'Модель' },
-    { key: 'agent', label: 'Агент' },
-    { key: 'tools', label: 'Инструменты' },
-    { key: 'prompts', label: 'Промпты' },
+    { key: 'model', label: t('Модель', 'Model') },
+    { key: 'agent', label: t('Агент', 'Agent') },
+    { key: 'tools', label: t('Инструменты', 'Tools') },
+    { key: 'web-search', label: t('Веб‑поиск', 'Web search') },
+    { key: 'prompts', label: t('Промпты', 'Prompts') },
   ]
 
   return (
@@ -279,7 +335,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800 shrink-0">
-          <h2 className="text-base font-semibold text-zinc-100">Настройки</h2>
+          <h2 className="text-base font-semibold text-zinc-100">{t('Настройки', 'Settings')}</h2>
           <button
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 cursor-pointer transition-colors"
@@ -312,11 +368,24 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               variants={variants}
               availableGpus={availableGpus}
               hasMultipleGpus={hasMultipleGpus}
+              families={families}
+              selectedFamily={selectedFamily}
               selectedQuant={selectedQuant}
               selectedCtx={selectedCtx}
               selectedGpuMode={selectedGpuMode}
               selectedGpuIndex={selectedGpuIndex}
               maxCtx={maxCtx}
+              appLanguage={L}
+              onFamilyChange={(fam) => {
+                setSelectedFamily(fam)
+                const first = variants.find((v) => v.family === fam && v.fits) ?? variants.find((v) => v.family === fam)
+                if (first) {
+                  setSelectedQuant(first.quant)
+                  const max = first.maxCtx ?? 32768
+                  setSelectedCtx((prev) => Math.min(prev, max))
+                }
+                setDirty(true)
+              }}
               onQuantChange={(q) => { setSelectedQuant(q); setDirty(true) }}
               onCtxChange={(c: number) => { setSelectedCtx(c); setDirty(true) }}
               onGpuModeChange={async (gpuMode) => {
@@ -335,6 +404,24 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               }}
             />
           )}
+          {tab === 'web-search' && (
+            <WebSearchTab
+              provider={wsProvider}
+              customUrl={wsCustomUrl}
+              status={wsStatus}
+              error={wsError}
+              applying={wsApplying}
+              dirty={wsDirty}
+              appLanguage={L}
+              onProviderChange={(p) => { setWsProvider(p); setWsDirty(true); setWsError(null) }}
+              onCustomUrlChange={(u) => { setWsCustomUrl(u); setWsDirty(true); setWsError(null) }}
+              onApply={handleApplyWebSearch}
+              onRefresh={async () => {
+                const s = await window.api.getWebSearchStatus?.()
+                setWsStatus(s ?? null)
+              }}
+            />
+          )}
           {tab === 'agent' && (
             <AgentTab
               maxIterations={maxIterations}
@@ -343,6 +430,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               maxEmptyRetries={maxEmptyRetries}
               approvalForFileOps={approvalForFileOps}
               approvalForCommands={approvalForCommands}
+              appLanguage={L}
               onChange={(field, value) => {
                 if (field === 'maxIterations') setMaxIterations(value as number)
                 else if (field === 'temperature') setTemperature(value as number)
@@ -358,6 +446,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
             <ToolsTab
               tools={tools}
               editingTool={editingTool}
+              appLanguage={L}
               onEdit={setEditingTool}
               onSave={handleSaveCustomTool}
               onDelete={handleDeleteCustomTool}
@@ -370,6 +459,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               sumPrompt={sumPrompt}
               defaultSysPrompt={defaultSysPrompt}
               defaultSumPrompt={defaultSumPrompt}
+              appLanguage={L}
               onSysChange={(v) => { setSysPrompt(v); setPromptsDirty(true) }}
               onSumChange={(v) => { setSumPrompt(v); setPromptsDirty(true) }}
               onResetSys={() => { setSysPrompt(defaultSysPrompt); setPromptsDirty(true) }}
@@ -382,14 +472,14 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
         {tab === 'model' && dirty && (
           <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
             <span className="text-xs text-zinc-500 flex-1">
-              Сервер будет перезапущен с новыми настройками
+              {t('Сервер будет перезапущен с новыми настройками', 'Server will restart with new settings')}
             </span>
             <button
               onClick={handleApplyRestart}
               disabled={saving}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors disabled:opacity-50"
             >
-              {saving ? 'Перезапуск…' : 'Применить и перезапустить'}
+              {saving ? t('Перезапуск…', 'Restarting…') : t('Применить и перезапустить', 'Apply and restart')}
             </button>
           </div>
         )}
@@ -397,7 +487,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
         {tab === 'agent' && agentDirty && (
           <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
             <span className="text-xs text-zinc-500 flex-1">
-              Изменения применяются сразу к следующему сообщению
+              {t('Изменения применяются сразу к следующему сообщению', 'Changes apply to the next message')}
             </span>
             <button
               onClick={async () => {
@@ -406,7 +496,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
               }}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors"
             >
-              Сохранить
+              {t('Сохранить', 'Save')}
             </button>
           </div>
         )}
@@ -414,21 +504,21 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
         {tab === 'prompts' && promptsDirty && (
           <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
             <span className="text-xs text-zinc-500 flex-1">
-              Промпты применяются к новым сообщениям
+              {t('Промпты применяются к новым сообщениям', 'Prompts apply to new messages')}
             </span>
             <button
               onClick={handleResetPrompts}
               disabled={saving}
               className="px-4 py-2 text-sm rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors disabled:opacity-50"
             >
-              Сбросить оба
+              {t('Сбросить оба', 'Reset both')}
             </button>
             <button
               onClick={handleSavePrompts}
               disabled={saving}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors disabled:opacity-50"
             >
-              {saving ? 'Сохранение…' : 'Сохранить промпты'}
+              {saving ? t('Сохранение…', 'Saving…') : t('Сохранить промпты', 'Save prompts')}
             </button>
           </div>
         )}
@@ -440,7 +530,7 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
             disabled={saving}
             className="text-[11px] text-zinc-600 hover:text-red-400 cursor-pointer transition-colors disabled:opacity-50"
           >
-            Сбросить все настройки по умолчанию
+            {t('Сбросить все настройки по умолчанию', 'Reset all settings to defaults')}
           </button>
         </div>
       </div>
@@ -453,11 +543,13 @@ export function SettingsPanel({ open, onClose, initialTab }: Props) {
 // ---------------------------------------------------------------------------
 
 function ModelTab({
-  variants, availableGpus, hasMultipleGpus,
-  selectedQuant, selectedCtx, selectedGpuMode, selectedGpuIndex, maxCtx,
-  onQuantChange, onCtxChange, onGpuModeChange, onGpuIndexChange,
+  variants, families, selectedFamily, availableGpus, hasMultipleGpus,
+  selectedQuant, selectedCtx, selectedGpuMode, selectedGpuIndex, maxCtx, appLanguage,
+  onFamilyChange, onQuantChange, onCtxChange, onGpuModeChange, onGpuIndexChange,
 }: {
   variants: ModelVariantInfo[]
+  families: ModelFamily[]
+  selectedFamily: string
   availableGpus: SystemResources['gpus']
   hasMultipleGpus: boolean
   selectedQuant: string
@@ -465,16 +557,21 @@ function ModelTab({
   selectedGpuMode: GpuMode
   selectedGpuIndex: number
   maxCtx: number
+  appLanguage: 'ru' | 'en'
+  onFamilyChange: (famId: string) => void
   onQuantChange: (q: string) => void
   onCtxChange: (c: number) => void
   onGpuModeChange: (mode: GpuMode) => void | Promise<void>
   onGpuIndexChange: (index: number) => void | Promise<void>
 }) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
+  const familyVariants = selectedFamily ? variants.filter((v) => v.family === selectedFamily) : variants
   return (
     <div className="space-y-6">
       {hasMultipleGpus && (
         <div>
-          <label className="block text-sm font-medium text-zinc-300 mb-3">Режим GPU</label>
+          <label className="block text-sm font-medium text-zinc-300 mb-3">{t('Режим GPU', 'GPU mode')}</label>
           <div className="flex gap-2 mb-3">
             <button
               onClick={() => onGpuModeChange('single')}
@@ -484,7 +581,7 @@ function ModelTab({
                   : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
               }`}
             >
-              Одна GPU
+              {t('Одна GPU', 'Single GPU')}
             </button>
             <button
               onClick={() => onGpuModeChange('split')}
@@ -494,11 +591,14 @@ function ModelTab({
                   : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
               }`}
             >
-              Все GPU (экспериментально)
+              {t('Все GPU (экспериментально)', 'All GPUs (experimental)')}
             </button>
           </div>
           <p className="text-xs text-zinc-500 mb-3">
-            Для систем с несколькими видеокартами безопаснее запускать `llama.cpp` на одной карте. Multi-GPU может быть нестабилен и приводить к случайным падениям драйвера.
+            {t(
+              'Для систем с несколькими видеокартами безопаснее запускать `llama.cpp` на одной карте. Multi-GPU может быть нестабилен и приводить к случайным падениям драйвера.',
+              'On multi-GPU systems it is safer to run `llama.cpp` on a single card. Multi-GPU can be unstable and cause random driver crashes.',
+            )}
           </p>
           {selectedGpuMode === 'single' && (
             <div className="space-y-2 rounded-xl border border-zinc-800 p-2">
@@ -517,7 +617,7 @@ function ModelTab({
                     {selectedGpuIndex === gpu.index && <span className="text-blue-400 text-sm">✓</span>}
                   </div>
                   <div className="text-[11px] text-zinc-500 mt-1">
-                    Свободно {formatSize(gpu.vramFreeMb)} из {formatSize(gpu.vramTotalMb)}
+                    {t('Свободно', 'Free')} {formatSize(gpu.vramFreeMb, L)} {t('из', 'of')} {formatSize(gpu.vramTotalMb, L)}
                   </div>
                 </button>
               ))}
@@ -526,70 +626,87 @@ function ModelTab({
         </div>
       )}
 
+      {/* Family selection */}
+      {families.length > 0 && (
+        <div>
+          <label className="block text-sm font-medium text-zinc-300 mb-3">{t('Семейство моделей', 'Model family')}</label>
+          <div className="flex flex-wrap gap-2">
+            {families.map((fam) => (
+              <button
+                key={fam.id}
+                onClick={() => onFamilyChange(fam.id)}
+                className={`px-3 py-2 text-sm rounded-lg border transition-colors cursor-pointer ${
+                  selectedFamily === fam.id
+                    ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
+                    : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                }`}
+                title={fam.description}
+              >
+                {fam.label}
+              </button>
+            ))}
+          </div>
+          {families.find((f) => f.id === selectedFamily)?.description && (
+            <p className="text-[11px] text-zinc-500 mt-2">
+              {families.find((f) => f.id === selectedFamily)!.description}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Quant selection */}
       <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-3">Квантизация модели</label>
+        <label className="block text-sm font-medium text-zinc-300 mb-3">{t('Квантизация модели', 'Model quantization')}</label>
         <div className="space-y-1 max-h-[360px] overflow-y-auto rounded-xl border border-zinc-800 p-1">
-          {(() => {
-            const groups: { title: string; items: typeof variants }[] = [
-              { title: 'Qwen3.5-9B (быстрая, компактная)', items: variants.filter((v) => v.quant.startsWith('9B-')) },
-              { title: 'Qwen3.5-35B-A3B (MoE, мощнее)', items: variants.filter((v) => !v.quant.startsWith('9B-')) },
-            ]
-            return groups.map((g) => g.items.length === 0 ? null : (
-              <div key={g.title}>
-                <div className="px-3 pt-2 pb-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wide">{g.title}</div>
-                {g.items.map((v) => {
-                  const isSel = v.quant === selectedQuant
-                  const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
-                  const displayQuant = v.quant.replace(/^9B-/, '').replace('UD-', '')
-                  return (
-                    <button
-                      key={v.quant}
-                      disabled={!v.fits}
-                      onClick={() => onQuantChange(v.quant)}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors cursor-pointer ${
-                        !v.fits
-                          ? 'opacity-30 cursor-not-allowed'
-                          : isSel
-                            ? 'bg-blue-500/15 border border-blue-500/30'
-                            : 'hover:bg-zinc-800/80 border border-transparent'
-                      }`}
-                    >
-                      <div className={`w-7 text-center text-xs font-bold ${colorClass}`}>
-                        {v.bits}b
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-medium ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
-                            {displayQuant}
-                          </span>
-                          {v.recommended && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
-                              рек.
-                            </span>
-                          )}
-                        </div>
-                        <div className={`text-[11px] mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
-                          {formatSize(v.sizeMb)}
-                          {v.fits && <> · макс. ctx {formatCtx(v.maxCtx)} · {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
-                          {!v.fits && ' · не хватает памяти'}
-                        </div>
-                      </div>
-                      {isSel && <span className="text-blue-400 shrink-0 text-sm">✓</span>}
-                    </button>
-                  )
-                })}
-              </div>
-            ))
-          })()}
+          {familyVariants.map((v) => {
+            const isSel = v.quant === selectedQuant
+            const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
+            const displayQuant = v.quant.replace(/^9B-/, '').replace('UD-', '')
+            return (
+              <button
+                key={v.quant}
+                disabled={!v.fits}
+                onClick={() => onQuantChange(v.quant)}
+                className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors cursor-pointer ${
+                  !v.fits
+                    ? 'opacity-30 cursor-not-allowed'
+                    : isSel
+                      ? 'bg-blue-500/15 border border-blue-500/30'
+                      : 'hover:bg-zinc-800/80 border border-transparent'
+                }`}
+              >
+                <div className={`w-7 text-center text-xs font-bold ${colorClass}`}>
+                  {v.bits}b
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-medium ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
+                      {displayQuant}
+                    </span>
+                    {v.recommended && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
+                        {t('рек.', 'rec.')}
+                      </span>
+                    )}
+                  </div>
+                  <div className={`text-[11px] mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                    {formatSize(v.sizeMb, L)}
+                    {v.fits && <> · {t('макс. ctx', 'max ctx')} {formatCtx(v.maxCtx)} · {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
+                    {!v.fits && (L === 'ru' ? ' · не хватает памяти' : ' · out of memory')}
+                  </div>
+                </div>
+                {isSel && <span className="text-blue-400 shrink-0 text-sm">✓</span>}
+              </button>
+            )
+          })}
         </div>
       </div>
 
       {/* Context size */}
       <div>
-        <label className="block text-sm font-medium text-zinc-300 mb-2">Размер контекста</label>
+        <label className="block text-sm font-medium text-zinc-300 mb-2">{t('Размер контекста', 'Context size')}</label>
         <p className="text-xs text-zinc-500 mb-3">
-          Максимум для текущей квантизации: {formatCtx(maxCtx)}
+          {t('Максимум для текущей квантизации:', 'Max for the current quantization:')} {formatCtx(maxCtx)}
         </p>
         <div className="flex flex-wrap gap-2">
           {CTX_OPTIONS.filter((o) => o.value <= maxCtx).map((opt) => (
@@ -616,7 +733,7 @@ function ModelTab({
 // ---------------------------------------------------------------------------
 
 function AgentTab({
-  maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalForFileOps, approvalForCommands, onChange,
+  maxIterations, temperature, idleTimeoutSec, maxEmptyRetries, approvalForFileOps, approvalForCommands, appLanguage, onChange,
 }: {
   maxIterations: number
   temperature: number
@@ -624,14 +741,16 @@ function AgentTab({
   maxEmptyRetries: number
   approvalForFileOps: boolean
   approvalForCommands: boolean
+  appLanguage: 'ru' | 'en'
   onChange: (field: string, value: number | boolean) => void
 }) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
   return (
     <div className="space-y-5">
-      {/* Max iterations */}
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <label className="text-sm text-zinc-300">Макс. итераций агента</label>
+          <label className="text-sm text-zinc-300">{t('Макс. итераций агента', 'Max agent iterations')}</label>
           <span className="text-sm font-mono text-zinc-400">{maxIterations}</span>
         </div>
         <input
@@ -640,14 +759,13 @@ function AgentTab({
           className="w-full accent-blue-500"
         />
         <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
-          <span>10</span><span>Сколько шагов агент может сделать за один запрос</span><span>500</span>
+          <span>10</span><span>{t('Сколько шагов агент может сделать за один запрос', 'How many steps the agent can take per request')}</span><span>500</span>
         </div>
       </div>
 
-      {/* Temperature */}
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <label className="text-sm text-zinc-300">Температура</label>
+          <label className="text-sm text-zinc-300">{t('Температура', 'Temperature')}</label>
           <span className="text-sm font-mono text-zinc-400">{temperature.toFixed(2)}</span>
         </div>
         <input
@@ -656,15 +774,14 @@ function AgentTab({
           className="w-full accent-blue-500"
         />
         <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
-          <span>0 (точно)</span><span>Креативность модели</span><span>1.5 (хаотично)</span>
+          <span>{t('0 (точно)', '0 (precise)')}</span><span>{t('Креативность модели', 'Model creativity')}</span><span>{t('1.5 (хаотично)', '1.5 (chaotic)')}</span>
         </div>
       </div>
 
-      {/* Idle timeout */}
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <label className="text-sm text-zinc-300">Таймаут бездействия (сек)</label>
-          <span className="text-sm font-mono text-zinc-400">{idleTimeoutSec}с</span>
+          <label className="text-sm text-zinc-300">{t('Таймаут бездействия (сек)', 'Idle timeout (sec)')}</label>
+          <span className="text-sm font-mono text-zinc-400">{idleTimeoutSec}{L === 'ru' ? 'с' : 's'}</span>
         </div>
         <input
           type="range" min={15} max={300} step={5} value={idleTimeoutSec}
@@ -672,14 +789,13 @@ function AgentTab({
           className="w-full accent-blue-500"
         />
         <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
-          <span>15с</span><span>Сколько ждать ответа модели без данных</span><span>300с</span>
+          <span>{L === 'ru' ? '15с' : '15s'}</span><span>{t('Сколько ждать ответа модели без данных', 'How long to wait for model response without data')}</span><span>{L === 'ru' ? '300с' : '300s'}</span>
         </div>
       </div>
 
-      {/* Max empty retries */}
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <label className="text-sm text-zinc-300">Ретраи при пустом ответе</label>
+          <label className="text-sm text-zinc-300">{t('Ретраи при пустом ответе', 'Retries on empty response')}</label>
           <span className="text-sm font-mono text-zinc-400">{maxEmptyRetries}</span>
         </div>
         <input
@@ -688,15 +804,14 @@ function AgentTab({
           className="w-full accent-blue-500"
         />
         <div className="flex justify-between text-[10px] text-zinc-600 mt-0.5">
-          <span>1</span><span>Сколько раз повторять при пустом ответе</span><span>10</span>
+          <span>1</span><span>{t('Сколько раз повторять при пустом ответе', 'How many times to retry on empty response')}</span><span>10</span>
         </div>
       </div>
 
-      {/* Approval: file ops */}
       <div className="flex items-center justify-between py-2 border-t border-zinc-800">
         <div>
-          <div className="text-sm text-zinc-300">Подтверждение записи и создания файлов</div>
-          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на write_file, edit_file, append_file, delete_file, create_directory</div>
+          <div className="text-sm text-zinc-300">{t('Подтверждение записи и создания файлов', 'Confirm file writes and creation')}</div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">{t('Спрашивать разрешение на write_file, edit_file, append_file, delete_file, create_directory', 'Ask permission for write_file, edit_file, append_file, delete_file, create_directory')}</div>
         </div>
         <button
           onClick={() => onChange('approvalForFileOps', !approvalForFileOps)}
@@ -706,11 +821,10 @@ function AgentTab({
         </button>
       </div>
 
-      {/* Approval: commands */}
       <div className="flex items-center justify-between py-2 border-t border-zinc-800">
         <div>
-          <div className="text-sm text-zinc-300">Подтверждение выполнения команд</div>
-          <div className="text-[11px] text-zinc-600 mt-0.5">Спрашивать разрешение на execute_command (терминал, сборка, тесты и т.д.)</div>
+          <div className="text-sm text-zinc-300">{t('Подтверждение выполнения команд', 'Confirm command execution')}</div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">{t('Спрашивать разрешение на execute_command (терминал, сборка, тесты и т.д.)', 'Ask permission for execute_command (terminal, build, tests, etc.)')}</div>
         </div>
         <button
           onClick={() => onChange('approvalForCommands', !approvalForCommands)}
@@ -728,18 +842,21 @@ function AgentTab({
 // ---------------------------------------------------------------------------
 
 function ToolsTab({
-  tools, editingTool,
+  tools, editingTool, appLanguage,
   onEdit, onSave, onDelete, onCancelEdit,
 }: {
   tools: ToolInfo[]
   editingTool: CustomTool | null
+  appLanguage: 'ru' | 'en'
   onEdit: (tool: CustomTool | null) => void
   onSave: (tool: CustomTool) => void
   onDelete: (id: string) => void
   onCancelEdit: () => void
 }) {
-  const builtins = tools.filter((t) => t.builtin)
-  const custom = tools.filter((t) => !t.builtin)
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
+  const builtins = tools.filter((item) => item.builtin)
+  const custom = tools.filter((item) => !item.builtin)
 
   const newTool = (): CustomTool => ({
     id: `ct-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
@@ -752,68 +869,66 @@ function ToolsTab({
 
   return (
     <div className="space-y-6">
-      {/* Built-in tools */}
       <div>
-        <h3 className="text-sm font-medium text-zinc-300 mb-2">Встроенные инструменты</h3>
+        <h3 className="text-sm font-medium text-zinc-300 mb-2">{t('Встроенные инструменты', 'Built-in tools')}</h3>
         <div className="space-y-1">
-          {builtins.map((t) => (
-            <div key={t.name} className="px-3 py-2 rounded-lg bg-zinc-900/50 border border-zinc-800/50">
+          {builtins.map((item) => (
+            <div key={item.name} className="px-3 py-2 rounded-lg bg-zinc-900/50 border border-zinc-800/50">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 font-mono">{t.name}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 font-mono">{item.name}</span>
               </div>
-              <p className="text-xs text-zinc-500 mt-1 line-clamp-2">{t.description}</p>
+              <p className="text-xs text-zinc-500 mt-1 line-clamp-2">{item.description}</p>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Custom tools */}
       <div>
         <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-zinc-300">Пользовательские инструменты</h3>
+          <h3 className="text-sm font-medium text-zinc-300">{t('Пользовательские инструменты', 'Custom tools')}</h3>
           <button
             onClick={() => onEdit(newTool())}
             className="text-xs px-2.5 py-1 rounded-lg bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors"
           >
-            + Добавить
+            {t('+ Добавить', '+ Add')}
           </button>
         </div>
 
         {custom.length === 0 && !editingTool && (
           <p className="text-xs text-zinc-600 py-4 text-center">
-            Нет пользовательских инструментов. Добавьте свой первый инструмент — агент сможет его вызывать.
+            {t('Нет пользовательских инструментов. Добавьте свой первый инструмент — агент сможет его вызывать.', 'No custom tools yet. Add your first tool — the agent will be able to call it.')}
           </p>
         )}
 
-        {custom.map((t) => (
-          <div key={t.id} className="px-3 py-2.5 rounded-lg border border-zinc-800 mb-2">
+        {custom.map((item) => (
+          <div key={item.id} className="px-3 py-2.5 rounded-lg border border-zinc-800 mb-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono">{t.name}</span>
-                {!t.enabled && <span className="text-[10px] text-zinc-600">отключён</span>}
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono">{item.name}</span>
+                {!item.enabled && <span className="text-[10px] text-zinc-600">{t('отключён', 'disabled')}</span>}
               </div>
               <div className="flex gap-1">
                 <button
-                  onClick={() => onEdit({ id: t.id!, name: t.name, description: t.description, command: t.command!, parameters: t.parameters!, enabled: t.enabled })}
+                  onClick={() => onEdit({ id: item.id!, name: item.name, description: item.description, command: item.command!, parameters: item.parameters!, enabled: item.enabled })}
                   className="text-[10px] px-2 py-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 cursor-pointer"
                 >
-                  ред.
+                  {t('ред.', 'edit')}
                 </button>
                 <button
-                  onClick={() => onDelete(t.id!)}
+                  onClick={() => onDelete(item.id!)}
                   className="text-[10px] px-2 py-0.5 rounded text-red-500/60 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
                 >
-                  удал.
+                  {t('удал.', 'del')}
                 </button>
               </div>
             </div>
-            <p className="text-xs text-zinc-500 mt-1">{t.description}</p>
-            {t.command && <p className="text-[10px] text-zinc-600 mt-1 font-mono">{t.command}</p>}
+            <p className="text-xs text-zinc-500 mt-1">{item.description}</p>
+            {item.command && <p className="text-[10px] text-zinc-600 mt-1 font-mono">{item.command}</p>}
           </div>
         ))}
 
         {editingTool && (
-          <ToolEditor tool={editingTool} onSave={onSave} onCancel={onCancelEdit} />
+          <ToolEditor tool={editingTool} appLanguage={L} onSave={onSave} onCancel={onCancelEdit} />
         )}
       </div>
     </div>
@@ -825,12 +940,15 @@ function ToolsTab({
 // ---------------------------------------------------------------------------
 
 function ToolEditor({
-  tool, onSave, onCancel,
+  tool, appLanguage, onSave, onCancel,
 }: {
   tool: CustomTool
+  appLanguage: 'ru' | 'en'
   onSave: (tool: CustomTool) => void
   onCancel: () => void
 }) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
   const [name, setName] = useState(tool.name)
   const [desc, setDesc] = useState(tool.description)
   const [cmd, setCmd] = useState(tool.command)
@@ -856,7 +974,7 @@ function ToolEditor({
   return (
     <div className="border border-blue-500/30 rounded-xl p-4 bg-blue-500/5 space-y-3 mt-3">
       <div>
-        <label className="block text-xs text-zinc-400 mb-1">Имя функции (snake_case)</label>
+        <label className="block text-xs text-zinc-400 mb-1">{t('Имя функции (snake_case)', 'Function name (snake_case)')}</label>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -865,7 +983,7 @@ function ToolEditor({
         />
       </div>
       <div>
-        <label className="block text-xs text-zinc-400 mb-1">Описание (для агента)</label>
+        <label className="block text-xs text-zinc-400 mb-1">{t('Описание (для агента)', 'Description (for the agent)')}</label>
         <input
           value={desc}
           onChange={(e) => setDesc(e.target.value)}
@@ -875,7 +993,7 @@ function ToolEditor({
       </div>
       <div>
         <label className="block text-xs text-zinc-400 mb-1">
-          Команда <span className="text-zinc-600">({'используйте {{param}} для подстановки параметров'})</span>
+          {t('Команда', 'Command')} <span className="text-zinc-600">({t('используйте {{param}} для подстановки параметров', 'use {{param}} to substitute parameters')})</span>
         </label>
         <input
           value={cmd}
@@ -885,12 +1003,11 @@ function ToolEditor({
         />
       </div>
 
-      {/* Parameters */}
       <div>
         <div className="flex items-center justify-between mb-2">
-          <label className="text-xs text-zinc-400">Параметры</label>
+          <label className="text-xs text-zinc-400">{t('Параметры', 'Parameters')}</label>
           <button onClick={addParam} className="text-[10px] text-blue-400 hover:text-blue-300 cursor-pointer">
-            + параметр
+            {t('+ параметр', '+ parameter')}
           </button>
         </div>
         {params.map((p, i) => (
@@ -898,13 +1015,13 @@ function ToolEditor({
             <input
               value={p.name}
               onChange={(e) => updateParam(i, 'name', e.target.value)}
-              placeholder="имя"
+              placeholder={t('имя', 'name')}
               className="flex-1 px-2 py-1.5 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-200 outline-none"
             />
             <input
               value={p.description}
               onChange={(e) => updateParam(i, 'description', e.target.value)}
-              placeholder="описание"
+              placeholder={t('описание', 'description')}
               className="flex-[2] px-2 py-1.5 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-200 outline-none"
             />
             <label className="flex items-center gap-1 text-[10px] text-zinc-500 cursor-pointer">
@@ -914,7 +1031,7 @@ function ToolEditor({
                 onChange={(e) => updateParam(i, 'required', e.target.checked)}
                 className="rounded"
               />
-              обяз.
+              {t('обяз.', 'req.')}
             </label>
             <button onClick={() => removeParam(i)} className="text-red-500/60 hover:text-red-400 text-xs cursor-pointer">
               ✕
@@ -930,7 +1047,7 @@ function ToolEditor({
           onChange={(e) => setEnabled(e.target.checked)}
           className="rounded"
         />
-        Включён
+        {t('Включён', 'Enabled')}
       </label>
 
       <div className="flex justify-end gap-2 pt-1">
@@ -938,14 +1055,14 @@ function ToolEditor({
           onClick={onCancel}
           className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
         >
-          Отмена
+          {t('Отмена', 'Cancel')}
         </button>
         <button
           onClick={() => onSave({ id: tool.id, name: name.trim(), description: desc.trim(), command: cmd.trim(), parameters: params, enabled })}
           disabled={!isValid}
           className="px-4 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
         >
-          Сохранить
+          {t('Сохранить', 'Save')}
         </button>
       </div>
     </div>
@@ -957,18 +1074,21 @@ function ToolEditor({
 // ---------------------------------------------------------------------------
 
 function PromptsTab({
-  sysPrompt, sumPrompt, defaultSysPrompt, defaultSumPrompt,
+  sysPrompt, sumPrompt, defaultSysPrompt, defaultSumPrompt, appLanguage,
   onSysChange, onSumChange, onResetSys, onResetSum,
 }: {
   sysPrompt: string
   sumPrompt: string
   defaultSysPrompt: string
   defaultSumPrompt: string
+  appLanguage: 'ru' | 'en'
   onSysChange: (v: string) => void
   onSumChange: (v: string) => void
   onResetSys: () => void
   onResetSum: () => void
 }) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
   const sysIsDefault = sysPrompt === defaultSysPrompt
   const sumIsDefault = sumPrompt === defaultSumPrompt
 
@@ -976,18 +1096,18 @@ function PromptsTab({
     <div className="space-y-6">
       <div>
         <div className="flex items-center justify-between mb-2">
-          <label className="block text-sm font-medium text-zinc-300">Системный промпт</label>
+          <label className="block text-sm font-medium text-zinc-300">{t('Системный промпт', 'System prompt')}</label>
           {!sysIsDefault && (
             <button
               onClick={onResetSys}
               className="text-[10px] px-2 py-0.5 rounded text-zinc-500 hover:text-amber-400 hover:bg-amber-500/10 cursor-pointer transition-colors"
             >
-              Вернуть по умолчанию
+              {t('Вернуть по умолчанию', 'Reset to default')}
             </button>
           )}
         </div>
         <p className="text-[11px] text-zinc-600 mb-2">
-          Основные инструкции для агента: стиль работы, правила, поведение
+          {t('Основные инструкции для агента: стиль работы, правила, поведение', 'Core agent instructions: work style, rules, behavior')}
         </p>
         <textarea
           value={sysPrompt}
@@ -997,24 +1117,24 @@ function PromptsTab({
           className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-700 rounded-xl text-xs text-zinc-300 font-mono leading-relaxed focus:border-blue-500 outline-none resize-y min-h-[120px]"
         />
         {sysIsDefault && (
-          <p className="text-[10px] text-zinc-700 mt-1">Используется промпт по умолчанию</p>
+          <p className="text-[10px] text-zinc-700 mt-1">{t('Используется промпт по умолчанию', 'Using the default prompt')}</p>
         )}
       </div>
 
       <div>
         <div className="flex items-center justify-between mb-2">
-          <label className="block text-sm font-medium text-zinc-300">Промпт суммаризации</label>
+          <label className="block text-sm font-medium text-zinc-300">{t('Промпт суммаризации', 'Summarization prompt')}</label>
           {!sumIsDefault && (
             <button
               onClick={onResetSum}
               className="text-[10px] px-2 py-0.5 rounded text-zinc-500 hover:text-amber-400 hover:bg-amber-500/10 cursor-pointer transition-colors"
             >
-              Вернуть по умолчанию
+              {t('Вернуть по умолчанию', 'Reset to default')}
             </button>
           )}
         </div>
         <p className="text-[11px] text-zinc-600 mb-2">
-          Инструкция для сжатия контекста при приближении к лимиту
+          {t('Инструкция для сжатия контекста при приближении к лимиту', 'Instruction for compressing context near the limit')}
         </p>
         <textarea
           value={sumPrompt}
@@ -1024,8 +1144,137 @@ function PromptsTab({
           className="w-full px-3 py-2.5 bg-zinc-900 border border-zinc-700 rounded-xl text-xs text-zinc-300 font-mono leading-relaxed focus:border-blue-500 outline-none resize-y min-h-[80px]"
         />
         {sumIsDefault && (
-          <p className="text-[10px] text-zinc-700 mt-1">Используется промпт по умолчанию</p>
+          <p className="text-[10px] text-zinc-700 mt-1">{t('Используется промпт по умолчанию', 'Using the default prompt')}</p>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Web search tab
+// ---------------------------------------------------------------------------
+
+function WebSearchTab({
+  provider, customUrl, status, error, applying, dirty, appLanguage,
+  onProviderChange, onCustomUrlChange, onApply, onRefresh,
+}: {
+  provider: WebSearchProvider
+  customUrl: string
+  status: WebSearchStatus | null
+  error: string | null
+  applying: boolean
+  dirty: boolean
+  appLanguage: 'ru' | 'en'
+  onProviderChange: (p: WebSearchProvider) => void
+  onCustomUrlChange: (u: string) => void
+  onApply: () => void
+  onRefresh: () => void
+}) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => tr(ru, en, L)
+
+  const options: { id: WebSearchProvider; title: string; desc: string }[] = [
+    {
+      id: 'disabled',
+      title: t('Отключено', 'Disabled'),
+      desc: t('Агент не имеет инструментов веб‑поиска и fetch_url.', 'The agent has no web search or fetch_url tools.'),
+    },
+    {
+      id: 'managed-searxng',
+      title: t('SearXNG (локально через Docker)', 'SearXNG (local via Docker)'),
+      desc: t(
+        'Приложение само запустит и поддержит контейнер searxng. Требуется установленный Docker.',
+        'The app will launch and maintain a searxng container. Requires Docker.',
+      ),
+    },
+    {
+      id: 'custom-searxng',
+      title: t('Свой SearXNG', 'Custom SearXNG'),
+      desc: t(
+        'Укажите URL существующего инстанса SearXNG (должен поддерживать JSON API).',
+        'Provide a URL of an existing SearXNG instance (JSON API must be enabled).',
+      ),
+    },
+  ]
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-sm font-medium text-zinc-300 mb-1">{t('Провайдер веб‑поиска', 'Web search provider')}</h3>
+        <p className="text-[11px] text-zinc-500 mb-3">
+          {t(
+            'Веб‑поиск даёт агенту инструменты search_web и fetch_url — полезно для получения свежей документации и примеров кода.',
+            'Web search gives the agent search_web and fetch_url tools — useful for fetching fresh docs and code examples.',
+          )}
+        </p>
+        <div className="space-y-2">
+          {options.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => onProviderChange(opt.id)}
+              className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors cursor-pointer ${
+                provider === opt.id
+                  ? 'border-blue-500/40 bg-blue-500/10'
+                  : 'border-zinc-800 hover:bg-zinc-900/70'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className={`text-sm font-medium ${provider === opt.id ? 'text-blue-300' : 'text-zinc-200'}`}>
+                  {opt.title}
+                </span>
+                {provider === opt.id && <span className="text-blue-400 text-sm">✓</span>}
+              </div>
+              <p className="text-[11px] text-zinc-500 mt-1">{opt.desc}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {provider === 'custom-searxng' && (
+        <div>
+          <label className="block text-xs text-zinc-400 mb-1">{t('URL вашего SearXNG', 'Your SearXNG URL')}</label>
+          <input
+            value={customUrl}
+            onChange={(e) => onCustomUrlChange(e.target.value)}
+            placeholder="https://searx.example.org"
+            className="w-full px-3 py-2 bg-zinc-900 border border-zinc-700 rounded-lg text-sm text-zinc-200 focus:border-blue-500 outline-none"
+          />
+        </div>
+      )}
+
+      {status && (
+        <div className={`rounded-lg border p-3 text-xs ${status.healthy ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/30 bg-amber-500/5 text-amber-300'}`}>
+          <div className="font-medium mb-1">
+            {status.healthy ? t('Доступен', 'Available') : t('Недоступен', 'Unavailable')}
+            {status.provider ? <span className="text-zinc-500 font-normal"> · {status.provider}</span> : null}
+          </div>
+          {status.effectiveBaseUrl && <div className="text-zinc-400 font-mono break-all">{status.effectiveBaseUrl}</div>}
+          {status.detail && <div className="text-zinc-500 mt-1">{status.detail}</div>}
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-xs p-3">
+          {error}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onApply}
+          disabled={applying || (!dirty && !!status)}
+          className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 cursor-pointer transition-colors disabled:opacity-50"
+        >
+          {applying ? t('Применяем…', 'Applying…') : t('Применить и проверить', 'Apply and check')}
+        </button>
+        <button
+          onClick={onRefresh}
+          disabled={applying}
+          className="px-3 py-2 text-xs rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors disabled:opacity-50"
+        >
+          {t('Обновить статус', 'Refresh status')}
+        </button>
       </div>
     </div>
   )

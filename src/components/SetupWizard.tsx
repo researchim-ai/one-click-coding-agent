@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
-import type { AppStatus, DownloadProgress, GpuMode, ModelVariantInfo, SystemResources } from '../../electron/types'
+import type { AppStatus, DownloadProgress, GpuMode, ModelFamily, ModelVariantInfo, SystemResources } from '../../electron/types'
+import type { WebSearchProvider } from '../../electron/config'
 
 interface Props {
   status: AppStatus | null
   downloadProgress: DownloadProgress | null
   buildStatus: string | null
   onComplete: () => void
+  appLanguage?: 'ru' | 'en'
+  onLanguageChange?: (lang: 'ru' | 'en') => void
 }
 
-type Phase = 'idle' | 'installing' | 'downloading' | 'starting' | 'done' | 'error'
+type Phase = 'idle' | 'installing' | 'search' | 'downloading' | 'starting' | 'done' | 'error'
 
 const DEFAULT_QUANT = 'UD-Q4_K_XL'
 
@@ -22,8 +25,8 @@ const CTX_OPTIONS = [
   { value: 4096,   label: '4K' },
 ]
 
-function formatSize(mb: number): string {
-  return (mb / 1024).toFixed(1) + ' ГБ'
+function formatSize(mb: number, lang: 'ru' | 'en' = 'ru'): string {
+  return (mb / 1024).toFixed(1) + (lang === 'ru' ? ' ГБ' : ' GB')
 }
 
 function formatCtx(tokens: number): string {
@@ -48,7 +51,36 @@ function pickQuantForVariants(variants: ModelVariantInfo[], preferredQuant: stri
     ?? preferredQuant
 }
 
-export function SetupWizard({ status, downloadProgress, buildStatus, onComplete }: Props) {
+function variantsForFamily(variants: ModelVariantInfo[], familyId: string): ModelVariantInfo[] {
+  return variants.filter((v) => v.family === familyId)
+}
+
+function pickQuantForFamily(
+  variants: ModelVariantInfo[],
+  family: ModelFamily,
+  preferredQuant: string,
+): string {
+  const pool = variantsForFamily(variants, family.id)
+  if (pool.length === 0) return preferredQuant
+  const preferred = pool.find((v) => v.quant === preferredQuant && v.fits)
+  if (preferred) return preferred.quant
+  const defaultFit = pool.find((v) => v.quant === family.defaultQuant && v.fits)
+  if (defaultFit) return defaultFit.quant
+  return pool.find((v) => v.recommended)?.quant
+    ?? pool.find((v) => v.fits)?.quant
+    ?? family.defaultQuant
+}
+
+function displayQuant(quant: string): string {
+  return quant.replace(/^9B-/, '').replace(/^36-/, '').replace(/^UD-/, '')
+}
+
+function isFullGpuCtx(optionValue: number, selected?: ModelVariantInfo | null): boolean {
+  return optionValue <= (selected?.fullGpuMaxCtx ?? 0)
+}
+
+export function SetupWizard({ status, downloadProgress, buildStatus, onComplete, appLanguage = 'ru', onLanguageChange }: Props) {
+  const L = appLanguage === 'ru'
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
@@ -56,11 +88,18 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const logRef = useRef<HTMLDivElement>(null)
 
   const [variants, setVariants] = useState<ModelVariantInfo[]>([])
+  const [families, setFamilies] = useState<ModelFamily[]>([])
+  const [selectedFamilyId, setSelectedFamilyId] = useState<string>('')
   const [resources, setResources] = useState<SystemResources | null>(null)
   const [selectedQuant, setSelectedQuant] = useState(DEFAULT_QUANT)
   const [selectedCtx, setSelectedCtx] = useState<number>(32768)
   const [selectedGpuMode, setSelectedGpuMode] = useState<GpuMode>('single')
   const [selectedGpuIndex, setSelectedGpuIndex] = useState<number>(0)
+  const [familyDropdownOpen, setFamilyDropdownOpen] = useState(false)
+  const familyDropdownRef = useRef<HTMLDivElement>(null)
+  const [useSearxngSearch, setUseSearxngSearch] = useState(false)
+  const [savedWebSearchProvider, setSavedWebSearchProvider] = useState<WebSearchProvider>('disabled')
+  const [savedSearxngBaseUrl, setSavedSearxngBaseUrl] = useState<string | null>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [ctxDropdownOpen, setCtxDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -70,21 +109,31 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     Promise.all([
       window.api.getConfig(),
       window.api.detectResources(),
-    ]).then(async ([cfg, detected]) => {
+      window.api.getModelFamilies(),
+    ]).then(async ([cfg, detected, fams]) => {
       const gpuMode = cfg.gpuMode ?? 'single'
       const gpuIndex = cfg.gpuIndex ?? detected.gpus[0]?.index ?? 0
       const v = await window.api.getModelVariants({ gpuMode, gpuIndex })
 
       setResources(detected)
       setVariants(v)
+      setFamilies(fams)
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
-
+      const currentProvider = cfg.webSearchProvider ?? (cfg.searxngBaseUrl ? 'custom-searxng' : 'disabled')
+      setSavedWebSearchProvider(currentProvider)
+      setSavedSearxngBaseUrl(cfg.searxngBaseUrl ?? null)
+      setUseSearxngSearch(currentProvider !== 'disabled')
       const quant = pickQuantForVariants(v, cfg.lastQuant || DEFAULT_QUANT)
       setSelectedQuant(quant)
+      const activeVariant = v.find((vi: ModelVariantInfo) => vi.quant === quant)
+      const familyId = activeVariant?.family
+        ?? fams.find((f) => f.recommended)?.id
+        ?? fams[0]?.id
+        ?? ''
+      setSelectedFamilyId(familyId)
       window.api.selectModelVariant(quant).catch(() => {})
-      const variant = v.find((vi: ModelVariantInfo) => vi.quant === quant)
-      const max = variant?.maxCtx ?? 32768
+      const max = activeVariant?.selectableMaxCtx ?? activeVariant?.maxCtx ?? 32768
       if (cfg.ctxSize && cfg.ctxSize > 0) {
         setSelectedCtx(Math.min(cfg.ctxSize, max))
       } else {
@@ -102,12 +151,16 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
       if (ctxDropdownRef.current && !ctxDropdownRef.current.contains(e.target as Node)) {
         setCtxDropdownOpen(false)
       }
+      if (familyDropdownRef.current && !familyDropdownRef.current.contains(e.target as Node)) {
+        setFamilyDropdownOpen(false)
+      }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
   const selected = variants.find((v) => v.quant === selectedQuant)
+  const selectedFamily = families.find((f) => f.id === selectedFamilyId) ?? null
   const availableGpus = resources?.gpus ?? []
   const hasMultipleGpus = availableGpus.length > 1
   const selectedGpu = availableGpus.find((gpu) => gpu.index === selectedGpuIndex) ?? availableGpus[0] ?? null
@@ -117,14 +170,21 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     gpuIndex: number,
     preferredQuant = selectedQuant,
     preferredCtx = selectedCtx,
+    preferredFamilyId = selectedFamilyId,
   ) => {
     const nextVariants = await window.api.getModelVariants({ gpuMode, gpuIndex })
     setVariants(nextVariants)
-    const nextQuant = pickQuantForVariants(nextVariants, preferredQuant)
+    const family = families.find((f) => f.id === preferredFamilyId) ?? null
+    const nextQuant = family
+      ? pickQuantForFamily(nextVariants, family, preferredQuant)
+      : pickQuantForVariants(nextVariants, preferredQuant)
     setSelectedQuant(nextQuant)
-    window.api.selectModelVariant(nextQuant).catch(() => {})
     const nextVariant = nextVariants.find((variant) => variant.quant === nextQuant)
-    const nextMaxCtx = nextVariant?.maxCtx ?? 32768
+    if (nextVariant?.family && nextVariant.family !== preferredFamilyId) {
+      setSelectedFamilyId(nextVariant.family)
+    }
+    window.api.selectModelVariant(nextQuant).catch(() => {})
+    const nextMaxCtx = nextVariant?.selectableMaxCtx ?? nextVariant?.maxCtx ?? 32768
     const nextCtx = Math.min(preferredCtx, nextMaxCtx)
     setSelectedCtx(nextCtx)
     await window.api.saveConfig({
@@ -139,11 +199,27 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     setSelectedQuant(quant)
     setDropdownOpen(false)
     const v = variants.find((vi) => vi.quant === quant)
-    const newMax = v?.maxCtx ?? 32768
+    if (v?.family) setSelectedFamilyId(v.family)
+    const newMax = v?.selectableMaxCtx ?? v?.maxCtx ?? 32768
     const newCtx = Math.min(selectedCtx, newMax)
     setSelectedCtx(newCtx)
     await window.api.selectModelVariant(quant).catch(() => {})
     await window.api.saveConfig({ lastQuant: quant, ctxSize: newCtx }).catch(() => {})
+  }
+
+  const handleSelectFamily = async (familyId: string) => {
+    const family = families.find((f) => f.id === familyId)
+    if (!family) return
+    setSelectedFamilyId(familyId)
+    setFamilyDropdownOpen(false)
+    const nextQuant = pickQuantForFamily(variants, family, selectedQuant)
+    setSelectedQuant(nextQuant)
+    const nextVariant = variants.find((v) => v.quant === nextQuant)
+    const newMax = nextVariant?.selectableMaxCtx ?? nextVariant?.maxCtx ?? 32768
+    const newCtx = Math.min(selectedCtx, newMax)
+    setSelectedCtx(newCtx)
+    await window.api.selectModelVariant(nextQuant).catch(() => {})
+    await window.api.saveConfig({ lastQuant: nextQuant, ctxSize: newCtx }).catch(() => {})
   }
 
   const handleSelectCtx = async (value: number) => {
@@ -181,40 +257,62 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     setStartTime(Date.now())
 
     try {
+      const nextWebSearchProvider: WebSearchProvider = useSearxngSearch
+        ? (savedWebSearchProvider === 'custom-searxng' && savedSearxngBaseUrl ? 'custom-searxng' : 'managed-searxng')
+        : 'disabled'
+
       await window.api.saveConfig({
         lastQuant: selectedQuant,
         ctxSize: selectedCtx,
         gpuMode: selectedGpuMode,
         gpuIndex: selectedGpuIndex,
+        webSearchProvider: nextWebSearchProvider,
       })
 
       if (!status?.llamaReady) {
-        addLog('\u{1F50D} Определение оптимального бинарника для вашей системы…')
+        addLog(L ? '\u{1F50D} Определение оптимального бинарника для вашей системы…' : '\u{1F50D} Detecting optimal binary for your system…')
         await window.api.ensureLlama()
-        addLog('\u2705 llama-server установлен!')
+        addLog(L ? '\u2705 llama-server установлен!' : '\u2705 llama-server installed!')
       } else {
-        addLog('\u2705 llama-server уже установлен — пропускаем')
+        addLog(L ? '\u2705 llama-server уже установлен — пропускаем' : '\u2705 llama-server already installed — skipping')
+      }
+
+      if (useSearxngSearch) {
+        setPhase('search')
+        if (nextWebSearchProvider === 'managed-searxng') {
+          addLog(L ? '\u{1F50D} Подготавливаем локальный SearXNG через Docker…' : '\u{1F50D} Preparing local SearXNG via Docker…')
+        } else {
+          addLog(L ? '\u{1F50D} Проверяем доступность внешнего SearXNG…' : '\u{1F50D} Checking external SearXNG availability…')
+        }
+        const webSearchStatus = await window.api.ensureWebSearch({
+          webSearchProvider: nextWebSearchProvider,
+          searxngBaseUrl: savedSearxngBaseUrl,
+        })
+        addLog(L ? `\u2705 Web search готов: ${webSearchStatus.effectiveBaseUrl ?? webSearchStatus.detail}` : `\u2705 Web search ready: ${webSearchStatus.effectiveBaseUrl ?? webSearchStatus.detail}`)
       }
 
       setPhase('downloading')
-      if (!status?.modelDownloaded) {
-        addLog(`\u{1F4E5} Начинаем скачивание модели (${selectedQuant})…`)
+      // Re-query status for the CURRENTLY selected variant (user may have
+      // switched model family after the initial status was computed).
+      const freshStatus = await window.api.getStatus().catch(() => null)
+      if (!freshStatus?.modelDownloaded) {
+        addLog(L ? `\u{1F4E5} Начинаем скачивание модели (${selectedFamily?.label ?? ''} · ${displayQuant(selectedQuant)})…` : `\u{1F4E5} Starting model download (${selectedFamily?.label ?? ''} · ${displayQuant(selectedQuant)})…`)
         const modelPath = await window.api.downloadModel()
-        addLog(`\u2705 Модель скачана: ${modelPath.split(/[\\/]/).pop()}`)
+        addLog(L ? `\u2705 Модель скачана: ${modelPath.split(/[\\/]/).pop()}` : `\u2705 Model downloaded: ${modelPath.split(/[\\/]/).pop()}`)
       } else {
-        addLog('\u2705 Модель уже скачана — пропускаем')
+        addLog(L ? '\u2705 Модель уже скачана — пропускаем' : '\u2705 Model already downloaded — skipping')
       }
 
       setPhase('starting')
-      addLog('\u{1F680} Запускаем llama-server…')
+      addLog(L ? '\u{1F680} Запускаем llama-server…' : '\u{1F680} Starting llama-server…')
       await window.api.startServer()
-      addLog('\u2705 Сервер запущен и готов к работе!')
+      addLog(L ? '\u2705 Сервер запущен и готов к работе!' : '\u2705 Server started and ready!')
 
       setPhase('done')
     } catch (e: any) {
       const msg = e.message ?? String(e)
       setError(msg)
-      addLog(`\u274C Ошибка: ${msg}`)
+      addLog(L ? `\u274C Ошибка: ${msg}` : `\u274C Error: ${msg}`)
       setPhase('error')
     }
   }
@@ -222,13 +320,14 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0
   const elapsedStr = elapsed > 0 ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}` : ''
 
-  const selectedSize = selected ? formatSize(selected.sizeMb) : '~20 ГБ'
+  const selectedSize = selected ? formatSize(selected.sizeMb, appLanguage) : (L ? '~20 ГБ' : '~20 GB')
   const maxCtx = selected?.maxCtx ?? 262144
+  const selectableMaxCtx = selected?.selectableMaxCtx ?? maxCtx
   const displayCtx = formatCtx(selectedCtx)
-  const availableCtxOptions = CTX_OPTIONS.filter((o) => o.value <= maxCtx)
+  const availableCtxOptions = CTX_OPTIONS.filter((o) => o.value <= selectableMaxCtx)
   const gpuSummary = hasMultipleGpus
     ? selectedGpuMode === 'split'
-      ? 'все GPU'
+      ? (L ? 'все GPU' : 'all GPUs')
       : selectedGpu
         ? `GPU ${selectedGpu.index}`
         : 'GPU'
@@ -239,27 +338,39 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
   const steps = [
     {
       key: 'install',
-      label: 'Скачивание llama-server',
-      desc: 'Готовый бинарник с GitHub Releases (~30–200 МБ)',
+      label: L ? 'Скачивание llama-server' : 'Downloading llama-server',
+      desc: L ? 'Готовый бинарник с GitHub Releases (~30–200 МБ)' : 'Pre-built binary from GitHub Releases (~30–200 MB)',
       active: phase === 'installing',
       done: phase !== 'idle' && phase !== 'installing' && phase !== 'error',
       detail: phase === 'installing' ? buildStatus : null,
     },
+    ...(useSearxngSearch ? [{
+      key: 'search',
+      label: savedWebSearchProvider === 'custom-searxng' && savedSearxngBaseUrl
+        ? (L ? 'Проверка SearXNG' : 'Checking SearXNG')
+        : (L ? 'Установка SearXNG' : 'Installing SearXNG'),
+      desc: savedWebSearchProvider === 'custom-searxng' && savedSearxngBaseUrl
+        ? (L ? `Проверка внешнего backend (${savedSearxngBaseUrl})` : `Checking external backend (${savedSearxngBaseUrl})`)
+        : (L ? 'Локальный managed SearXNG через Docker' : 'Local managed SearXNG via Docker'),
+      active: phase === 'search',
+      done: ['downloading', 'starting', 'done'].includes(phase),
+      detail: phase === 'search' ? (L ? 'Подготовка web search backend…' : 'Preparing web search backend…') : null,
+    }] : []),
     {
       key: 'download',
-      label: 'Скачивание модели',
-      desc: `Qwen3.5-${selectedQuant.startsWith('9B-') ? '9B' : '35B-A3B'} · ${selectedQuant.replace(/^9B-/, '').replace('UD-', '')} (~${selectedSize}) · ctx ${displayCtx}`,
+      label: L ? 'Скачивание модели' : 'Downloading model',
+      desc: `${selectedFamily?.label ?? 'Qwen'} · ${displayQuant(selectedQuant)} (~${selectedSize}) · ctx ${displayCtx}`,
       active: phase === 'downloading',
       done: ['starting', 'done'].includes(phase),
       detail: phase === 'downloading' ? downloadProgress?.status : null,
     },
     {
       key: 'server',
-      label: 'Запуск inference-сервера',
-      desc: 'Загрузка модели в VRAM и старт API',
+      label: L ? 'Запуск inference-сервера' : 'Starting inference server',
+      desc: L ? 'Загрузка модели в VRAM и старт API' : 'Loading model into VRAM and starting API',
       active: phase === 'starting',
       done: phase === 'done',
-      detail: phase === 'starting' ? (buildStatus ?? 'Ожидание готовности…') : null,
+      detail: phase === 'starting' ? (buildStatus ?? (L ? 'Ожидание готовности…' : 'Waiting for readiness…')) : null,
     },
   ]
 
@@ -269,19 +380,34 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
     <div className="flex-1 flex items-center justify-center p-6 overflow-y-auto">
       <div className="max-w-2xl w-full">
 
+        {/* Language toggle */}
+        <div className="flex justify-end gap-2 mb-3">
+          <button
+            onClick={() => onLanguageChange?.('ru')}
+            className={`px-2.5 py-1 text-xs rounded-lg border transition-colors cursor-pointer ${appLanguage === 'ru' ? 'border-blue-500/50 bg-blue-500/10 text-blue-400' : 'border-zinc-700 text-zinc-500 hover:border-zinc-500'}`}
+          >
+            RU
+          </button>
+          <button
+            onClick={() => onLanguageChange?.('en')}
+            className={`px-2.5 py-1 text-xs rounded-lg border transition-colors cursor-pointer ${appLanguage === 'en' ? 'border-blue-500/50 bg-blue-500/10 text-blue-400' : 'border-zinc-700 text-zinc-500 hover:border-zinc-500'}`}
+          >
+            EN
+          </button>
+        </div>
+
         {/* Header */}
         <div className="text-center mb-8">
           <div className="text-6xl mb-3">{'⚡'}</div>
           <h1 className="text-3xl font-bold text-zinc-100 mb-2">One-Click Coding Agent</h1>
           <p className="text-zinc-400">
-            Qwen3.5 <span className="text-zinc-500">{'·'}</span>{' '}
-            <span className="text-zinc-300">{selectedQuant.replace(/^9B-/, '').replace('UD-', '')}</span>{' '}
+            <span className="text-zinc-300">{selectedFamily?.label ?? 'Qwen'}</span>{' '}
             <span className="text-zinc-500">{'·'}</span>{' '}
-            {selectedQuant.startsWith('9B-') ? '9B' : '35B-A3B'}{' '}
+            <span className="text-zinc-300">{displayQuant(selectedQuant)}</span>{' '}
             <span className="text-zinc-500">{'·'}</span>{' '}
-            ctx {displayCtx}{' '}
-            {gpuSummary && <><span className="text-zinc-500">{'·'}</span> {gpuSummary}{' '}</>}
-            <span className="text-zinc-500">{'·'}</span> llama.cpp
+            ctx {displayCtx}
+            {gpuSummary && <><span className="text-zinc-500">{' · '}</span>{gpuSummary}</>}
+            <span className="text-zinc-500">{'·'}</span> {L ? 'локально через llama.cpp' : 'local via llama.cpp'}
           </p>
         </div>
 
@@ -323,7 +449,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                 {step.key === 'download' && step.active && downloadProgress && downloadProgress.totalMb > 0 && (
                   <div className="mt-3">
                     <div className="flex justify-between text-xs text-zinc-500 mb-1">
-                      <span>{downloadProgress.downloadedMb.toLocaleString()} / {downloadProgress.totalMb.toLocaleString()} МБ</span>
+                      <span>{downloadProgress.downloadedMb.toLocaleString()} / {downloadProgress.totalMb.toLocaleString()} {L ? 'МБ' : 'MB'}</span>
                       <span>{downloadProgress.percent.toFixed(1)}%</span>
                     </div>
                     <div className="w-full h-2.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -338,14 +464,21 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                 {step.key === 'install' && step.active && (
                   <div className="mt-2 flex items-center gap-2">
                     <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-xs text-zinc-500">Обычно это занимает менее минуты…</span>
+                    <span className="text-xs text-zinc-500">{L ? 'Обычно это занимает менее минуты…' : 'This usually takes less than a minute…'}</span>
+                  </div>
+                )}
+
+                {step.key === 'search' && step.active && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs text-zinc-500">{L ? 'Поднимаем и проверяем backend web search…' : 'Starting and verifying web search backend…'}</span>
                   </div>
                 )}
 
                 {step.key === 'server' && step.active && (
                   <div className="mt-2 flex items-center gap-2">
                     <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-xs text-zinc-500">Загрузка модели в память…</span>
+                    <span className="text-xs text-zinc-500">{L ? 'Загрузка модели в память…' : 'Loading model into memory…'}</span>
                   </div>
                 )}
               </div>
@@ -356,7 +489,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
         {/* Error */}
         {error && (
           <div className="mb-4 px-4 py-3 bg-red-500/10 border border-red-500/30 rounded-xl text-sm text-red-400">
-            <span className="font-semibold">Ошибка:</span> {error}
+            <span className="font-semibold">{L ? 'Ошибка:' : 'Error:'}</span> {error}
           </div>
         )}
 
@@ -364,7 +497,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
         {logs.length > 0 && (
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">Лог</span>
+              <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">{L ? 'Лог' : 'Log'}</span>
               {elapsedStr && <span className="text-xs text-zinc-600 font-mono">{elapsedStr}</span>}
             </div>
             <div
@@ -399,9 +532,9 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
               <div className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
                 <div className="flex items-center justify-between gap-3 mb-3">
                   <div>
-                    <div className="text-sm font-medium text-zinc-200">Запуск на GPU</div>
+                    <div className="text-sm font-medium text-zinc-200">{L ? 'Запуск на GPU' : 'Run on GPU'}</div>
                     <div className="text-[11px] text-zinc-500 mt-0.5">
-                      Выбери, на какой видеокарте запускать `llama.cpp`
+                      {L ? 'Выбери, на какой видеокарте запускать `llama.cpp`' : 'Choose which GPU to run `llama.cpp` on'}
                     </div>
                   </div>
                   <div className="text-[10px] px-2 py-1 rounded-lg bg-zinc-800 text-zinc-400">
@@ -426,7 +559,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                           : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
                       }`}
                     >
-                      Одна GPU
+                      {L ? 'Одна GPU' : 'Single GPU'}
                     </button>
                     <button
                       onClick={async () => {
@@ -439,7 +572,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                           : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
                       }`}
                     >
-                      Все GPU
+                      {L ? 'Все GPU' : 'All GPUs'}
                     </button>
                   </div>
                 )}
@@ -464,20 +597,79 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                           {selectedGpuIndex === gpu.index && <span className="text-blue-400 text-sm">✓</span>}
                         </div>
                         <div className="text-[11px] text-zinc-500 mt-1">
-                          Свободно {formatSize(gpu.vramFreeMb)} из {formatSize(gpu.vramTotalMb)}
+                          {L ? 'Свободно' : 'Free'} {formatSize(gpu.vramFreeMb, appLanguage)} {L ? 'из' : 'of'} {formatSize(gpu.vramTotalMb, appLanguage)}
                         </div>
                       </button>
                     ))}
                   </div>
                 ) : (
                   <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
-                    Будут использованы все доступные GPU. Этот режим может быть быстрее, но стабильность зависит от драйвера и backend `llama.cpp`.
+                    {L ? 'Будут использованы все доступные GPU. Этот режим может быть быстрее, но стабильность зависит от драйвера и backend `llama.cpp`.' : 'All available GPUs will be used. This mode may be faster, but stability depends on the driver and `llama.cpp` backend.'}
                   </div>
                 )}
               </div>
             )}
 
-            <div className="flex gap-3 items-stretch">
+            <div className="flex gap-3 items-stretch flex-wrap">
+              {/* Model family dropdown */}
+              <div ref={familyDropdownRef} className="relative">
+                <button
+                  onClick={() => setFamilyDropdownOpen((o) => !o)}
+                  className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[180px]"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-zinc-200 font-medium truncate">
+                      {selectedFamily?.label ?? (L ? 'Модель' : 'Model')}
+                    </div>
+                    <div className="text-[11px] text-zinc-500 leading-tight truncate">
+                      {selectedFamily?.description ?? (L ? 'выбери семейство' : 'pick a family')}
+                    </div>
+                  </div>
+                  <svg className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${familyDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {familyDropdownOpen && families.length > 0 && (
+                  <div className="absolute bottom-full left-0 mb-2 w-[300px] rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50 z-50">
+                    <div className="px-3 py-2 border-b border-zinc-800">
+                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">{L ? 'Семейство модели' : 'Model family'}</span>
+                    </div>
+                    {families.map((fam) => {
+                      const isSel = fam.id === selectedFamilyId
+                      const famFits = variantsForFamily(variants, fam.id).some((v) => v.fits)
+                      return (
+                        <button
+                          key={fam.id}
+                          onClick={() => handleSelectFamily(fam.id)}
+                          className={`w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer ${
+                            isSel ? 'bg-blue-500/10' : 'hover:bg-zinc-800'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-zinc-200 truncate">{fam.label}</span>
+                              {fam.recommended && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium shrink-0">
+                                  {L ? 'рек.' : 'rec.'}
+                                </span>
+                              )}
+                              {!famFits && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium shrink-0">
+                                  {L ? 'мало памяти' : 'tight mem'}
+                                </span>
+                              )}
+                              {isSel && <span className="text-blue-400 shrink-0">{'\u2713'}</span>}
+                            </div>
+                            <div className="text-[11px] text-zinc-500 leading-tight mt-0.5 truncate">{fam.description}</div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* Variant dropdown */}
               <div ref={dropdownRef} className="relative">
                 <button
@@ -485,7 +677,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                   className="h-full px-4 rounded-xl border border-zinc-700 bg-zinc-900 hover:border-zinc-500 text-left transition-colors cursor-pointer flex items-center gap-3 min-w-[180px]"
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-zinc-200 font-medium truncate">{selectedQuant.replace(/^9B-/, '').replace('UD-', '')}{selectedQuant.startsWith('9B-') ? ' (9B)' : ' (35B)'}</div>
+                    <div className="text-sm text-zinc-200 font-medium truncate">{displayQuant(selectedQuant) || (L ? 'квант' : 'quant')}</div>
                     <div className="text-[11px] text-zinc-500 leading-tight">
                       {selectedSize}
                     </div>
@@ -495,21 +687,14 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                   </svg>
                 </button>
 
-                {dropdownOpen && variants.length > 0 && (
+                {dropdownOpen && variantsForFamily(variants, selectedFamilyId).length > 0 && (
                   <div className="absolute bottom-full left-0 mb-2 w-[340px] max-h-[400px] overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50 z-50">
                     <div className="px-3 py-2 border-b border-zinc-800">
-                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Квантизация модели</span>
+                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">{L ? 'Квантизация модели' : 'Model quantization'}</span>
                     </div>
-                    {[
-                      { title: 'Qwen3.5-9B', items: variants.filter((v) => v.quant.startsWith('9B-')) },
-                      { title: 'Qwen3.5-35B-A3B', items: variants.filter((v) => !v.quant.startsWith('9B-')) },
-                    ].map((g) => g.items.length === 0 ? null : (
-                      <div key={g.title}>
-                        <div className="px-3 pt-2 pb-1 text-[10px] text-zinc-600 uppercase tracking-wider font-semibold">{g.title}</div>
-                        {g.items.map((v) => {
+                    {variantsForFamily(variants, selectedFamilyId).map((v) => {
                           const isSel = v.quant === selectedQuant
                           const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
-                          const displayQuant = v.quant.replace(/^9B-/, '').replace('UD-', '')
                           return (
                             <button
                               key={v.quant}
@@ -529,11 +714,11 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
                                   <span className={`text-sm font-medium truncate ${v.fits ? 'text-zinc-200' : 'text-zinc-600'}`}>
-                                    {displayQuant}
+                                    {displayQuant(v.quant)}
                                   </span>
                                   {v.recommended && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium shrink-0">
-                                      рек.
+                                      {L ? 'рек.' : 'rec.'}
                                     </span>
                                   )}
                                   {isSel && (
@@ -541,16 +726,14 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                                   )}
                                 </div>
                                 <div className={`text-[11px] leading-tight mt-0.5 ${v.fits ? 'text-zinc-500' : 'text-zinc-700'}`}>
-                                  {formatSize(v.sizeMb)}
+                                  {formatSize(v.sizeMb, appLanguage)}
                                   {v.fits && <> {'\u00b7'} ctx {formatCtx(v.maxCtx)} {'\u00b7'} {v.mode === 'full_gpu' ? 'GPU' : v.mode === 'hybrid' ? 'GPU+CPU' : 'CPU'}</>}
-                                  {!v.fits && <> {'\u00b7'} не хватает памяти</>}
+                                  {!v.fits && <> {'\u00b7'} {L ? 'не хватает памяти' : 'not enough memory'}</>}
                                 </div>
                               </div>
                             </button>
                           )
                         })}
-                      </div>
-                    ))}
                   </div>
                 )}
               </div>
@@ -563,7 +746,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                 >
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-zinc-200 font-medium">{displayCtx}</div>
-                    <div className="text-[11px] text-zinc-500 leading-tight">контекст</div>
+                    <div className="text-[11px] text-zinc-500 leading-tight">{L ? 'контекст' : 'context'}</div>
                   </div>
                   <svg className={`w-3.5 h-3.5 text-zinc-500 shrink-0 transition-transform ${ctxDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -573,19 +756,50 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                 {ctxDropdownOpen && (
                   <div className="absolute bottom-full left-0 mb-2 w-[160px] rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50 z-50">
                     <div className="px-3 py-2 border-b border-zinc-800">
-                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">Контекст</span>
+                      <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-semibold">{L ? 'Контекст' : 'Context'}</span>
                     </div>
+                    {selected && (
+                      <div className="px-3 py-2 border-b border-zinc-800 text-[10px] text-zinc-500">
+                        {L ? 'Рекомендовано' : 'Recommended'}: {formatCtx(maxCtx)}
+                        {selectableMaxCtx > maxCtx && (
+                          <>
+                            <span className="text-zinc-600"> · </span>
+                            {L ? 'Доступно с offload' : 'Available with offload'}: {formatCtx(selectableMaxCtx)}
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {selected && selected.fullGpuMaxCtx > 0 && selected.fullGpuMaxCtx < selectableMaxCtx && (
+                      <div className="px-3 py-2 border-b border-zinc-800 text-[10px] text-zinc-500">
+                        <span className="text-blue-400">{L ? 'Синий' : 'Blue'}</span> GPU
+                        <span className="text-zinc-600"> · </span>
+                        <span className="text-amber-400">{L ? 'Янтарный' : 'Amber'}</span> GPU+CPU
+                      </div>
+                    )}
                     {availableCtxOptions.map((opt) => (
+                      (() => {
+                        const fullGpu = isFullGpuCtx(opt.value, selected)
+                        const isSelected = selectedCtx === opt.value
+                        return (
                       <button
                         key={opt.value}
                         onClick={() => handleSelectCtx(opt.value)}
                         className={`w-full text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
-                          selectedCtx === opt.value ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-300 hover:bg-zinc-800'
+                          isSelected
+                            ? fullGpu
+                              ? 'bg-blue-500/10 text-blue-400'
+                              : 'bg-amber-500/10 text-amber-400'
+                            : fullGpu
+                              ? 'text-zinc-300 hover:bg-zinc-800'
+                              : 'text-amber-300 hover:bg-zinc-800'
                         }`}
                       >
                         {opt.label}
-                        {selectedCtx === opt.value && <span className="ml-2 text-blue-400">{'\u2713'}</span>}
+                        {!fullGpu && <span className="ml-2 text-[10px] opacity-80">GPU+CPU</span>}
+                        {isSelected && <span className={`ml-2 ${fullGpu ? 'text-blue-400' : 'text-amber-400'}`}>{'\u2713'}</span>}
                       </button>
+                        )
+                      })()
                     ))}
                   </div>
                 )}
@@ -596,14 +810,28 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
                 onClick={handleStart}
                 className="flex-1 py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 transition-all cursor-pointer active:scale-[0.98]"
               >
-                {'\u{1F680}'} Запустить
+                {'\u{1F680}'} {L ? 'Запустить' : 'Launch'}
               </button>
             </div>
+            <label className="mt-4 flex items-start gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 cursor-pointer hover:border-zinc-700 transition-colors">
+              <input
+                type="checkbox"
+                checked={useSearxngSearch}
+                onChange={(e) => setUseSearxngSearch(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-blue-500 accent-blue-500"
+              />
+              <div>
+                <div className="text-sm font-medium text-zinc-200">{L ? 'Использовать web search через SearXNG' : 'Use web search via SearXNG'}</div>
+                <div className="text-[11px] text-zinc-500 mt-1">
+                  {L ? 'Если включено, агент получит `search_web`. Для первого запуска будет использоваться локальный managed `SearXNG`, а если у тебя уже сохранен свой URL, он останется использоваться.' : 'When enabled, the agent gets `search_web`. On first launch a local managed `SearXNG` is used; if you already have a saved URL, it will continue to be used.'}
+                </div>
+              </div>
+            </label>
             <button
               onClick={onComplete}
               className="w-full mt-3 py-2.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
             >
-              Пропустить (если всё уже настроено)
+              {L ? 'Пропустить (если всё уже настроено)' : 'Skip (if already configured)'}
             </button>
           </div>
         )}
@@ -613,7 +841,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
             onClick={onComplete}
             className="w-full py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 transition-all cursor-pointer active:scale-[0.98]"
           >
-            {'\u2728'} Начать работу
+            {'\u2728'} {L ? 'Начать работу' : 'Get started'}
           </button>
         )}
 
@@ -623,20 +851,20 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete 
               onClick={handleStart}
               className="flex-1 py-3 rounded-xl font-semibold text-sm bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer"
             >
-              {'\u{1F504}'} Попробовать снова
+              {'\u{1F504}'} {L ? 'Попробовать снова' : 'Try again'}
             </button>
             <button
               onClick={onComplete}
               className="flex-1 py-3 rounded-xl font-semibold text-sm bg-zinc-800 border border-zinc-700 hover:border-zinc-500 text-zinc-300 transition-colors cursor-pointer"
             >
-              Пропустить
+              {L ? 'Пропустить' : 'Skip'}
             </button>
           </div>
         )}
 
         {isRunning && (
           <div className="text-center text-xs text-zinc-600 mt-4">
-            Не закрывай окно. {elapsedStr && `Прошло: ${elapsedStr}`}
+            {L ? 'Не закрывай окно.' : "Don't close this window."} {elapsedStr && (L ? `Прошло: ${elapsedStr}` : `Elapsed: ${elapsedStr}`)}
           </div>
         )}
       </div>

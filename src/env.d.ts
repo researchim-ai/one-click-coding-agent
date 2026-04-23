@@ -6,7 +6,16 @@ interface ElectronAPI {
   getModelVariants(
     override?: Pick<import('../electron/config').AppConfig, 'gpuMode' | 'gpuIndex'>
   ): Promise<import('../electron/types').ModelVariantInfo[]>
+  getModelFamilies(): Promise<import('../electron/types').ModelFamily[]>
   selectModelVariant(quant: string): Promise<void>
+  getWebSearchStatus(
+    override?: Partial<import('../electron/config').AppConfig>
+  ): Promise<import('../electron/types').WebSearchStatus>
+  ensureWebSearch(
+    override?: Partial<import('../electron/config').AppConfig>
+  ): Promise<import('../electron/types').WebSearchStatus>
+  setAppLanguage(lang: 'ru' | 'en'): Promise<import('../electron/config').AppConfig>
+  openExternalUrl(url: string): Promise<boolean>
   getConfig(): Promise<import('../electron/config').AppConfig>
   saveConfig(partial: Partial<import('../electron/config').AppConfig>): Promise<import('../electron/config').AppConfig>
   getTools(): Promise<import('../electron/types').ToolInfo[]>
@@ -59,6 +68,7 @@ interface ElectronAPI {
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void
   onMenuAction(cb: (action: string, payload?: unknown) => void): () => void
+  onAppLanguageChanged(cb: (lang: 'ru' | 'en') => void): () => void
   onWorkspaceFilesChanged(cb: () => void): () => void
 
   // Window controls

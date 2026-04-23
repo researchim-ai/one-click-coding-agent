@@ -5,7 +5,14 @@ contextBridge.exposeInMainWorld('api', {
   getStatus: (): Promise<AppStatus> => ipcRenderer.invoke('get-status'),
   detectResources: (): Promise<SystemResources> => ipcRenderer.invoke('detect-resources'),
   getModelVariants: (override?: any): Promise<any[]> => ipcRenderer.invoke('get-model-variants', override),
+  getModelFamilies: (): Promise<any[]> => ipcRenderer.invoke('get-model-families'),
   selectModelVariant: (quant: string): Promise<void> => ipcRenderer.invoke('select-model-variant', quant),
+  getWebSearchStatus: (override?: any): Promise<import('./types').WebSearchStatus> =>
+    ipcRenderer.invoke('get-web-search-status', override),
+  ensureWebSearch: (override?: any): Promise<import('./types').WebSearchStatus> =>
+    ipcRenderer.invoke('ensure-web-search', override),
+  setAppLanguage: (lang: 'ru' | 'en'): Promise<any> => ipcRenderer.invoke('set-app-language', lang),
+  openExternalUrl: (url: string): Promise<boolean> => ipcRenderer.invoke('open-external-url', url),
   getConfig: (): Promise<any> => ipcRenderer.invoke('get-config'),
   saveConfig: (partial: any): Promise<any> => ipcRenderer.invoke('save-config', partial),
   getTools: (): Promise<any[]> => ipcRenderer.invoke('get-tools'),
@@ -69,6 +76,11 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_: any, action: string, payload?: unknown) => cb(action, payload)
     ipcRenderer.on('menu-action', listener)
     return () => { ipcRenderer.removeListener('menu-action', listener) }
+  },
+  onAppLanguageChanged: (cb: (lang: 'ru' | 'en') => void) => {
+    const listener = (_: any, lang: 'ru' | 'en') => cb(lang)
+    ipcRenderer.on('app-language-changed', listener)
+    return () => { ipcRenderer.removeListener('app-language-changed', listener) }
   },
   onWorkspaceFilesChanged: (cb: () => void) => {
     const listener = () => cb()

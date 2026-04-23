@@ -28,6 +28,7 @@ interface Props {
   expandToPath?: string | null
   /** Path of the currently active file in the editor (for highlighting in tree). */
   activeFilePath?: string | null
+  appLanguage?: 'ru' | 'en'
 }
 
 interface CtxMenuState {
@@ -111,6 +112,7 @@ function TreeNode({
   expandedPaths,
   setExpandedPaths,
   activeFilePath,
+  appLanguage = 'ru',
 }: {
   entry: FileTreeEntry
   depth: number
@@ -127,8 +129,11 @@ function TreeNode({
   expandedPaths: Set<string>
   setExpandedPaths: (fn: (prev: Set<string>) => Set<string>) => void
   activeFilePath?: string | null
+  appLanguage?: 'ru' | 'en'
 }) {
-  const isExpanded = expandedPaths.has(entry.path) || depth < 1
+  const L = appLanguage
+  const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
+  const isExpanded = expandedPaths.has(entry.path)
   const setExpanded = (exp: boolean) => setExpandedPaths((prev) => {
     const next = new Set(prev)
     if (exp) next.add(entry.path)
@@ -172,7 +177,7 @@ function TreeNode({
     return (
       <InlineInput
         depth={depth}
-        placeholder="новое имя…"
+        placeholder={t('новое имя…', 'new name…')}
         defaultValue={entry.name}
         onSubmit={onRenameSubmit}
         onCancel={onRenameCancel}
@@ -221,12 +226,12 @@ function TreeNode({
           <button
             onClick={(e) => { e.stopPropagation(); setExpanded(true); setCreating('file') }}
             className="w-4 h-4 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-500 hover:text-zinc-200 cursor-pointer text-[10px]"
-            title="Новый файл"
+            title={t('Новый файл', 'New file')}
           >+</button>
           <button
             onClick={(e) => { e.stopPropagation(); setExpanded(true); setCreating('dir') }}
             className="w-4 h-4 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-500 hover:text-zinc-200 cursor-pointer text-[9px]"
-            title="Новая папка"
+            title={t('Новая папка', 'New folder')}
           >📁</button>
         </div>
       </div>
@@ -235,7 +240,7 @@ function TreeNode({
           {isCtxCreateTarget && (
             <InlineInput
               depth={depth + 1}
-              placeholder={ctxCreateAt.type === 'dir' ? 'имя папки…' : 'имя файла…'}
+              placeholder={ctxCreateAt.type === 'dir' ? t('имя папки…', 'folder name…') : t('имя файла…', 'file name…')}
               onSubmit={onCtxCreateSubmit}
               onCancel={onCtxCreateCancel}
             />
@@ -243,7 +248,7 @@ function TreeNode({
           {creating && (
             <InlineInput
               depth={depth + 1}
-              placeholder={creating === 'dir' ? 'имя папки…' : 'имя файла…'}
+              placeholder={creating === 'dir' ? t('имя папки…', 'folder name…') : t('имя файла…', 'file name…')}
               onSubmit={handleCreate}
               onCancel={() => setCreating(null)}
             />
@@ -266,6 +271,7 @@ function TreeNode({
               expandedPaths={expandedPaths}
               setExpandedPaths={setExpandedPaths}
               activeFilePath={activeFilePath}
+              appLanguage={appLanguage}
             />
           ))}
         </>
@@ -274,7 +280,9 @@ function TreeNode({
   )
 }
 
-export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat, onOpenDiff, expandToPath, activeFilePath }: Props) {
+export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onFileClick, serverOnline, onReset, onOpenTerminalAt, onAttachToChat, onOpenDiff, expandToPath, activeFilePath, appLanguage = 'ru' }: Props) {
+  const L = appLanguage
+  const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const [tree, setTree] = useState<FileTreeEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [creatingRoot, setCreatingRoot] = useState<'file' | 'dir' | null>(null)
@@ -445,8 +453,8 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   }
 
   const handleDelete = async (entry: FileTreeEntry) => {
-    const label = entry.isDir ? 'папку' : 'файл'
-    if (!confirm(`Удалить ${label} "${entry.name}"?`)) return
+    const label = entry.isDir ? t('папку', 'folder') : t('файл', 'file')
+    if (!confirm(L === 'ru' ? `Удалить ${label} "${entry.name}"?` : `Delete ${label} "${entry.name}"?`)) return
     try {
       await window.api.deletePath(entry.path)
     } catch (e) {
@@ -473,13 +481,13 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
 
     if (!entry.isDir) {
       items.push({
-        label: 'Открыть',
+        label: t('Открыть', 'Open'),
         icon: '📄',
         action: () => onFileClick(entry.path),
       })
       if (onAttachToChat) {
         items.push({
-          label: 'Прикрепить к чату (@)',
+          label: t('Прикрепить к чату (@)', 'Attach to chat (@)'),
           icon: '💬',
           action: () => onAttachToChat(entry.path),
         })
@@ -489,18 +497,18 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
 
     if (entry.isDir) {
       items.push({
-        label: 'Новый файл…',
+        label: t('Новый файл…', 'New file…'),
         icon: '+',
         action: () => setCtxCreateAt({ dirPath: entry.path, type: 'file' }),
       })
       items.push({
-        label: 'Новая папка…',
+        label: t('Новая папка…', 'New folder…'),
         icon: '📁',
         action: () => setCtxCreateAt({ dirPath: entry.path, type: 'dir' }),
       })
       if (onOpenTerminalAt) {
         items.push({
-          label: 'Открыть терминал здесь',
+          label: t('Открыть терминал здесь', 'Open terminal here'),
           icon: '▸',
           action: () => onOpenTerminalAt(entry.path),
         })
@@ -509,17 +517,17 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     }
 
     items.push({
-      label: 'Копировать путь',
+      label: t('Копировать путь', 'Copy path'),
       icon: '📋',
       action: () => window.api.copyToClipboard(entry.path),
     })
     items.push({
-      label: 'Копировать относительный путь',
+      label: t('Копировать относительный путь', 'Copy relative path'),
       icon: '📋',
       action: () => window.api.copyToClipboard(relPath(entry.path)),
     })
     items.push({
-      label: 'Показать в проводнике',
+      label: t('Показать в проводнике', 'Reveal in explorer'),
       icon: '📂',
       action: () => window.api.revealInExplorer(entry.path),
     })
@@ -527,7 +535,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     items.push({ label: '', separator: true, action: () => {} })
 
     items.push({
-      label: 'Переименовать',
+      label: t('Переименовать', 'Rename'),
       icon: '✏️',
       shortcut: 'F2',
       action: () => {
@@ -536,7 +544,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
       },
     })
     items.push({
-      label: 'Удалить',
+      label: t('Удалить', 'Delete'),
       icon: '🗑️',
       danger: true,
       shortcut: 'Del',
@@ -555,27 +563,27 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
         <button
           onClick={handlePickDir}
           className="flex-1 flex items-center gap-2 min-w-0 hover:text-blue-400 transition-colors cursor-pointer"
-          title={workspace || 'Открыть проект'}
+          title={workspace || t('Открыть проект', 'Open project')}
         >
           <span className="text-sm">⚡</span>
           {dirName ? (
             <span className="text-[12px] font-semibold truncate">{dirName}</span>
           ) : (
-            <span className="text-[12px] text-zinc-500">Открыть проект…</span>
+            <span className="text-[12px] text-zinc-500">{t('Открыть проект…', 'Open project…')}</span>
           )}
         </button>
         <div className="flex items-center gap-0.5 shrink-0">
           {workspace && (
             <>
-              <button onClick={() => setCreatingRoot('file')} title="Новый файл"
+              <button onClick={() => setCreatingRoot('file')} title={t('Новый файл', 'New file')}
                 className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[12px]">+</button>
-              <button onClick={() => setCreatingRoot('dir')} title="Новая папка"
+              <button onClick={() => setCreatingRoot('dir')} title={t('Новая папка', 'New folder')}
                 className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[10px]">📁</button>
             </>
           )}
-          <button onClick={onReset} title="Новый чат"
+          <button onClick={onReset} title={t('Новый чат', 'New chat')}
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[10px]">✦</button>
-          <button onClick={() => { loadTree(); loadGitStatus() }} title="Обновить"
+          <button onClick={() => { loadTree(); loadGitStatus() }} title={t('Обновить', 'Refresh')}
             className="w-6 h-6 flex items-center justify-center rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer text-[11px]">↻</button>
         </div>
       </div>
@@ -584,19 +592,19 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
       <div className="flex-1 overflow-y-auto py-1">
         {!workspace && (
           <div className="px-4 py-8 text-center">
-            <button onClick={handlePickDir} className="text-sm text-blue-400 hover:text-blue-300 transition-colors cursor-pointer">📂 Открыть проект</button>
-            <p className="text-[10px] text-zinc-600 mt-2">Выбери директорию</p>
+            <button onClick={handlePickDir} className="text-sm text-blue-400 hover:text-blue-300 transition-colors cursor-pointer">{t('📂 Открыть проект', '📂 Open project')}</button>
+            <p className="text-[10px] text-zinc-600 mt-2">{t('Выбери директорию', 'Pick a directory')}</p>
           </div>
         )}
-        {workspace && loading && <div className="px-4 py-4 text-xs text-zinc-500">Загрузка…</div>}
-        {workspace && !loading && tree.length === 0 && !creatingRoot && <div className="px-4 py-4 text-xs text-zinc-500">Пусто</div>}
+        {workspace && loading && <div className="px-4 py-4 text-xs text-zinc-500">{t('Загрузка…', 'Loading…')}</div>}
+        {workspace && !loading && tree.length === 0 && !creatingRoot && <div className="px-4 py-4 text-xs text-zinc-500">{t('Пусто', 'Empty')}</div>}
         {creatingRoot && (
-          <InlineInput depth={0} placeholder={creatingRoot === 'dir' ? 'имя папки…' : 'имя файла…'} onSubmit={handleCreateRoot} onCancel={() => setCreatingRoot(null)} />
+          <InlineInput depth={0} placeholder={creatingRoot === 'dir' ? t('имя папки…', 'folder name…') : t('имя файла…', 'file name…')} onSubmit={handleCreateRoot} onCancel={() => setCreatingRoot(null)} />
         )}
         {ctxCreateAt?.dirPath === workspace && (
           <InlineInput
             depth={0}
-            placeholder={ctxCreateAt.type === 'dir' ? 'имя папки…' : 'имя файла…'}
+            placeholder={ctxCreateAt.type === 'dir' ? t('имя папки…', 'folder name…') : t('имя файла…', 'file name…')}
             onSubmit={handleCtxCreateSubmit}
             onCancel={() => setCtxCreateAt(null)}
           />
@@ -619,6 +627,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
             expandedPaths={expandedPaths}
             setExpandedPaths={setExpandedPaths}
             activeFilePath={activeFilePath}
+            appLanguage={appLanguage}
           />
         ))}
       </div>
@@ -638,9 +647,9 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
           </button>
           {sourceControlOpen && (
             <div className="px-2 pb-2 max-h-40 overflow-y-auto">
-              {!gitStatus && <div className="text-[10px] text-zinc-600 py-1">Проверка git…</div>}
+              {!gitStatus && <div className="text-[10px] text-zinc-600 py-1">{t('Проверка git…', 'Checking git…')}</div>}
               {gitStatus && !gitStatus.isRepo && (
-                <div className="text-[10px] text-zinc-600 py-1">Не репозиторий git</div>
+                <div className="text-[10px] text-zinc-600 py-1">{t('Не репозиторий git', 'Not a git repository')}</div>
               )}
               {gitStatus?.isRepo && (
                 <>
@@ -650,7 +659,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                     </div>
                   )}
                   {gitStatus.files.length === 0 && (
-                    <div className="text-[10px] text-zinc-600 py-1">Нет изменений</div>
+                    <div className="text-[10px] text-zinc-600 py-1">{t('Нет изменений', 'No changes')}</div>
                   )}
                   {gitStatus.files.length > 0 && (
                     <div className="space-y-0.5">
@@ -686,7 +695,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                               <button
                                 type="button"
                                 className="shrink-0 opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-blue-400 cursor-pointer"
-                                title="Показать diff"
+                                title={t('Показать diff', 'Show diff')}
                                 onClick={(e) => { e.stopPropagation(); onOpenDiff(fullPath) }}
                               >
                                 ⇔
@@ -696,7 +705,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                         )
                       })}
                       {gitStatus.files.length > 50 && (
-                        <div className="text-[10px] text-zinc-600 py-0.5">+{gitStatus.files.length - 50} ещё</div>
+                        <div className="text-[10px] text-zinc-600 py-0.5">+{gitStatus.files.length - 50} {t('ещё', 'more')}</div>
                       )}
                     </div>
                   )}
@@ -710,7 +719,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
       {/* Status */}
       <div className="px-3 py-1.5 border-t border-zinc-800/60 flex items-center gap-2">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${serverOnline ? 'bg-emerald-500' : 'bg-red-500'}`} />
-        <span className="text-[10px] text-zinc-500 truncate">{serverOnline ? 'Онлайн' : 'Оффлайн'}</span>
+        <span className="text-[10px] text-zinc-500 truncate">{serverOnline ? t('Онлайн', 'Online') : t('Оффлайн', 'Offline')}</span>
       </div>
 
       {/* Context menu */}

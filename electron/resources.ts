@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
 import os from 'os'
-import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection, ModelVariant, ModelVariantInfo, GpuMode } from './types'
+import type { GpuInfo, SystemResources, ServerLaunchArgs, BinarySelection, ModelVariant, ModelVariantInfo, ModelFamily, GpuMode } from './types'
 import { readGGUFMetadata, deriveArchInfo, defaultArchInfo, type ModelArchInfo } from './gguf'
 
 export function detectGpus(): GpuInfo[] {
@@ -164,44 +164,98 @@ export function getArch(): ModelArchInfo {
 // Model variant catalog
 // ---------------------------------------------------------------------------
 
-const REPO_9B = 'unsloth/Qwen3.5-9B-GGUF'
+const REPO_9B   = 'unsloth/Qwen3.5-9B-GGUF'
+const REPO_35B  = 'unsloth/Qwen3.5-35B-A3B-GGUF'
+const REPO_36B  = 'unsloth/Qwen3.6-35B-A3B-GGUF'
+
+export const FAMILY_QWEN35_9B  = 'qwen3.5-9b'
+export const FAMILY_QWEN35_35B = 'qwen3.5-35b'
+export const FAMILY_QWEN36_35B = 'qwen3.6-35b'
+
+export const MODEL_FAMILIES: ModelFamily[] = [
+  {
+    id: FAMILY_QWEN35_9B,
+    label: 'Qwen3.5-9B',
+    description: 'Dense 9B — быстрый, помещается в 16 GB VRAM',
+    repoId: REPO_9B,
+    defaultQuant: '9B-UD-Q4_K_XL',
+    filenameTag: '9b',
+  },
+  {
+    id: FAMILY_QWEN35_35B,
+    label: 'Qwen3.5-35B-A3B',
+    description: 'MoE 35B (A3B) — баланс качества и скорости',
+    repoId: REPO_35B,
+    defaultQuant: 'UD-Q4_K_XL',
+    filenameTag: '3.5-35b',
+    recommended: true,
+  },
+  {
+    id: FAMILY_QWEN36_35B,
+    label: 'Qwen3.6-35B-A3B',
+    description: 'MoE 35B (A3B) — новая ревизия Qwen3.6',
+    repoId: REPO_36B,
+    defaultQuant: '36-UD-Q4_K_XL',
+    filenameTag: '3.6-35b',
+  },
+]
+
+export function getModelFamily(id: string): ModelFamily | null {
+  return MODEL_FAMILIES.find((f) => f.id === id) ?? null
+}
+
+export function getModelFamilyForVariant(variant: ModelVariant): ModelFamily | null {
+  return getModelFamily(variant.family)
+}
 
 export const MODEL_VARIANTS: ModelVariant[] = [
   // --- Qwen3.5-9B (dense, fast, fits on 16 GB) ---
-  { quant: '9B-UD-IQ2_XXS',  bits: 2, label: '9B  IQ2_XXS — минимальный', sizeMb: 3266,  quality: 1,  repoId: REPO_9B },
-  { quant: '9B-UD-IQ2_M',    bits: 2, label: '9B  IQ2_M',                 sizeMb: 3738,  quality: 2,  repoId: REPO_9B },
-  { quant: '9B-UD-IQ3_XXS',  bits: 3, label: '9B  IQ3_XXS',              sizeMb: 4116,  quality: 3,  repoId: REPO_9B },
-  { quant: '9B-UD-Q2_K_XL',  bits: 2, label: '9B  Q2_K_XL',              sizeMb: 4219,  quality: 3,  repoId: REPO_9B },
-  { quant: '9B-UD-Q3_K_XL',  bits: 3, label: '9B  Q3_K_XL',              sizeMb: 5171,  quality: 5,  repoId: REPO_9B },
-  { quant: '9B-UD-Q4_K_XL',  bits: 4, label: '9B  Q4_K_XL — рекоменд.',  sizeMb: 6113,  quality: 7,  repoId: REPO_9B },
-  { quant: '9B-UD-Q5_K_XL',  bits: 5, label: '9B  Q5_K_XL',              sizeMb: 6902,  quality: 8,  repoId: REPO_9B },
-  { quant: '9B-UD-Q6_K_XL',  bits: 6, label: '9B  Q6_K_XL — высокое',    sizeMb: 8971,  quality: 9,  repoId: REPO_9B },
-  { quant: '9B-UD-Q8_K_XL',  bits: 8, label: '9B  Q8_K_XL — максимум',   sizeMb: 11500, quality: 10, repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-IQ2_XXS',  bits: 2, label: '9B  IQ2_XXS — минимальный', sizeMb: 3266,  quality: 1,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-IQ2_M',    bits: 2, label: '9B  IQ2_M',                 sizeMb: 3738,  quality: 2,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-IQ3_XXS',  bits: 3, label: '9B  IQ3_XXS',              sizeMb: 4116,  quality: 3,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q2_K_XL',  bits: 2, label: '9B  Q2_K_XL',              sizeMb: 4219,  quality: 3,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q3_K_XL',  bits: 3, label: '9B  Q3_K_XL',              sizeMb: 5171,  quality: 5,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q4_K_XL',  bits: 4, label: '9B  Q4_K_XL — рекоменд.',  sizeMb: 6113,  quality: 7,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q5_K_XL',  bits: 5, label: '9B  Q5_K_XL',              sizeMb: 6902,  quality: 8,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q6_K_XL',  bits: 6, label: '9B  Q6_K_XL — высокое',    sizeMb: 8971,  quality: 9,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q8_K_XL',  bits: 8, label: '9B  Q8_K_XL — максимум',   sizeMb: 11500, quality: 10, repoId: REPO_9B },
 
   // --- Qwen3.5-35B-A3B (MoE, мощнее, нужно больше RAM) ---
-  { quant: 'UD-IQ2_XXS',     bits: 2, label: '35B IQ2_XXS — минимальный', sizeMb: 9994,  quality: 11 },
-  { quant: 'UD-Q2_K_XL',     bits: 2, label: '35B Q2_K_XL',              sizeMb: 13210, quality: 12 },
-  { quant: 'UD-IQ3_XXS',     bits: 3, label: '35B IQ3_XXS',              sizeMb: 14438, quality: 13 },
-  { quant: 'UD-IQ3_S',       bits: 3, label: '35B IQ3_S',                sizeMb: 15565, quality: 14 },
-  { quant: 'UD-Q3_K_M',      bits: 3, label: '35B Q3_K_M',               sizeMb: 17101, quality: 15 },
-  { quant: 'UD-Q3_K_XL',     bits: 3, label: '35B Q3_K_XL',              sizeMb: 17613, quality: 15 },
-  { quant: 'UD-Q4_K_M',      bits: 4, label: '35B Q4_K_M — баланс',      sizeMb: 20378, quality: 17 },
-  { quant: 'UD-Q4_K_XL',     bits: 4, label: '35B Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18 },
-  { quant: 'UD-Q5_K_XL',     bits: 5, label: '35B Q5_K_XL — высокое',     sizeMb: 25498, quality: 19 },
-  { quant: 'UD-Q6_K_XL',     bits: 6, label: '35B Q6_K_XL',              sizeMb: 31027, quality: 20 },
-  { quant: 'UD-Q8_K_XL',     bits: 8, label: '35B Q8_K_XL — максимум',    sizeMb: 39629, quality: 21 },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-IQ2_XXS',     bits: 2, label: '35B IQ2_XXS — минимальный', sizeMb: 9994,  quality: 11, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q2_K_XL',     bits: 2, label: '35B Q2_K_XL',              sizeMb: 13210, quality: 12, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-IQ3_XXS',     bits: 3, label: '35B IQ3_XXS',              sizeMb: 14438, quality: 13, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-IQ3_S',       bits: 3, label: '35B IQ3_S',                sizeMb: 15565, quality: 14, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q3_K_M',      bits: 3, label: '35B Q3_K_M',               sizeMb: 17101, quality: 15, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q3_K_XL',     bits: 3, label: '35B Q3_K_XL',              sizeMb: 17613, quality: 15, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q4_K_M',      bits: 4, label: '35B Q4_K_M — баланс',      sizeMb: 20378, quality: 17, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q4_K_XL',     bits: 4, label: '35B Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q5_K_XL',     bits: 5, label: '35B Q5_K_XL — высокое',     sizeMb: 25498, quality: 19, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q6_K_XL',     bits: 6, label: '35B Q6_K_XL',              sizeMb: 31027, quality: 20, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q8_K_XL',     bits: 8, label: '35B Q8_K_XL — максимум',    sizeMb: 39629, quality: 21, repoId: REPO_35B },
+
+  // --- Qwen3.6-35B-A3B (новая ревизия той же MoE архитектуры) ---
+  // Sizes are ~identical к соответствующим квантам Qwen3.5-35B-A3B.
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ2_XXS',  bits: 2, label: '35B 3.6 IQ2_XXS — минимальный', sizeMb: 9994,  quality: 11, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ2_M',    bits: 2, label: '35B 3.6 IQ2_M',                 sizeMb: 11600, quality: 12, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q2_K_XL',  bits: 2, label: '35B 3.6 Q2_K_XL',              sizeMb: 13210, quality: 12, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ3_XXS',  bits: 3, label: '35B 3.6 IQ3_XXS',              sizeMb: 14438, quality: 13, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ3_S',    bits: 3, label: '35B 3.6 IQ3_S',                sizeMb: 15565, quality: 14, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q3_K_M',   bits: 3, label: '35B 3.6 Q3_K_M',               sizeMb: 17101, quality: 15, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q3_K_XL',  bits: 3, label: '35B 3.6 Q3_K_XL',              sizeMb: 17613, quality: 15, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q4_K_M',   bits: 4, label: '35B 3.6 Q4_K_M — баланс',      sizeMb: 20378, quality: 17, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q4_K_XL',  bits: 4, label: '35B 3.6 Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q5_K_XL',  bits: 5, label: '35B 3.6 Q5_K_XL — высокое',     sizeMb: 25498, quality: 19, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q6_K_XL',  bits: 6, label: '35B 3.6 Q6_K_XL',              sizeMb: 31027, quality: 20, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q8_K_XL',  bits: 8, label: '35B 3.6 Q8_K_XL — максимум',    sizeMb: 39629, quality: 21, repoId: REPO_36B },
 ]
 
-// Per-layer VRAM for weight offloading (scales with model file size)
-// 35B: Q4_K_XL ≈ 21 GB, ~1.2 GB embeddings+output, 40 layers → ~500 MB/layer
-// 9B:  Q4_K_XL ≈ 6 GB, 36 layers → ~150 MB/layer
-const LAYER_REFS: Record<string, { modelMb: number; layerMb: number }> = {
-  '35b': { modelMb: 21094, layerMb: 500 },
-  '9b':  { modelMb: 6113,  layerMb: 150 },
-}
-
-function is9B(variant: ModelVariant): boolean {
-  return variant.quant.startsWith('9B-')
+// Per-layer VRAM for weight offloading (scales with model file size).
+// 35B MoE: Q4_K_XL ≈ 21 GB, ~1.2 GB embeddings+output, 40 layers → ~500 MB/layer
+// 9B dense: Q4_K_XL ≈ 6 GB, 36 layers → ~150 MB/layer
+const LAYER_REFS_BY_FAMILY: Record<string, { modelMb: number; layerMb: number }> = {
+  [FAMILY_QWEN35_9B]:  { modelMb: 6113,  layerMb: 150 },
+  [FAMILY_QWEN35_35B]: { modelMb: 21094, layerMb: 500 },
+  [FAMILY_QWEN36_35B]: { modelMb: 21094, layerMb: 500 },
 }
 
 function modelMemoryMb(variant: ModelVariant): number {
@@ -209,7 +263,7 @@ function modelMemoryMb(variant: ModelVariant): number {
 }
 
 function layerVramMb(variant: ModelVariant): number {
-  const ref = is9B(variant) ? LAYER_REFS['9b'] : LAYER_REFS['35b']
+  const ref = LAYER_REFS_BY_FAMILY[variant.family] ?? LAYER_REFS_BY_FAMILY[FAMILY_QWEN35_35B]
   return Math.round(ref.layerMb * (variant.sizeMb / ref.modelMb))
 }
 
@@ -217,6 +271,8 @@ export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
   const freeVram = res.gpus.reduce((s, g) => s + g.vramFreeMb, 0)
   const isLaptop = res.gpus.some((g) => /laptop|mobile/i.test(g.name))
   const totalMem = res.ramTotalMb + freeVram
+  const arch = getArch()
+  const kvType = { cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' }
 
   let bestFittingIdx = -1
 
@@ -230,15 +286,29 @@ export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
 
     let mode: 'cpu' | 'hybrid' | 'full_gpu' = 'cpu'
     let maxCtx = 4096
+    let selectableMaxCtx = 4096
+    let fullGpuMaxCtx = 0
 
     if (fits) {
-      const preset = selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layerMb)
+      fullGpuMaxCtx = selectFullGpuPreset(freeVram, memMb, arch, kvType, SAFE_CALC_OPTIONS)?.ctxSize ?? 0
+      const preset = selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layerMb, SAFE_CALC_OPTIONS)
+      const selectablePreset = selectPresetForTargetCtx(
+        res.ramTotalMb,
+        freeVram,
+        isLaptop,
+        memMb,
+        memMb,
+        layerMb,
+        arch.contextLength,
+        SELECTABLE_CALC_OPTIONS,
+      )
       maxCtx = preset.ctxSize
-      if (freeVram >= memMb + 2000) mode = 'full_gpu'
+      selectableMaxCtx = Math.max(maxCtx, selectablePreset.ctxSize)
+      if (fullGpuMaxCtx > 0 && maxCtx <= fullGpuMaxCtx) mode = 'full_gpu'
       else if (freeVram >= 500) mode = 'hybrid'
     }
 
-    return { ...v, fits, maxCtx, mode, recommended: false }
+    return { ...v, fits, maxCtx, selectableMaxCtx, fullGpuMaxCtx, mode, recommended: false }
   })
 
   // On small systems (RAM ≤ 16 GB and VRAM < 16 GB), prefer 9B-UD-Q4_K_XL
@@ -276,6 +346,35 @@ export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
 const RAM_OVERHEAD_MB = 3000
 const KV_SAFETY_FACTOR = 0.80
 
+interface CalcOptions {
+  gpuReserveMb: number
+  kvSafetyFactor: number
+}
+
+const SAFE_CALC_OPTIONS: CalcOptions = {
+  gpuReserveMb: 2000,
+  kvSafetyFactor: 0.80,
+}
+
+const SELECTABLE_CALC_OPTIONS: CalcOptions = {
+  gpuReserveMb: 768,
+  kvSafetyFactor: 0.92,
+}
+
+/**
+ * Extra VRAM reserved for per-graph compute/scratch buffers.
+ * Vulkan in particular grows these significantly as ctx increases — ignoring
+ * this is what causes "vk::Device::allocateMemory: ErrorOutOfDeviceMemory"
+ * at the first decode even though static model+KV math says everything fits.
+ *
+ * Empirically: on Qwen3.x 35B MoE with ctx=128K Vulkan needs ~2-3 GB extra,
+ * at 256K closer to 4 GB. Model this as a floor of 512 MB plus ~14 MB per 1K
+ * tokens of ctx.
+ */
+function computeScratchReserveMb(ctxSize: number): number {
+  return 512 + Math.ceil((ctxSize / 1024) * 14)
+}
+
 const CTX_SNAP_TARGETS = [262144, 131072, 65536, 32768, 24576, 16384, 12288, 8192, 6144, 4096]
 
 function kvLayersSplit(gpuLayersCapped: number, arch: ModelArchInfo): { kvOnGpu: number; kvOnCpu: number } {
@@ -290,19 +389,20 @@ function calcContextFromMemory(
   kvOnCpu: number,
   kvQuantized: boolean,
   arch: ModelArchInfo,
+  kvSafetyFactor: number,
 ): number {
   const bytesPerLayer = kvQuantized ? arch.kvBytesPerLayerQ8 : arch.kvBytesPerLayerF16
   let maxTokens = Infinity
 
   if (kvOnGpu > 0) {
     if (vramForKvMb <= 0) return 4096
-    const vramBytes = vramForKvMb * 1024 * 1024 * KV_SAFETY_FACTOR
+    const vramBytes = vramForKvMb * 1024 * 1024 * kvSafetyFactor
     maxTokens = Math.min(maxTokens, Math.floor(vramBytes / (kvOnGpu * bytesPerLayer)))
   }
 
   if (kvOnCpu > 0) {
     if (ramForKvMb <= 0) return 4096
-    const ramBytes = ramForKvMb * 1024 * 1024 * KV_SAFETY_FACTOR
+    const ramBytes = ramForKvMb * 1024 * 1024 * kvSafetyFactor
     maxTokens = Math.min(maxTokens, Math.floor(ramBytes / (kvOnCpu * bytesPerLayer)))
   }
 
@@ -322,6 +422,34 @@ interface Preset {
   cacheTypeV: string
 }
 
+function selectFullGpuPreset(
+  freeVramMb: number,
+  modelVramMb: number,
+  arch: ModelArchInfo,
+  kvType: { cacheTypeK: string; cacheTypeV: string },
+  options: CalcOptions = SAFE_CALC_OPTIONS,
+): Preset | null {
+  const fullGpuThreshold = modelVramMb + options.gpuReserveMb
+  if (freeVramMb < fullGpuThreshold) return null
+
+  // Fixed point: scratch budget depends on ctx, ctx depends on remaining VRAM.
+  // Start with a cheap ctx estimate (no scratch), then iterate.
+  let ctx = calcContextFromMemory(
+    Math.max(0, freeVramMb - modelVramMb - options.gpuReserveMb),
+    arch.kvLayers, 0, 0, true, arch, options.kvSafetyFactor,
+  )
+  for (let iter = 0; iter < 4; iter++) {
+    const scratch = computeScratchReserveMb(ctx)
+    const vramForKv = freeVramMb - modelVramMb - options.gpuReserveMb - scratch
+    if (vramForKv <= 0) return null
+    const newCtx = calcContextFromMemory(vramForKv, arch.kvLayers, 0, 0, true, arch, options.kvSafetyFactor)
+    if (newCtx === ctx) break
+    ctx = newCtx
+  }
+  if (ctx < 4096) return null
+  return { nGpuLayers: 999, ctxSize: ctx, flashAttn: true, ...kvType }
+}
+
 function selectPresetForSize(
   ramTotalMb: number,
   freeVramMb: number,
@@ -329,6 +457,7 @@ function selectPresetForSize(
   modelRamMb: number,
   modelVramMb: number,
   perLayerVramMb: number,
+  options: CalcOptions = SAFE_CALC_OPTIONS,
 ): Preset {
   const arch = getArch()
   // q8_0 KV cache: good balance of memory vs speed; recommended for long context (less VRAM/RAM for cache, still accurate)
@@ -345,23 +474,18 @@ function selectPresetForSize(
       return { nGpuLayers: 0, ctxSize: 4096, flashAttn: false, ...kvType }
     }
     const ramForKv = ramForModel - mmapModelMb
-    const ctx = calcContextFromMemory(0, 0, ramForKv, arch.kvLayers, true, arch)
+    const ctx = calcContextFromMemory(0, 0, ramForKv, arch.kvLayers, true, arch, options.kvSafetyFactor)
     return { nGpuLayers: 0, ctxSize: ctx, flashAttn: false, ...kvType }
   }
 
-  // Full GPU
-  const fullGpuThreshold = modelVramMb + 2000
-  if (freeVramMb >= fullGpuThreshold) {
-    const vramForKv = freeVramMb - modelVramMb
-    const ctx = calcContextFromMemory(vramForKv, arch.kvLayers, 0, 0, true, arch)
-    return { nGpuLayers: 999, ctxSize: ctx, flashAttn: true, ...kvType }
-  }
+  const fullGpuPreset = selectFullGpuPreset(freeVramMb, modelVramMb, arch, kvType, options)
+  if (fullGpuPreset) return fullGpuPreset
 
   // Hybrid: search for optimal GPU layer count that maximizes context.
-  let maxLayersOnGpu = Math.min(arch.blockCount, Math.max(0, Math.floor((freeVramMb - 2000) / perLayerVramMb)))
+  let maxLayersOnGpu = Math.min(arch.blockCount, Math.max(0, Math.floor((freeVramMb - options.gpuReserveMb) / perLayerVramMb)))
 
   if (isLaptop) {
-    maxLayersOnGpu = Math.min(maxLayersOnGpu, Math.max(0, Math.floor((freeVramMb - 3500) / (perLayerVramMb * 1.2))))
+    maxLayersOnGpu = Math.min(maxLayersOnGpu, Math.max(0, Math.floor((freeVramMb - (options.gpuReserveMb + 1500)) / (perLayerVramMb * 1.2))))
   }
 
   const layerStep = Math.max(1, Math.floor(arch.blockCount / arch.kvLayers))
@@ -375,13 +499,26 @@ function selectPresetForSize(
 
     const cpuModelRam = cpuL * perLayerCpuMb
     const ramKv = ramTotalMb - RAM_OVERHEAD_MB - cpuModelRam
-    const vramKv = freeVramMb - (gpuCapped * perLayerVramMb)
+    const vramBudget = freeVramMb - (gpuCapped * perLayerVramMb) - options.gpuReserveMb
 
-    const ctx = calcContextFromMemory(
-      Math.max(0, vramKv), kvOnGpu,
+    // Iteratively account for compute scratch (grows with ctx).
+    let ctx = calcContextFromMemory(
+      Math.max(0, vramBudget), kvOnGpu,
       Math.max(0, ramKv), kvOnCpu,
-      true, arch,
+      true, arch, options.kvSafetyFactor,
     )
+    for (let iter = 0; iter < 3; iter++) {
+      const scratch = gpuCapped > 0 ? computeScratchReserveMb(ctx) : 0
+      const vramKv = vramBudget - scratch
+      if (vramKv <= 0 && gpuCapped > 0) { ctx = 0; break }
+      const newCtx = calcContextFromMemory(
+        Math.max(0, vramKv), kvOnGpu,
+        Math.max(0, ramKv), kvOnCpu,
+        true, arch, options.kvSafetyFactor,
+      )
+      if (newCtx === ctx) break
+      ctx = newCtx
+    }
 
     if (ctx > bestCtx || (ctx === bestCtx && nGpu > bestNGpu)) {
       bestCtx = ctx
@@ -397,8 +534,66 @@ function selectPresetForSize(
   }
 }
 
+function selectPresetForTargetCtx(
+  ramTotalMb: number,
+  freeVramMb: number,
+  isLaptop: boolean,
+  modelRamMb: number,
+  modelVramMb: number,
+  perLayerVramMb: number,
+  targetCtx: number,
+  options: CalcOptions = SELECTABLE_CALC_OPTIONS,
+): Preset {
+  const arch = getArch()
+  const kvType = { cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' }
+  const clampedTarget = Math.min(targetCtx, arch.contextLength)
+  const fallback = selectPresetForSize(ramTotalMb, freeVramMb, isLaptop, modelRamMb, modelVramMb, perLayerVramMb, options)
+
+  const fullGpuPreset = selectFullGpuPreset(freeVramMb, modelVramMb, arch, kvType, options)
+  if (fullGpuPreset && fullGpuPreset.ctxSize >= clampedTarget) return fullGpuPreset
+
+  const perLayerCpuMb = Math.round(perLayerVramMb * 0.85)
+  let maxLayersOnGpu = Math.min(arch.blockCount, Math.max(0, Math.floor((freeVramMb - options.gpuReserveMb) / perLayerVramMb)))
+  if (isLaptop) {
+    maxLayersOnGpu = Math.min(maxLayersOnGpu, Math.max(0, Math.floor((freeVramMb - (options.gpuReserveMb + 1500)) / (perLayerVramMb * 1.2))))
+  }
+
+  const layerStep = Math.max(1, Math.floor(arch.blockCount / arch.kvLayers))
+  // For target ctx, scratch budget is known up front.
+  const scratchForTarget = computeScratchReserveMb(clampedTarget)
+  for (let nGpu = maxLayersOnGpu; nGpu >= 0; nGpu -= layerStep) {
+    const gpuCapped = Math.min(nGpu, arch.blockCount)
+    const cpuL = arch.blockCount - gpuCapped
+    const { kvOnGpu, kvOnCpu } = kvLayersSplit(gpuCapped, arch)
+
+    const cpuModelRam = cpuL * perLayerCpuMb
+    const ramKv = ramTotalMb - RAM_OVERHEAD_MB - cpuModelRam
+    const vramKv = freeVramMb - (gpuCapped * perLayerVramMb) - options.gpuReserveMb
+      - (gpuCapped > 0 ? scratchForTarget : 0)
+
+    const ctx = calcContextFromMemory(
+      Math.max(0, vramKv), kvOnGpu,
+      Math.max(0, ramKv), kvOnCpu,
+      true, arch, options.kvSafetyFactor,
+    )
+
+    if (ctx >= clampedTarget) {
+      return {
+        nGpuLayers: gpuCapped,
+        ctxSize: clampedTarget,
+        flashAttn: gpuCapped > 0,
+        ...kvType,
+      }
+    }
+  }
+
+  return fallback
+}
+
 function selectPreset(ramTotalMb: number, freeVramMb: number, isLaptop: boolean): Preset {
-  const defaultVariant = MODEL_VARIANTS.find((v) => v.quant === 'UD-Q4_K_XL')!
+  const defaultVariant =
+    MODEL_VARIANTS.find((v) => v.family === FAMILY_QWEN35_35B && v.quant === 'UD-Q4_K_XL')
+    ?? MODEL_VARIANTS[0]
   const memMb = modelMemoryMb(defaultVariant)
   const layMb = layerVramMb(defaultVariant)
   return selectPresetForSize(ramTotalMb, freeVramMb, isLaptop, memMb, memMb, layMb)
@@ -427,7 +622,9 @@ export function computeOptimalArgs(
     if (variant) {
       const memMb = modelMemoryMb(variant)
       const layMb = layerVramMb(variant)
-      preset = selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layMb)
+      preset = (userCtxSize && userCtxSize > 0)
+        ? selectPresetForTargetCtx(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layMb, userCtxSize, SELECTABLE_CALC_OPTIONS)
+        : selectPresetForSize(res.ramTotalMb, freeVram, isLaptop, memMb, memMb, layMb, SAFE_CALC_OPTIONS)
     } else {
       preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
     }
@@ -435,10 +632,10 @@ export function computeOptimalArgs(
     preset = selectPreset(res.ramTotalMb, freeVram, isLaptop)
   }
 
-  // Respect user's explicit choice — don't silently clamp to preset.
-  // If the server can't handle it, queryActualCtxSize() will detect the real n_ctx.
+  // Respect user's explicit choice when we can fit it by offloading more to CPU/RAM.
+  // If the server still can't handle it, queryActualCtxSize() will detect the real n_ctx.
   const ctxSize = (userCtxSize && userCtxSize > 0)
-    ? userCtxSize
+    ? Math.min(userCtxSize, preset.ctxSize)
     : preset.ctxSize
 
   return {
