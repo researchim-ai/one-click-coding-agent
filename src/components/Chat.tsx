@@ -34,6 +34,7 @@ interface Props {
   onRemoveCodeRef?: (index: number) => void
   contextUsage?: ContextUsage | null
   appLanguage?: 'ru' | 'en'
+  onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
 }
 
 export function Chat({
@@ -47,6 +48,7 @@ export function Chat({
   onRemoveCodeRef,
   contextUsage,
   appLanguage = 'ru',
+  onRestoreCheckpoint,
 }: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
@@ -275,6 +277,7 @@ export function Chat({
                   onApprove={onApproval ? (id) => onApproval(id, true) : undefined}
                   onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
                   appLanguage={L}
+                  onRestoreCheckpoint={onRestoreCheckpoint}
                 />
               </div>
             )

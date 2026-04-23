@@ -21,6 +21,7 @@ export function App() {
     sendMessage, resetChat, pollStatus, respondApproval, cancel,
     sessions, activeSessionId,
     newSession, switchToSession, removeSession,
+    restoreCheckpoint,
   } = useAgent()
 
   const {
@@ -495,6 +496,7 @@ export function App() {
                   onRemoveCodeRef={removeCodeRef}
                   contextUsage={contextUsage}
                   appLanguage={appLanguage}
+                  onRestoreCheckpoint={restoreCheckpoint}
                 />
               </div>
             )}

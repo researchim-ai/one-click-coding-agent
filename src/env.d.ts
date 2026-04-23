@@ -64,6 +64,15 @@ interface ElectronAPI {
   saveUiMessages(workspace: string, id: string, msgs: any[]): Promise<void>
   getUiMessages(workspace: string, id: string): Promise<any[]>
 
+  // Shadow-git checkpoints
+  listCheckpoints(workspace: string, limit?: number): Promise<import('../electron/types').CheckpointInfo[]>
+  restoreCheckpoint(
+    workspace: string,
+    sha: string,
+  ): Promise<{ ok: boolean; safety: import('../electron/types').CheckpointInfo | null }>
+  createCheckpoint(workspace: string, label: string): Promise<import('../electron/types').CheckpointInfo | null>
+  checkpointDiffStat(workspace: string, sha: string): Promise<string>
+
   onAgentEvent(cb: (event: import('../electron/types').AgentEvent) => void): () => void
   onDownloadProgress(cb: (progress: import('../electron/types').DownloadProgress) => void): () => void
   onBuildStatus(cb: (status: string) => void): () => void

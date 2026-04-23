@@ -28,6 +28,7 @@ import { detect, evaluateVariants, loadModelArch, getArch, applyGpuPreferences, 
 import * as modelManager from './model-manager'
 import * as serverManager from './server-manager'
 import * as config from './config'
+import * as checkpoints from './checkpoints'
 import { TOOL_DEFINITIONS } from './tools'
 import { MODEL_FAMILIES } from './resources'
 import { ensureWebSearchBackend, getWebSearchStatus } from './searxng'
@@ -964,6 +965,30 @@ function registerIpcHandlers() {
   ipcMain.handle('get-ui-messages', (_e, workspace: string, id: string) => getUiMessages(workspace, id))
 
   ipcMain.handle('get-recent-workspaces', () => recentWorkspaces.getRecentWorkspaces())
+
+  // --- Shadow-git checkpoints ---
+  // Each file-modifying tool call in the agent stamps a snapshot into a
+  // shadow repo; these IPCs let the UI list and roll back to them.
+  ipcMain.handle('checkpoints:list', (_e, workspace: string, limit?: number) => {
+    if (!workspace) return []
+    try { return checkpoints.listCheckpoints(workspace, limit ?? 200) } catch { return [] }
+  })
+  ipcMain.handle('checkpoints:restore', async (_e, workspace: string, sha: string) => {
+    if (!workspace || !sha) throw new Error('checkpoints:restore needs workspace and sha')
+    const safety = checkpoints.restoreCheckpoint(workspace, sha)
+    // The file tree on disk just changed wholesale — tell the renderer to
+    // refresh the sidebar / open files.
+    scheduleWorkspaceChangedNotify()
+    return { ok: true, safety }
+  })
+  ipcMain.handle('checkpoints:create', (_e, workspace: string, label: string) => {
+    if (!workspace) throw new Error('checkpoints:create needs workspace')
+    return checkpoints.createCheckpoint(workspace, label || 'manual checkpoint')
+  })
+  ipcMain.handle('checkpoints:diff-stat', (_e, workspace: string, sha: string) => {
+    if (!workspace || !sha) return ''
+    try { return checkpoints.checkpointDiffStat(workspace, sha) } catch { return '' }
+  })
 
   ipcMain.handle('pick-directory', async () => {
     if (!mainWindow) return null

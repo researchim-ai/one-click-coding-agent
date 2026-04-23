@@ -10,6 +10,7 @@ interface Props {
   onApprove?: (id: string) => void
   onDeny?: (id: string) => void
   appLanguage?: 'ru' | 'en'
+  onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
 }
 
 const rehypePlugins = [rehypeHighlight] as any[]
@@ -18,7 +19,7 @@ const MemoMarkdown = memo(function MemoMarkdown({ content }: { content: string }
   return <Markdown rehypePlugins={rehypePlugins}>{content}</Markdown>
 })
 
-export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, appLanguage = 'ru' }: Props) {
+export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, appLanguage = 'ru', onRestoreCheckpoint }: Props) {
   const L = appLanguage
   if (message.role === 'status') {
     return (
@@ -71,6 +72,10 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
               onApprove={onApprove}
               onDeny={onDeny}
               appLanguage={L}
+              checkpointSha={tc.checkpointSha}
+              checkpointLabel={tc.checkpointLabel}
+              checkpointRestored={tc.checkpointRestored}
+              onRestoreCheckpoint={onRestoreCheckpoint}
             />
           ))}
         </div>

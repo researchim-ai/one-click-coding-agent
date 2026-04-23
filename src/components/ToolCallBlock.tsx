@@ -9,6 +9,10 @@ interface Props {
   onApprove?: (id: string) => void
   onDeny?: (id: string) => void
   appLanguage?: 'ru' | 'en'
+  checkpointSha?: string
+  checkpointLabel?: string
+  checkpointRestored?: boolean
+  onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -43,10 +47,15 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
   }
 }
 
-export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, approvalId, approvalStatus, onApprove, onDeny, appLanguage = 'ru' }: Props) {
+export const ToolCallBlock = memo(function ToolCallBlock({
+  name, args, result, approvalId, approvalStatus, onApprove, onDeny, appLanguage = 'ru',
+  checkpointSha, checkpointLabel, checkpointRestored, onRestoreCheckpoint,
+}: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const [expanded, setExpanded] = useState(false)
+  const [restoreMenu, setRestoreMenu] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const icon = TOOL_ICONS[name] ?? '◦'
   const brief = formatArgs(name, args)
   const truncBrief = brief.length > 90 ? brief.slice(0, 87) + '…' : brief
@@ -108,6 +117,70 @@ export const ToolCallBlock = memo(function ToolCallBlock({ name, args, result, a
             }`}>
               {result}
             </pre>
+          )}
+        </div>
+      )}
+
+      {checkpointSha && !isPending && isComplete && !isError && (
+        <div className="px-2.5 py-1 bg-zinc-900/40 border-t border-zinc-800/30 flex items-center gap-2 text-[10.5px]">
+          <span className="text-zinc-600" title={checkpointLabel ?? ''}>
+            {t('снимок', 'snapshot')} <span className="font-mono text-zinc-500">{checkpointSha.slice(0, 8)}</span>
+          </span>
+          <div className="flex-1" />
+          {checkpointRestored ? (
+            <span className="text-emerald-400/80">
+              {t('восстановлено ✓', 'restored ✓')}
+            </span>
+          ) : (
+            <div className="relative">
+              <button
+                onClick={() => setRestoreMenu((v) => !v)}
+                disabled={restoring}
+                className="px-2 py-0.5 rounded bg-zinc-800/60 hover:bg-zinc-700 text-zinc-300 cursor-pointer transition-colors disabled:opacity-50"
+                title={t('Откатить к этому снимку', 'Roll back to this snapshot')}
+              >
+                {restoring ? t('откат…', 'restoring…') : t('↩ откатить', '↩ restore')}
+              </button>
+              {restoreMenu && (
+                <div className="absolute right-0 top-full mt-1 z-10 min-w-[220px] rounded-md border border-zinc-700/60 bg-zinc-900 shadow-lg py-1">
+                  <button
+                    onClick={async () => {
+                      setRestoreMenu(false)
+                      if (!onRestoreCheckpoint) return
+                      setRestoring(true)
+                      try { await onRestoreCheckpoint(checkpointSha, 'files') } finally { setRestoring(false) }
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-[11px] text-zinc-200 hover:bg-zinc-800 cursor-pointer"
+                  >
+                    {t('Только файлы', 'Files only')}
+                    <div className="text-[10px] text-zinc-500">
+                      {t('вернуть файлы, чат оставить', 'revert files, keep chat')}
+                    </div>
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setRestoreMenu(false)
+                      if (!onRestoreCheckpoint) return
+                      const ok = confirm(
+                        t(
+                          'Откатить файлы И удалить сообщения чата после этой точки?',
+                          'Revert files AND delete chat messages after this point?',
+                        ),
+                      )
+                      if (!ok) return
+                      setRestoring(true)
+                      try { await onRestoreCheckpoint(checkpointSha, 'files+task') } finally { setRestoring(false) }
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-[11px] text-zinc-200 hover:bg-zinc-800 cursor-pointer"
+                  >
+                    {t('Файлы + чат', 'Files + chat')}
+                    <div className="text-[10px] text-zinc-500">
+                      {t('откатить всё к этой точке', 'roll back everything to this point')}
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

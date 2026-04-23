@@ -101,6 +101,16 @@ contextBridge.exposeInMainWorld('api', {
   saveUiMessages: (workspace: string, id: string, msgs: any[]): Promise<void> => ipcRenderer.invoke('save-ui-messages', workspace, id, msgs),
   getUiMessages: (workspace: string, id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', workspace, id),
 
+  // Shadow-git checkpoints
+  listCheckpoints: (workspace: string, limit?: number): Promise<import('./types').CheckpointInfo[]> =>
+    ipcRenderer.invoke('checkpoints:list', workspace, limit),
+  restoreCheckpoint: (workspace: string, sha: string): Promise<{ ok: boolean; safety: import('./types').CheckpointInfo | null }> =>
+    ipcRenderer.invoke('checkpoints:restore', workspace, sha),
+  createCheckpoint: (workspace: string, label: string): Promise<import('./types').CheckpointInfo | null> =>
+    ipcRenderer.invoke('checkpoints:create', workspace, label),
+  checkpointDiffStat: (workspace: string, sha: string): Promise<string> =>
+    ipcRenderer.invoke('checkpoints:diff-stat', workspace, sha),
+
   // File operations
   createFile: (filePath: string): Promise<void> => ipcRenderer.invoke('create-file', filePath),
   createDirectory: (dirPath: string): Promise<void> => ipcRenderer.invoke('create-directory', dirPath),

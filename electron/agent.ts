@@ -1,4 +1,5 @@
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool, getBuiltinToolDefinitions } from './tools'
+import { createCheckpoint, describeToolForCheckpoint } from './checkpoints'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
 import * as crypto from 'crypto'
@@ -39,6 +40,33 @@ function debugLog(category: string, ...args: any[]) {
 
 const FILE_OPS_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'delete_file', 'create_directory'])
 const COMMAND_TOOL = 'execute_command'
+
+/** Tools that can mutate the filesystem — these trigger a checkpoint. Shell
+ *  commands are included even though many are read-only, because we can't tell
+ *  statically whether `rm -rf` is about to hit us next. */
+const CHECKPOINT_TRIGGER_TOOLS = new Set<string>([
+  ...FILE_OPS_TOOLS,
+  COMMAND_TOOL,
+])
+
+/** Take a shadow-git snapshot before a destructive tool runs, so the user
+ *  can one-click revert. Any failure is swallowed — checkpoints are a "nice
+ *  to have", never a reason to block an actual agent action. */
+function maybeCheckpoint(
+  toolName: string,
+  toolArgs: Record<string, any>,
+  workspace: string,
+): { sha: string; label: string; timestampMs: number } | undefined {
+  if (!CHECKPOINT_TRIGGER_TOOLS.has(toolName)) return undefined
+  try {
+    const cp = createCheckpoint(workspace, describeToolForCheckpoint(toolName, toolArgs))
+    if (!cp) return undefined
+    return cp
+  } catch (e: any) {
+    debugLog('CHECKPOINT', `failed before ${toolName}: ${e?.message ?? e}`)
+    return undefined
+  }
+}
 
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
@@ -2261,7 +2289,8 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
           const { name: repairName, args: repairArgs } = repair
           debugLog('TRUNCATED', `Repaired ${repairName}: path=${repairArgs.path}, chars=${(repairArgs.content ?? '').length}`)
           doEmit( { type: 'status', content: `🔧 Tool call обрезался — спасаю частичный контент (${(repairArgs.content ?? '').length} символов)…` })
-          doEmit( { type: 'tool_call', name: repairName, args: repairArgs })
+          const cpRepair = maybeCheckpoint(repairName, repairArgs, workspace)
+          doEmit( { type: 'tool_call', name: repairName, args: repairArgs, checkpoint: cpRepair })
 
           const needsApproval = needsApprovalForTool(repairName, false)
           const approved = needsApproval ? await doRequestApproval( repairName, repairArgs) : true
@@ -2331,7 +2360,8 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
         const recoveredCustomTools = doGetConfig().customTools
         for (const tc of textCalls) {
-          doEmit( { type: 'tool_call', name: tc.name, args: tc.args })
+          const cpText = maybeCheckpoint(tc.name, tc.args, workspace)
+          doEmit( { type: 'tool_call', name: tc.name, args: tc.args, checkpoint: cpText })
 
           const isCustom = recoveredCustomTools.some((ct: any) => ct.name === tc.name)
           if (needsApprovalForTool(tc.name, isCustom)) {
@@ -2470,7 +2500,8 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
         toolArgs = {}
       }
 
-      doEmit( { type: 'tool_call', name: toolName, args: toolArgs })
+      const cpNative = maybeCheckpoint(toolName, toolArgs, workspace)
+      doEmit( { type: 'tool_call', name: toolName, args: toolArgs, checkpoint: cpNative })
 
       // Track files created this turn
       if ((toolName === 'write_file' || toolName === 'append_file' || toolName === 'create_directory') && toolArgs.path) {

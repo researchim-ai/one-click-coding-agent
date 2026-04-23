@@ -8,6 +8,14 @@ export interface ToolCall {
   result?: string
   approvalId?: string
   approvalStatus?: 'pending' | 'approved' | 'denied'
+  /** Shadow-git SHA captured right BEFORE this tool ran. Presence of this
+   *  field is what enables the "Restore" button in the UI. */
+  checkpointSha?: string
+  /** Human-readable label for the snapshot (e.g. "before write_file src/App.tsx"). */
+  checkpointLabel?: string
+  /** If the user has restored to this checkpoint, we mark it so the UI can
+   *  show a subtle "restored" state instead of another button. */
+  checkpointRestored?: boolean
 }
 
 export interface StreamingFile {
@@ -266,7 +274,12 @@ export function useAgent() {
         case 'tool_call':
           assistant.toolCalls = [
             ...(assistant.toolCalls ?? []),
-            { name: ev.name ?? '', args: ev.args ?? {} },
+            {
+              name: ev.name ?? '',
+              args: ev.args ?? {},
+              checkpointSha: ev.checkpoint?.sha,
+              checkpointLabel: ev.checkpoint?.label,
+            },
           ]
           break
         case 'command_approval': {
@@ -413,6 +426,57 @@ export function useAgent() {
     await refreshSessions()
   }, [busy, workspace, activeSessionId, sessions, refreshSessions])
 
+  /**
+   * Revert the workspace files to the state captured in the given shadow-git
+   * checkpoint. If mode === 'files+task', also truncate the chat so that the
+   * conversation goes back to just before the assistant decision that made
+   * the edit — i.e. the user's previous turn is the new "tail".
+   *
+   * Safe against concurrency: we block if the agent is currently running.
+   */
+  const restoreCheckpoint = useCallback(async (sha: string, mode: 'files' | 'files+task' = 'files') => {
+    if (!workspace) throw new Error('No workspace')
+    if (busy) throw new Error('Agent is currently running — cancel first')
+    await window.api.restoreCheckpoint(workspace, sha)
+
+    setMessages((prev) => {
+      // Find the assistant message containing this SHA.
+      const idx = prev.findIndex((m) => m.toolCalls?.some((tc) => tc.checkpointSha === sha))
+      if (idx === -1) return prev
+
+      if (mode === 'files') {
+        // Mark the tool call as "restored" so the UI shows a checkmark, and
+        // drop a status bubble explaining what happened.
+        const next = prev.map((m) => {
+          if (!m.toolCalls) return m
+          const updated = m.toolCalls.map((tc) =>
+            tc.checkpointSha === sha ? { ...tc, checkpointRestored: true } : tc
+          )
+          return { ...m, toolCalls: updated }
+        })
+        next.push({ id: nextId(), role: 'status', content: `↩ Files restored to checkpoint ${sha.slice(0, 8)}` })
+        return next
+      }
+
+      // files+task: truncate messages to *before* the assistant turn that
+      // produced this edit, so the user can re-ask the question.
+      let truncateFrom = idx
+      // Walk back to include the preceding "user" message index (assistant
+      // messages are usually preceded by a user message — but status rows
+      // may intervene).
+      while (truncateFrom > 0 && prev[truncateFrom - 1].role === 'status') truncateFrom--
+      const truncated = prev.slice(0, truncateFrom)
+      truncated.push({ id: nextId(), role: 'status', content: `↩ Restored to checkpoint ${sha.slice(0, 8)} (files + chat)` })
+      return truncated
+    })
+
+    // If we truncated chat, also reset the backend session so its message
+    // buffer stays consistent with what the UI shows. Safe no-op for 'files'.
+    if (mode === 'files+task' && activeSessionId) {
+      try { await window.api.resetAgent(workspace) } catch {}
+    }
+  }, [workspace, busy, activeSessionId])
+
   const renameActiveSession = useCallback(async (title: string) => {
     if (!activeSessionId || !workspace) return
     await window.api.renameSession(workspace, activeSessionId, title)
@@ -444,5 +508,6 @@ export function useAgent() {
     sendMessage, resetChat, pollStatus, respondApproval, cancel,
     sessions, activeSessionId,
     newSession, switchToSession, removeSession, renameActiveSession,
+    restoreCheckpoint,
   }
 }

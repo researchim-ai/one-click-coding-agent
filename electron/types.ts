@@ -46,6 +46,12 @@ export interface DownloadProgress {
   status: string
 }
 
+export interface CheckpointInfo {
+  sha: string
+  label: string
+  timestampMs: number
+}
+
 export interface AgentEvent {
   type: 'status' | 'thinking' | 'tool_call' | 'tool_result' | 'response' | 'error' | 'command_approval' | 'context_usage' | 'new_turn' | 'tool_streaming' | 'stream_stats'
   content?: string
@@ -64,6 +70,11 @@ export interface AgentEvent {
   }
   /** Tokens per second from last completed stream (emitted after each LLM response). */
   tokensPerSecond?: number
+  /** Attached to `tool_call` events for file-modifying tools: the SHA of the
+   *  shadow-git commit captured right before the tool ran. The UI surfaces a
+   *  "Restore" button on the tool card that hits checkpoint:restore with this
+   *  SHA, so the user can undo an agent edit with one click. */
+  checkpoint?: CheckpointInfo
 }
 
 export interface AppStatus {
