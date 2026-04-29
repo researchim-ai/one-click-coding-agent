@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('api', {
   autoSetup: (): Promise<void> => ipcRenderer.invoke('auto-setup'),
   downloadModel: (): Promise<string> => ipcRenderer.invoke('download-model'),
   ensureLlama: (): Promise<void> => ipcRenderer.invoke('ensure-llama'),
+  getLlamaReleaseInfo: (): Promise<import('./types').LlamaReleaseInfo> =>
+    ipcRenderer.invoke('llama:get-release-info'),
+  updateLlama: (): Promise<import('./types').LlamaReleaseInfo> =>
+    ipcRenderer.invoke('llama:update'),
   startServer: (): Promise<void> => ipcRenderer.invoke('start-server'),
   stopServer: (): Promise<void> => ipcRenderer.invoke('stop-server'),
   sendMessage: (msg: string, workspace: string): Promise<string> =>
@@ -90,6 +94,10 @@ contextBridge.exposeInMainWorld('api', {
   respondApproval: (approvalId: string, approved: boolean) => {
     ipcRenderer.send('command-approval-response', approvalId, approved)
   },
+  respondHunkReview: (approvalId: string, decision: { decision: 'accept_all' | 'accept_selected' | 'reject'; selectedHunkIds?: number[] }) => {
+    ipcRenderer.send('hunk-review-response', approvalId, decision)
+  },
+  getTaskState: (workspace: string) => ipcRenderer.invoke('task-state:get', workspace),
 
   // Session management (workspace-scoped)
   createSession: (workspace: string): Promise<string> => ipcRenderer.invoke('create-session', workspace),
@@ -100,6 +108,10 @@ contextBridge.exposeInMainWorld('api', {
   getActiveSessionId: (workspace: string): Promise<string | null> => ipcRenderer.invoke('get-active-session-id', workspace),
   saveUiMessages: (workspace: string, id: string, msgs: any[]): Promise<void> => ipcRenderer.invoke('save-ui-messages', workspace, id, msgs),
   getUiMessages: (workspace: string, id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', workspace, id),
+  setSessionMode: (workspace: string, id: string, mode: import('./types').AgentMode): Promise<import('./types').AgentMode | null> =>
+    ipcRenderer.invoke('session:set-mode', workspace, id, mode),
+  savePlanArtifact: (workspace: string, id?: string, content?: string): Promise<{ path: string; content: string }> =>
+    ipcRenderer.invoke('plan:save-artifact', workspace, id, content),
 
   // Shadow-git checkpoints
   listCheckpoints: (workspace: string, limit?: number): Promise<import('./types').CheckpointInfo[]> =>
@@ -117,6 +129,20 @@ contextBridge.exposeInMainWorld('api', {
     truncated: boolean
     totalBytes: number
   }> => ipcRenderer.invoke('project-rules:info', workspace),
+
+  // /context breakdown + message pinning
+  getContextBreakdown: (workspace: string): Promise<{
+    usedTokens: number
+    budgetTokens: number
+    maxContextTokens: number
+    percent: number
+    categories: { key: string; label: string; tokens: number; messages: number }[]
+    cache: { hits: number; misses: number; size: number }
+  } | null> => ipcRenderer.invoke('context:breakdown', workspace),
+  togglePin: (workspace: string, messageId: string): Promise<{ pinned: boolean }> =>
+    ipcRenderer.invoke('context:toggle-pin', workspace, messageId),
+  getPinnedMessages: (workspace: string): Promise<string[]> =>
+    ipcRenderer.invoke('context:pinned', workspace),
 
   // MCP (Model Context Protocol) — wiring for the Settings UI.
   mcpListServers: (): Promise<import('./config').McpServerConfig[]> =>

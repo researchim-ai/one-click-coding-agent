@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback, type KeyboardEvent } from 'react'
 import { MessageBubble } from './MessageBubble'
+import { TaskStatePanel } from './TaskStatePanel'
 import type { ChatMessage } from '../hooks/useAgent'
 import {
   SLASH_COMMANDS,
@@ -43,9 +44,46 @@ interface Props {
   contextUsage?: ContextUsage | null
   appLanguage?: 'ru' | 'en'
   onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
-  /** Handler for slash-command actions like /clear, /new. Prompt-style
-   *  slash commands are expanded in place and flow through onSend. */
-  onSlashAction?: (actionId: 'clear-chat' | 'new-session', arg: string) => void
+  /** Handler for slash-command actions like /clear, /new, /chat, /plan,
+   *  /agent. Prompt-style slash commands are expanded in place and flow
+   *  through onSend. */
+  onSlashAction?: (
+    actionId:
+      | 'clear-chat'
+      | 'new-session'
+      | 'show-context'
+      | 'mode-chat'
+      | 'mode-plan'
+      | 'mode-agent',
+    arg: string,
+  ) => void
+  /** Live task-state snapshot from the most recent `task_state` agent
+   *  event. When present, the task panel renders this immediately
+   *  (no IPC roundtrip), so the plan updates mid-turn as the agent
+   *  calls `update_plan`. Falls back to IPC fetch when undefined. */
+  liveTaskState?: unknown
+  /** Current operating mode of the active session (chat/plan/agent).
+   *  Rendered as a chip strip under the textarea. */
+  mode?: 'chat' | 'plan' | 'agent'
+  /** Change the active session's mode. No-op while busy (useAgent
+   *  guards that too). */
+  onModeChange?: (mode: 'chat' | 'plan' | 'agent') => void
+  /** "Apply plan" button handler in TaskStatePanel. Typically switches
+   *  the session to agent mode and sends an execution prompt. */
+  onApplyPlan?: () => void
+  /** Persist current plan as PLAN.md. */
+  onSavePlan?: () => void
+  /** Open a workspace file from agent activity cards. */
+  onOpenFile?: (path: string) => void | Promise<void>
+}
+
+interface ContextBreakdown {
+  usedTokens: number
+  budgetTokens: number
+  maxContextTokens: number
+  percent: number
+  categories: { key: string; label: string; tokens: number; messages: number }[]
+  cache: { hits: number; misses: number; size: number }
 }
 
 export function Chat({
@@ -61,6 +99,12 @@ export function Chat({
   appLanguage = 'ru',
   onRestoreCheckpoint,
   onSlashAction,
+  liveTaskState,
+  mode = 'agent',
+  onModeChange,
+  onApplyPlan,
+  onSavePlan,
+  onOpenFile,
 }: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
@@ -75,6 +119,7 @@ export function Chat({
   const [slashResults, setSlashResults] = useState<SlashCommand[]>(SLASH_COMMANDS)
   const [slashIndex, setSlashIndex] = useState(0)
   const [rulesInfo, setRulesInfo] = useState<{ files: { relativePath: string; bytes: number }[]; truncated: boolean; totalBytes: number } | null>(null)
+  const [contextModal, setContextModal] = useState<ContextBreakdown | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lastScrollLenRef = useRef(0)
@@ -122,7 +167,16 @@ export function Chat({
       const cmd = findSlashCommand(parsed.name)
       if (cmd) {
         if (cmd.kind === 'action' && cmd.actionId) {
-          onSlashAction?.(cmd.actionId, parsed.arg)
+          if (cmd.actionId === 'show-context') {
+            if (window.api?.getContextBreakdown && workspace) {
+              try {
+                const b = await window.api.getContextBreakdown(workspace)
+                if (b) setContextModal(b)
+              } catch {}
+            }
+          } else {
+            onSlashAction?.(cmd.actionId, parsed.arg)
+          }
           setInput('')
           setShowSlash(false)
           if (textareaRef.current) textareaRef.current.style.height = 'auto'
@@ -381,6 +435,16 @@ export function Chat({
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
+      <TaskStatePanel
+        workspace={workspace}
+        refreshKey={messages.length}
+        appLanguage={appLanguage}
+        liveState={liveTaskState}
+        mode={mode}
+        onApplyPlan={onApplyPlan}
+        onSavePlan={onSavePlan}
+        busy={busy}
+      />
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-5 py-5 min-h-0">
         <div className="flex flex-col gap-5">
@@ -437,6 +501,8 @@ export function Chat({
                   onDeny={onApproval ? (id) => onApproval(id, false) : undefined}
                   appLanguage={L}
                   onRestoreCheckpoint={onRestoreCheckpoint}
+                  workspace={workspace}
+                  onOpenFile={onOpenFile}
                 />
               </div>
             )
@@ -452,9 +518,9 @@ export function Chat({
         <div className="border-t border-zinc-800/40 bg-[#0d1117] px-3 py-1 flex items-center gap-2">
           {contextUsage && (
             <>
-              <span className="text-[10px] text-zinc-600 shrink-0">{t('Контекст', 'Context')}</span>
+              <span className="text-[10px] text-zinc-400 shrink-0">{t('Контекст', 'Context')}</span>
               <div
-                className="flex-1 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden cursor-help"
+                className="flex-1 h-1.5 bg-zinc-700/80 rounded-full overflow-hidden cursor-help"
                 title={
                   t(
                     `Использовано ${contextUsage.usedTokens.toLocaleString('ru')} из ${contextUsage.maxContextTokens.toLocaleString('ru')} токенов (${contextUsage.percent}%).`
@@ -484,11 +550,11 @@ export function Chat({
               <span className={`text-[10px] font-mono tabular-nums shrink-0 ${
                 contextUsage.percent > 85 ? 'text-red-400' :
                 contextUsage.percent > 60 ? 'text-amber-400' :
-                'text-zinc-500'
+                'text-zinc-300'
               }`}>
                 {contextUsage.percent}%
               </span>
-              <span className="text-[9px] text-zinc-700 shrink-0">
+              <span className="text-[9px] text-zinc-400 font-mono tabular-nums shrink-0">
                 {Math.round(contextUsage.usedTokens / 1024)}K / {Math.round(contextUsage.maxContextTokens / 1024)}K
               </span>
               {contextUsage.percent > 85 && onSlashAction && (
@@ -678,7 +744,11 @@ export function Chat({
                 ? t('Сначала выбери проект ←', 'Pick a project first ←')
                 : hasAttachments
                   ? t('Добавь описание задачи…', 'Add a task description…')
-                  : t('Опиши задачу… @ — прикрепить файл', 'Describe the task… @ — attach file')}
+                  : mode === 'chat'
+                    ? t('Обсуждение (без инструментов)… @ — прикрепить файл', 'Discussion (no tools)… @ — attach file')
+                    : mode === 'plan'
+                      ? t('Планирование (только чтение)… @ — прикрепить файл', 'Planning (read-only)… @ — attach file')
+                      : t('Опиши задачу… @ — прикрепить файл', 'Describe the task… @ — attach file')}
               rows={1}
               className="flex-1 bg-transparent px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none disabled:opacity-50"
             />
@@ -690,8 +760,181 @@ export function Chat({
               ➤
             </button>
           </div>
+
+          {/* Mode switcher */}
+          <ModeSwitcher
+            mode={mode}
+            disabled={busy || noWorkspace}
+            onChange={(m) => onModeChange?.(m)}
+            appLanguage={L}
+          />
         </div>
       </div>
+      {contextModal && (
+        <ContextBreakdownModal
+          breakdown={contextModal}
+          onClose={() => setContextModal(null)}
+          lang={L}
+        />
+      )}
+    </div>
+  )
+}
+
+function ContextBreakdownModal({
+  breakdown,
+  onClose,
+  lang,
+}: {
+  breakdown: ContextBreakdown
+  onClose: () => void
+  lang: 'ru' | 'en'
+}) {
+  const t = (ru: string, en: string) => (lang === 'ru' ? ru : en)
+  const total = breakdown.categories.reduce((a, c) => a + c.tokens, 0) || 1
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-2xl w-[560px] max-w-[92vw] max-h-[80vh] overflow-y-auto"
+      >
+        <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+          <div className="text-sm font-medium text-zinc-200">
+            {t('Распределение контекста', 'Context breakdown')}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-zinc-500 hover:text-zinc-300 cursor-pointer text-lg leading-none"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="px-4 py-3 text-[12px] text-zinc-300 space-y-3">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-2 bg-zinc-800 rounded overflow-hidden">
+              <div
+                className={`h-full ${breakdown.percent > 85 ? 'bg-red-500' : breakdown.percent > 60 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                style={{ width: `${Math.min(100, breakdown.percent)}%` }}
+              />
+            </div>
+            <div className="text-[11px] text-zinc-400 tabular-nums shrink-0">
+              {breakdown.usedTokens.toLocaleString()} / {breakdown.budgetTokens.toLocaleString()} ({breakdown.percent}%)
+            </div>
+          </div>
+          <div className="text-[11px] text-zinc-500">
+            {t('Максимум', 'Max')}: {breakdown.maxContextTokens.toLocaleString()} {t('токенов', 'tokens')}
+          </div>
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-[10px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
+                <th className="text-left py-1.5 pr-2 font-normal">{t('Категория', 'Category')}</th>
+                <th className="text-right py-1.5 px-2 font-normal">{t('Токены', 'Tokens')}</th>
+                <th className="text-right py-1.5 px-2 font-normal">%</th>
+                <th className="text-right py-1.5 pl-2 font-normal">{t('Сообщ.', 'Msgs')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {breakdown.categories.map((c) => (
+                <tr key={c.key} className="border-b border-zinc-800/50">
+                  <td className="py-1.5 pr-2 text-zinc-300">{c.label}</td>
+                  <td className="py-1.5 px-2 text-right tabular-nums text-zinc-300">{c.tokens.toLocaleString()}</td>
+                  <td className="py-1.5 px-2 text-right tabular-nums text-zinc-500">{Math.round((c.tokens / total) * 100)}</td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums text-zinc-500">{c.messages}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-[11px] text-zinc-500">
+            {t('Кэш инструментов', 'Tool cache')}: {breakdown.cache.hits} hits · {breakdown.cache.misses} misses · {breakdown.cache.size} entries
+          </div>
+          <div className="text-[11px] text-zinc-600 pt-1 border-t border-zinc-800/60">
+            {t(
+              'Совет: если вы близки к лимиту — /clear или /new сбросят историю; большие tool-результаты ужимаются автоматически.',
+              'Tip: if you\'re near the limit, /clear or /new reset history; large tool-results are compacted automatically.',
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Chip-strip mode switcher rendered under the composer textarea. Each
+ * chip carries a short label + one-line tooltip (via `title`) so users
+ * understand the trade-offs without opening the docs. Parent handles
+ * persistence — we just fire `onChange`.
+ *
+ * Keep this component simple: it is intentionally stateless so the
+ * parent's `mode` prop stays the single source of truth (the switcher
+ * updates the moment an IPC round-trip returns via `refreshSessions`).
+ */
+function ModeSwitcher({
+  mode,
+  disabled,
+  onChange,
+  appLanguage,
+}: {
+  mode: 'chat' | 'plan' | 'agent'
+  disabled: boolean
+  onChange: (mode: 'chat' | 'plan' | 'agent') => void
+  appLanguage: 'ru' | 'en'
+}) {
+  const t = (ru: string, en: string) => (appLanguage === 'ru' ? ru : en)
+  const chips: {
+    id: 'chat' | 'plan' | 'agent'
+    label: string
+    tip: string
+  }[] = [
+    {
+      id: 'chat',
+      label: t('Chat', 'Chat'),
+      tip: t(
+        'Обсуждение без инструментов. Модель отвечает только текстом.',
+        'Discussion only. The model cannot use any tools.',
+      ),
+    },
+    {
+      id: 'plan',
+      label: t('Plan', 'Plan'),
+      tip: t(
+        'Планирование (только чтение). Модель исследует проект и составляет план, но не меняет файлы.',
+        'Planning (read-only). The model explores the project and drafts a plan without modifying files.',
+      ),
+    },
+    {
+      id: 'agent',
+      label: t('Agent', 'Agent'),
+      tip: t(
+        'Полный агентский режим со всеми инструментами.',
+        'Full agent mode with all tools enabled.',
+      ),
+    },
+  ]
+  return (
+    <div className="flex items-center gap-1 px-2 pb-2 pt-0.5">
+      <span className="text-[10px] uppercase tracking-wider text-zinc-600 mr-1">
+        {t('Режим', 'Mode')}
+      </span>
+      {chips.map((c) => {
+        const active = c.id === mode
+        return (
+          <button
+            key={c.id}
+            title={c.tip}
+            disabled={disabled}
+            onClick={() => onChange(c.id)}
+            className={
+              'px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ' +
+              (active
+                ? 'bg-blue-500/20 text-blue-300 ring-1 ring-blue-500/40'
+                : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60 hover:text-zinc-200')
+            }
+          >
+            {c.label}
+          </button>
+        )
+      })}
     </div>
   )
 }

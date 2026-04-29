@@ -33,6 +33,8 @@ interface ElectronAPI {
   autoSetup(): Promise<void>
   downloadModel(): Promise<string>
   ensureLlama(): Promise<void>
+  getLlamaReleaseInfo(): Promise<import('../electron/types').LlamaReleaseInfo>
+  updateLlama(): Promise<import('../electron/types').LlamaReleaseInfo>
   startServer(): Promise<void>
   stopServer(): Promise<void>
   sendMessage(msg: string, workspace: string): Promise<string>
@@ -53,6 +55,14 @@ interface ElectronAPI {
   tsGetDiagnostics(workspacePath: string, filePath: string, fileContent?: string): Promise<{ line: number; column: number; message: string; severity: 'error' | 'warning' }[]>
   pyResolveModule(workspacePath: string, moduleName: string): Promise<string | null>
   respondApproval(approvalId: string, approved: boolean): void
+  respondHunkReview(
+    approvalId: string,
+    decision:
+      | { decision: 'accept_all' }
+      | { decision: 'accept_selected'; selectedHunkIds: number[] }
+      | { decision: 'reject' },
+  ): void
+  getTaskState(workspace: string): Promise<import('../electron/task-state').TaskState | null>
 
   // Session management (workspace-scoped)
   createSession(workspace: string): Promise<string>
@@ -63,6 +73,12 @@ interface ElectronAPI {
   getActiveSessionId(workspace: string): Promise<string | null>
   saveUiMessages(workspace: string, id: string, msgs: any[]): Promise<void>
   getUiMessages(workspace: string, id: string): Promise<any[]>
+  setSessionMode(
+    workspace: string,
+    id: string,
+    mode: import('../electron/types').AgentMode,
+  ): Promise<import('../electron/types').AgentMode | null>
+  savePlanArtifact(workspace: string, id?: string, content?: string): Promise<{ path: string; content: string }>
 
   // Shadow-git checkpoints
   listCheckpoints(workspace: string, limit?: number): Promise<import('../electron/types').CheckpointInfo[]>
@@ -79,6 +95,18 @@ interface ElectronAPI {
     truncated: boolean
     totalBytes: number
   }>
+
+  // /context breakdown + message pinning
+  getContextBreakdown(workspace: string): Promise<{
+    usedTokens: number
+    budgetTokens: number
+    maxContextTokens: number
+    percent: number
+    categories: { key: string; label: string; tokens: number; messages: number }[]
+    cache: { hits: number; misses: number; size: number }
+  } | null>
+  togglePin(workspace: string, messageId: string): Promise<{ pinned: boolean }>
+  getPinnedMessages(workspace: string): Promise<string[]>
 
   // MCP (Model Context Protocol)
   mcpListServers(): Promise<import('../electron/config').McpServerConfig[]>

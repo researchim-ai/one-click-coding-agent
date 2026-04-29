@@ -11,6 +11,8 @@ interface Props {
   onDeny?: (id: string) => void
   appLanguage?: 'ru' | 'en'
   onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
+  workspace?: string
+  onOpenFile?: (path: string) => void | Promise<void>
 }
 
 const rehypePlugins = [rehypeHighlight] as any[]
@@ -19,7 +21,14 @@ const MemoMarkdown = memo(function MemoMarkdown({ content }: { content: string }
   return <Markdown rehypePlugins={rehypePlugins}>{content}</Markdown>
 })
 
-export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, appLanguage = 'ru', onRestoreCheckpoint }: Props) {
+function resolveWorkspacePath(workspace: string | undefined, filePath: string): string {
+  if (/^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)) return filePath
+  if (!workspace?.trim()) return filePath
+  const sep = workspace.includes('\\') ? '\\' : '/'
+  return `${workspace.replace(/[\\/]+$/, '')}${sep}${filePath.replace(/^[.\\/]+/, '')}`
+}
+
+export const MessageBubble = memo(function MessageBubble({ message, onApprove, onDeny, appLanguage = 'ru', onRestoreCheckpoint, workspace, onOpenFile }: Props) {
   const L = appLanguage
   if (message.role === 'status') {
     return (
@@ -85,6 +94,8 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
                 checkpointLabel={tc.checkpointLabel}
                 checkpointRestored={tc.checkpointRestored}
                 onRestoreCheckpoint={onRestoreCheckpoint}
+                workspace={workspace}
+                onOpenFile={onOpenFile}
               />
             )
           })}
@@ -97,7 +108,17 @@ export const MessageBubble = memo(function MessageBubble({ message, onApprove, o
             <span className="text-green-400 text-xs">
               {message.streamingFile!.toolName === 'edit_file' ? '✏️' : message.streamingFile!.toolName === 'append_file' ? '📎' : '📝'}
             </span>
-            <span className="text-[11px] text-zinc-400 font-mono truncate">{message.streamingFile!.path || '...'}</span>
+            {message.streamingFile!.path && onOpenFile ? (
+              <button
+                onClick={() => onOpenFile(resolveWorkspacePath(workspace, message.streamingFile!.path))}
+                className="text-[11px] text-sky-300/85 hover:text-sky-200 hover:underline underline-offset-2 font-mono truncate cursor-pointer"
+                title={appLanguage === 'ru' ? 'Открыть файл' : 'Open file'}
+              >
+                {message.streamingFile!.path}
+              </button>
+            ) : (
+              <span className="text-[11px] text-zinc-400 font-mono truncate">{message.streamingFile!.path || '...'}</span>
+            )}
             <span className="text-[10px] text-zinc-600 ml-auto shrink-0">{streamLines} {L === 'ru' ? 'строк' : 'lines'}</span>
             {!message.streamingFile!.done && (
               <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse shrink-0" />

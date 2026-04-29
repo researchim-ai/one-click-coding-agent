@@ -72,7 +72,7 @@ function pickQuantForFamily(
 }
 
 function displayQuant(quant: string): string {
-  return quant.replace(/^9B-/, '').replace(/^36-/, '').replace(/^UD-/, '')
+  return quant.replace(/^9B-/, '').replace(/^27B-/, '').replace(/^36-/, '').replace(/^UD-/, '')
 }
 
 function isFullGpuCtx(optionValue: number, selected?: ModelVariantInfo | null): boolean {
@@ -309,6 +309,7 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete,
       addLog(L ? '\u2705 Сервер запущен и готов к работе!' : '\u2705 Server started and ready!')
 
       setPhase('done')
+      onComplete()
     } catch (e: any) {
       const msg = e.message ?? String(e)
       setError(msg)
@@ -834,15 +835,6 @@ export function SetupWizard({ status, downloadProgress, buildStatus, onComplete,
               {L ? 'Пропустить (если всё уже настроено)' : 'Skip (if already configured)'}
             </button>
           </div>
-        )}
-
-        {phase === 'done' && (
-          <button
-            onClick={onComplete}
-            className="w-full py-4 rounded-xl font-semibold text-base bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 transition-all cursor-pointer active:scale-[0.98]"
-          >
-            {'\u2728'} {L ? 'Начать работу' : 'Get started'}
-          </button>
         )}
 
         {phase === 'error' && (

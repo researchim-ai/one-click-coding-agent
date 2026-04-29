@@ -19,8 +19,9 @@ function findVariant(quant: string): ModelVariant | null {
 }
 
 function rawQuantSegment(quant: string): string {
-  // Strip family-specific prefix (9B-, 36-) to get the canonical UD-* segment.
-  return quant.replace(/^9B-/, '').replace(/^36-/, '')
+  // Strip family-specific prefixes (9B-, 27B-, 36-) to get the canonical
+  // quant segment that appears in the GGUF filename.
+  return quant.replace(/^9B-/, '').replace(/^27B-/, '').replace(/^36-/, '')
 }
 
 function filenameTagForVariant(variant: ModelVariant | null): string | null {
@@ -105,6 +106,14 @@ export function getModelPath(): string | null {
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.gguf'))
   const match = findInstalledModelFile(files, selectedQuant)
   if (match) return path.join(dir, match)
+
+  // Never silently run a different known model family/quant. If the user
+  // selected Qwen3.6 Q3, starting Qwen3.5 Q4 is far worse than a clear
+  // "model not downloaded" state.
+  if (findVariant(selectedQuant)) return null
+
+  // Legacy/unknown configs only: keep the old fallback so older installs
+  // with non-catalog quant names can still start something sensible.
   return files.length > 0 ? path.join(dir, files[0]) : null
 }
 

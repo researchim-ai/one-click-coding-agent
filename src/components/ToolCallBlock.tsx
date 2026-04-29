@@ -13,6 +13,8 @@ interface Props {
   checkpointLabel?: string
   checkpointRestored?: boolean
   onRestoreCheckpoint?: (sha: string, mode: 'files' | 'files+task') => void | Promise<void>
+  workspace?: string
+  onOpenFile?: (path: string) => void | Promise<void>
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -47,9 +49,22 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
   }
 }
 
+function toolFilePath(name: string, args: Record<string, unknown>): string | null {
+  if (!['read_file', 'write_file', 'edit_file', 'append_file', 'delete_file'].includes(name)) return null
+  const p = args.path
+  return typeof p === 'string' && p.trim() ? p.trim() : null
+}
+
+function resolveWorkspacePath(workspace: string | undefined, filePath: string): string {
+  if (/^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)) return filePath
+  if (!workspace?.trim()) return filePath
+  const sep = workspace.includes('\\') ? '\\' : '/'
+  return `${workspace.replace(/[\\/]+$/, '')}${sep}${filePath.replace(/^[.\\/]+/, '')}`
+}
+
 export const ToolCallBlock = memo(function ToolCallBlock({
   name, args, result, approvalId, approvalStatus, onApprove, onDeny, appLanguage = 'ru',
-  checkpointSha, checkpointLabel, checkpointRestored, onRestoreCheckpoint,
+  checkpointSha, checkpointLabel, checkpointRestored, onRestoreCheckpoint, workspace, onOpenFile,
 }: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
@@ -63,6 +78,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const isComplete = result !== undefined
   const isPending = approvalStatus === 'pending'
   const isDenied = approvalStatus === 'denied'
+  const filePath = toolFilePath(name, args)
 
   const statusColor = isDenied
     ? 'text-red-400/70'
@@ -76,15 +92,44 @@ export const ToolCallBlock = memo(function ToolCallBlock({
     <div className={`rounded-md overflow-hidden text-xs font-mono ${
       isPending ? 'ring-1 ring-amber-500/30' : ''
     }`}>
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded((e) => !e)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setExpanded((v) => !v)
+          }
+        }}
         className="w-full px-2.5 py-1.5 bg-zinc-800/40 text-left hover:bg-zinc-800/70 transition-colors flex items-center gap-1.5 cursor-pointer group"
       >
         <span className="text-zinc-600 text-[10px] group-hover:text-zinc-400 transition-colors">{icon}</span>
         <span className="text-blue-400/80 font-semibold">{name}</span>
-        <span className="text-zinc-600 truncate flex-1 min-w-0">{truncBrief}</span>
+        {filePath && onOpenFile ? (
+          <button
+            type="button"
+            title={t('Открыть файл', 'Open file')}
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenFile(resolveWorkspacePath(workspace, filePath))
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                e.stopPropagation()
+                onOpenFile(resolveWorkspacePath(workspace, filePath))
+              }
+            }}
+            className="text-sky-300/85 hover:text-sky-200 hover:underline underline-offset-2 truncate flex-1 min-w-0 cursor-pointer"
+          >
+            {truncBrief}
+          </button>
+        ) : (
+          <span className="text-zinc-600 truncate flex-1 min-w-0">{truncBrief}</span>
+        )}
         <span className={`${statusColor} shrink-0 text-[10px]`}>{statusIcon}</span>
-      </button>
+      </div>
 
       {isPending && approvalId && (
         <div className="flex items-center gap-2 px-2.5 py-2 bg-amber-500/5 border-t border-amber-500/15">

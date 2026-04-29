@@ -28,7 +28,13 @@ export interface SlashCommand {
    *  text the user typed after the command (trimmed; may be empty). */
   template?: { ru: string; en: string }
   /** For kind='action': a stable identifier your UI branches on. */
-  actionId?: 'clear-chat' | 'new-session'
+  actionId?:
+    | 'clear-chat'
+    | 'new-session'
+    | 'show-context'
+    | 'mode-chat'
+    | 'mode-plan'
+    | 'mode-agent'
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -119,16 +125,36 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       en: 'Write clear documentation: docstrings for public functions, a README section with usage examples where warranted.${arg}',
     },
   },
+  // Mode switchers. These are the canonical way (alongside the chip
+  // switcher under the composer) to flip the current session between
+  // chat / plan / agent modes. Placed high in the catalogue because
+  // they're among the most useful commands and they used to collide
+  // with the old `/plan` prompt.
+  {
+    name: 'chat',
+    kind: 'action',
+    actionId: 'mode-chat',
+    description: {
+      ru: 'Переключиться в режим Chat (без инструментов)',
+      en: 'Switch to Chat mode (no tools)',
+    },
+  },
   {
     name: 'plan',
-    kind: 'prompt',
+    kind: 'action',
+    actionId: 'mode-plan',
     description: {
-      ru: 'Составить план перед реализацией',
-      en: 'Draft a plan before implementing',
+      ru: 'Переключиться в режим Plan (только чтение, планирование)',
+      en: 'Switch to Plan mode (read-only, planning)',
     },
-    template: {
-      ru: 'Составь подробный план решения задачи ПЕРЕД тем как писать код. Список шагов, какие файлы трогаем, какие риски. После плана жди подтверждения прежде чем начинать править код.${arg}',
-      en: 'Draft a detailed plan BEFORE writing any code. Steps, files to touch, risks. After the plan, wait for confirmation before modifying files.${arg}',
+  },
+  {
+    name: 'agent',
+    kind: 'action',
+    actionId: 'mode-agent',
+    description: {
+      ru: 'Переключиться в режим Agent (все инструменты)',
+      en: 'Switch to Agent mode (full tools)',
     },
   },
   {
@@ -148,6 +174,16 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: {
       ru: 'Начать новую сессию',
       en: 'Start a new session',
+    },
+  },
+  {
+    name: 'context',
+    aliases: ['ctx'],
+    kind: 'action',
+    actionId: 'show-context',
+    description: {
+      ru: 'Показать распределение контекста (что сколько занимает)',
+      en: 'Show context breakdown (what\'s using your budget)',
     },
   },
 ]

@@ -5,8 +5,34 @@ import type { AppConfig, CustomTool } from './config'
 import { getWebSearchStatus, loadWebSearchConfig, resolveWebSearchBaseUrl, shouldEnableWebSearchTool } from './searxng'
 import { fetchUrl as fetchUrlImpl } from './url-fetch'
 import * as searchCache from './search-cache'
+import { loadProjectRules, describeProjectRules } from './project-rules'
+import { buildRepoMap, renderRepoMap as renderRepoMapText } from './repo-map'
 
 export const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_project_context',
+      description:
+        'Dynamically fetch project context on demand instead of relying on a huge initial prompt. ' +
+        'Use section="overview" to orient, "rules" before editing when rule files exist, "repo_map" to find likely code files, or "all" for a compact bundle.',
+      parameters: {
+        type: 'object',
+        properties: {
+          section: {
+            type: 'string',
+            enum: ['overview', 'rules', 'repo_map', 'all'],
+            description: 'Which context section to fetch. Defaults to overview.',
+          },
+          max_bytes: {
+            type: 'number',
+            description: 'Approximate output cap in bytes. Defaults to 8000, max 20000.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -231,12 +257,97 @@ function assertInWorkspace(resolved: string, workspace: string): void {
   }
 }
 
+function clampContextBytes(maxBytes: unknown): number {
+  const n = typeof maxBytes === 'number' && Number.isFinite(maxBytes) ? Math.floor(maxBytes) : 8000
+  return Math.max(1000, Math.min(20000, n))
+}
+
+function truncateText(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf-8') <= maxBytes) return text
+  return text.slice(0, Math.max(0, maxBytes - 40)).trimEnd() + '\n…[context truncated]\n'
+}
+
+function detectProjectTypes(workspace: string): string[] {
+  const indicators: [string, string][] = [
+    ['package.json', 'Node.js'],
+    ['Cargo.toml', 'Rust'],
+    ['go.mod', 'Go'],
+    ['pyproject.toml', 'Python'],
+    ['requirements.txt', 'Python'],
+    ['pom.xml', 'Java/Maven'],
+    ['CMakeLists.txt', 'C/C++ CMake'],
+    ['Dockerfile', 'Docker'],
+  ]
+  const detected: string[] = []
+  for (const [file, desc] of indicators) {
+    if (fs.existsSync(path.join(workspace, file))) detected.push(desc)
+  }
+  return detected
+}
+
+function getProjectContext(sectionRaw: unknown, workspace: string, maxBytesRaw?: unknown): string {
+  const section = ['overview', 'rules', 'repo_map', 'all'].includes(String(sectionRaw))
+    ? String(sectionRaw)
+    : 'overview'
+  const maxBytes = clampContextBytes(maxBytesRaw)
+
+  const renderOverview = () => {
+    const ruleInfo = describeProjectRules(workspace)
+    const topTree = listDir(undefined, workspace, 1)
+    const types = detectProjectTypes(workspace)
+    const lines = [
+      `## Project Context Index`,
+      `Workspace: ${workspace}`,
+      types.length ? `Detected stack: ${types.join(', ')}` : 'Detected stack: unknown',
+      '',
+      '### Top-level tree',
+      '```',
+      topTree,
+      '```',
+      '',
+      ruleInfo.files.length
+        ? `Rule files available (${ruleInfo.truncated ? 'truncated if loaded, ' : ''}${ruleInfo.totalBytes} bytes): ${ruleInfo.files.map((f) => f.relativePath).join(', ')}`
+        : 'Rule files available: none',
+      '',
+      '### Dynamic context',
+      '- Call get_project_context(section="rules") before edits when rule files exist.',
+      '- Call get_project_context(section="repo_map") to find likely implementation files without scanning the tree repeatedly.',
+      '- Use find_files/read_file for precise context after this overview.',
+    ]
+    return lines.join('\n')
+  }
+
+  const renderRules = () => {
+    const rules = loadProjectRules(workspace)
+    if (!rules.content) return 'No project rule files found.'
+    return rules.content
+  }
+
+  const renderRepoMapSection = () => {
+    const repoMap = buildRepoMap(workspace, maxBytes)
+    const rendered = renderRepoMapText(repoMap)
+    return rendered || 'Repo map is empty.'
+  }
+
+  let out: string
+  if (section === 'rules') out = renderRules()
+  else if (section === 'repo_map') out = renderRepoMapSection()
+  else if (section === 'all') {
+    out = [renderOverview(), renderRules(), renderRepoMapSection()].join('\n\n---\n\n')
+  } else {
+    out = renderOverview()
+  }
+  return truncateText(out, maxBytes)
+}
+
 export function executeTool(name: string, args: Record<string, any>, workspace: string): string {
   if (!workspace) return 'Error: workspace not set. Please set a workspace directory first.'
   try {
     switch (name) {
       case 'read_file':
         return readFile(args.path, workspace, args.offset, args.limit)
+      case 'get_project_context':
+        return getProjectContext(args.section, workspace, args.max_bytes)
       case 'write_file':
         return writeFile(args.path, args.content, workspace)
       case 'edit_file':

@@ -4,6 +4,7 @@ import { useResizable } from './hooks/useResizable'
 import { Sidebar } from './components/Sidebar'
 import { EditorTabs } from './components/EditorTabs'
 import { CodeEditor } from './components/CodeEditor'
+import { MarkdownViewer } from './components/MarkdownViewer'
 import { Chat, type CodeReference } from './components/Chat'
 import { Terminal } from './components/Terminal'
 import { SetupWizard } from './components/SetupWizard'
@@ -12,6 +13,7 @@ import { SessionTabs } from './components/SessionTabs'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TitleBar } from './components/TitleBar'
 import { DiffViewer } from './components/DiffViewer'
+import { HunkReviewModal } from './components/HunkReviewModal'
 import { useState, useEffect, useCallback, useRef } from 'react'
 
 export function App() {
@@ -22,6 +24,10 @@ export function App() {
     sessions, activeSessionId,
     newSession, switchToSession, removeSession,
     restoreCheckpoint,
+    hunkReview, respondHunkReview,
+    taskState,
+    planArtifactPath, clearPlanArtifactPath,
+    mode, setMode,
   } = useAgent()
 
   const {
@@ -63,6 +69,11 @@ export function App() {
   useEffect(() => {
     setBreadcrumbExpandTo(null)
   }, [activeFilePath])
+
+  useEffect(() => {
+    if (!planArtifactPath) return
+    openFile(planArtifactPath).finally(() => clearPlanArtifactPath())
+  }, [planArtifactPath, openFile, clearPlanArtifactPath])
 
   useEffect(() => {
     if (!fileMenuOpen || !window.api?.getRecentWorkspaces) return
@@ -157,16 +168,10 @@ export function App() {
 
   const serverOnline = status?.serverRunning === true && status?.serverHealth?.status === 'ok'
 
-  // Once the server has been online in this session (or the user manually
-  // completed the setup wizard), don't yank them back to the wizard just
-  // because /health went `loading model` or the agent is restarting the
-  // server — that's what was throwing the user to the pre-start page
-  // mid-chat.
-  useEffect(() => {
-    if (serverOnline && !setupDone) setSetupDone(true)
-  }, [serverOnline, setupDone])
-
-  const showSetup = !setupDone && !serverOnline
+  // Startup should be explicit: even if a server from a previous run is
+  // already reachable, keep the setup screen visible until the user reviews
+  // settings and presses Launch / Get started / Skip.
+  const showSetup = !setupDone
 
   const handleSetupComplete = () => {
     setSetupDone(true)
@@ -409,7 +414,18 @@ export function App() {
                       onCloseOthers={closeOthers}
                       appLanguage={appLanguage}
                     />
-                    {activeFile ? (
+                    {activeFile?.language === 'markdown' ? (
+                      <MarkdownViewer
+                        file={activeFile}
+                        workspace={workspace}
+                        onAttachCode={addCodeRef}
+                        onOpenFile={openFile}
+                        onContentChange={(content) => updateFileContent(activeFile.path, content)}
+                        onAfterSave={() => refreshFile(activeFile.path)}
+                        onBreadcrumbClick={(dirPath) => setBreadcrumbExpandTo(dirPath)}
+                        appLanguage={appLanguage}
+                      />
+                    ) : activeFile ? (
                       <CodeEditor
                         file={activeFile}
                         workspace={workspace}
@@ -497,9 +513,30 @@ export function App() {
                   contextUsage={contextUsage}
                   appLanguage={appLanguage}
                   onRestoreCheckpoint={restoreCheckpoint}
+                  onOpenFile={openFile}
                   onSlashAction={(actionId) => {
                     if (actionId === 'clear-chat') resetChat()
                     else if (actionId === 'new-session') newSession()
+                    else if (actionId === 'mode-chat') setMode('chat')
+                    else if (actionId === 'mode-plan') setMode('plan')
+                    else if (actionId === 'mode-agent') setMode('agent')
+                  }}
+                  liveTaskState={taskState}
+                  mode={mode}
+                  onModeChange={setMode}
+                  onSavePlan={async () => {
+                    if (!workspace) return
+                    try {
+                      const saved = await window.api.savePlanArtifact(workspace, activeSessionId ?? undefined)
+                      await openFile(saved.path)
+                    } catch {}
+                  }}
+                  onApplyPlan={async () => {
+                    await setMode('agent')
+                    const msg = appLanguage === 'ru'
+                      ? 'Выполни составленный план из Plan-режима. Действуй строго по шагам, учитывай риски/тесты из плана и отмечай прогресс через update_plan.'
+                      : 'Execute the plan drafted in Plan mode. Follow the steps closely, respect the risks/tests from the plan, and track progress via update_plan.'
+                    sendMessage(msg)
                   }}
                 />
               </div>
@@ -528,6 +565,14 @@ export function App() {
           </button>
         )}
       </div>
+
+      {hunkReview && (
+        <HunkReviewModal
+          review={hunkReview}
+          onDecide={respondHunkReview}
+          appLanguage={appLanguage}
+        />
+      )}
     </div>
   )
 }

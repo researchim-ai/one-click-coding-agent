@@ -6,7 +6,7 @@ import https from 'https'
 import { dataDir } from './model-manager'
 import * as config from './config'
 import { detect, computeOptimalArgs, pickBinaryVariant, applyGpuPreferences } from './resources'
-import type { ServerLaunchArgs } from './types'
+import type { LlamaReleaseInfo, ServerLaunchArgs } from './types'
 
 let lastServerLog: string[] = []
 let activeCtxSize = 0
@@ -31,6 +31,25 @@ function logLooksLikeOOM(): boolean {
   // Scan last ~200 lines — OOM message usually lands right before exit.
   const tail = lastServerLog.slice(-200)
   return tail.some((line) => OOM_SIGNATURES.some((re) => re.test(line)))
+}
+
+function inferCrashReason(code: number | null, signal: string | null): 'oom' | 'other' | null {
+  const crashed = code !== 0 || signal !== null
+  if (!crashed) return null
+  if (logLooksLikeOOM()) return 'oom'
+
+  // Linux may SIGKILL llama-server without a clean stderr OOM signature
+  // (kernel OOM killer / driver kill) while tensors or KV buffers are being
+  // allocated. Treat that as recoverable memory pressure so the launcher can
+  // retry with fewer GPU layers instead of surfacing a raw crash.
+  if (signal === 'SIGKILL') {
+    const tail = lastServerLog.slice(-80).join('\n')
+    if (/load_tensors: loading model tensors|llama_context: constructing|kv cache|sched_reserve|allocate|buffer/i.test(tail)) {
+      return 'oom'
+    }
+  }
+
+  return 'other'
 }
 
 const LLAMA_HOST = '127.0.0.1'
@@ -73,12 +92,21 @@ export function getServerLogTail(lines = 40): string {
   return lastServerLog.slice(-lines).join('\n')
 }
 
+function sameReleaseTag(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  return a.trim() === b.trim()
+}
+
 function binDir(): string {
   return path.join(dataDir(), 'llama-bin')
 }
 
 function variantFile(): string {
   return path.join(binDir(), '.variant')
+}
+
+function releaseManifestFile(dir = binDir()): string {
+  return path.join(dir, '.release.json')
 }
 
 function getInstalledVariant(): string | null {
@@ -90,12 +118,24 @@ function setInstalledVariant(variant: string): void {
   fs.writeFileSync(variantFile(), variant)
 }
 
+function readReleaseManifest(): { tag?: string; variant?: string; assetName?: string; installedAt?: string } | null {
+  try {
+    return JSON.parse(fs.readFileSync(releaseManifestFile(), 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+function writeReleaseManifest(dir: string, manifest: { tag: string; variant: string; assetName: string }): void {
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(releaseManifestFile(dir), JSON.stringify({ ...manifest, installedAt: new Date().toISOString() }, null, 2))
+}
+
 function serverBinName(): string {
   return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'
 }
 
-function findServerBin(): string | null {
-  const dir = binDir()
+function findServerBinInDir(dir: string): string | null {
   if (!fs.existsSync(dir)) return null
 
   const binPath = path.join(dir, serverBinName())
@@ -110,6 +150,13 @@ function findServerBin(): string | null {
       }
     }
   } catch {}
+
+  return null
+}
+
+function findServerBin(): string | null {
+  const local = findServerBinInDir(binDir())
+  if (local) return local
 
   // system-installed fallback
   try {
@@ -271,18 +318,7 @@ function emitBuild(win: BrowserWindow, msg: string) {
   win.webContents.send('build-status', msg)
 }
 
-// ---------------------------------------------------------------------------
-// ensureBinary: download pre-built binary from GitHub Releases
-// ---------------------------------------------------------------------------
-
-export async function ensureBinary(win: BrowserWindow): Promise<string> {
-  const existing = findServerBin()
-  const installedVariant = getInstalledVariant()
-  if (existing && installedVariant) {
-    emitBuild(win, `llama-server уже установлен (${installedVariant})`)
-    return existing
-  }
-
+async function installLatestBinary(win: BrowserWindow, forceReplace: boolean): Promise<string> {
   const res = detect()
   const selection = pickBinaryVariant(res)
 
@@ -296,6 +332,10 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
   emitBuild(win, `Релиз: ${release.tag}`)
 
   const variants = [selection.primary, ...selection.fallbacks]
+  const currentDir = binDir()
+  const tempDir = path.join(dataDir(), `llama-bin-update-${Date.now()}`)
+  fs.rmSync(tempDir, { recursive: true, force: true })
+  fs.mkdirSync(tempDir, { recursive: true })
 
   for (const variant of variants) {
     const asset = matchAsset(release.assets, variant)
@@ -307,9 +347,9 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
     const sizeMb = Math.round(asset.size / (1024 * 1024))
     emitBuild(win, `Скачивание ${variant} (${sizeMb} МБ)…`)
 
-    const dir = binDir()
-    fs.mkdirSync(dir, { recursive: true })
-    const archivePath = path.join(dir, asset.name)
+    fs.rmSync(tempDir, { recursive: true, force: true })
+    fs.mkdirSync(tempDir, { recursive: true })
+    const archivePath = path.join(tempDir, asset.name)
 
     try {
       await downloadFile(asset.browser_download_url, archivePath, win, variant)
@@ -320,7 +360,7 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
 
     emitBuild(win, 'Распаковка…')
     try {
-      extractArchive(archivePath, dir)
+      extractArchive(archivePath, tempDir)
     } catch (e: any) {
       emitBuild(win, `Ошибка распаковки: ${e.message}`)
       continue
@@ -331,10 +371,10 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
       const cudart = matchCudartAsset(release.assets, selection.cudartAsset)
       if (cudart) {
         emitBuild(win, 'Скачивание CUDA runtime…')
-        const cudartPath = path.join(dir, cudart.name)
+        const cudartPath = path.join(tempDir, cudart.name)
         try {
           await downloadFile(cudart.browser_download_url, cudartPath, win, 'cudart')
-          extractArchive(cudartPath, dir)
+          extractArchive(cudartPath, tempDir)
           try { fs.unlinkSync(cudartPath) } catch {}
         } catch (e: any) {
           emitBuild(win, `Предупреждение: не удалось скачать cudart: ${e.message}`)
@@ -344,7 +384,7 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
 
     try { fs.unlinkSync(archivePath) } catch {}
 
-    const bin = findServerBin()
+    const bin = findServerBinInDir(tempDir)
     if (!bin) {
       emitBuild(win, `llama-server не найден после распаковки ${variant}`)
       continue
@@ -355,16 +395,78 @@ export async function ensureBinary(win: BrowserWindow): Promise<string> {
     }
 
     if (verifyBinary(bin)) {
-      setInstalledVariant(variant)
-      emitBuild(win, `llama-server (${variant}) готов!`)
-      return bin
+      writeReleaseManifest(tempDir, { tag: release.tag, variant, assetName: asset.name })
+      fs.writeFileSync(path.join(tempDir, '.variant'), variant)
+
+      if (forceReplace && isRunning()) stop()
+      fs.rmSync(currentDir, { recursive: true, force: true })
+      fs.renameSync(tempDir, currentDir)
+      const installedBin = findServerBinInDir(currentDir)
+      if (!installedBin) throw new Error('llama-server не найден после установки')
+      emitBuild(win, `llama-server ${release.tag} (${variant}) готов!`)
+      return installedBin
     }
 
     emitBuild(win, `Бинарник ${variant} не запускается, пробуем следующий…`)
-    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
   }
 
+  try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch {}
   throw new Error('Не удалось установить llama-server. Проверьте интернет-соединение.')
+}
+
+// ---------------------------------------------------------------------------
+// ensureBinary/updateBinary: download pre-built binary from GitHub Releases
+// ---------------------------------------------------------------------------
+
+export async function ensureBinary(win: BrowserWindow): Promise<string> {
+  const existing = findServerBin()
+  const installedVariant = getInstalledVariant()
+  if (existing && installedVariant) {
+    const manifest = readReleaseManifest()
+    emitBuild(win, manifest?.tag
+      ? `llama-server уже установлен (${manifest.tag}, ${installedVariant})`
+      : `llama-server уже установлен (${installedVariant})`)
+    return existing
+  }
+
+  return installLatestBinary(win, false)
+}
+
+export async function getLlamaReleaseInfo(): Promise<LlamaReleaseInfo> {
+  const binaryPath = findServerBin()
+  const installedVariant = getInstalledVariant() ?? readReleaseManifest()?.variant ?? null
+  const installedTag = readReleaseManifest()?.tag ?? null
+  try {
+    const release = await getLatestRelease()
+    return {
+      installed: !!binaryPath,
+      installedVariant,
+      installedTag,
+      latestTag: release.tag,
+      updateAvailable: !!binaryPath && !sameReleaseTag(installedTag, release.tag),
+      binaryPath,
+    }
+  } catch (e: any) {
+    return {
+      installed: !!binaryPath,
+      installedVariant,
+      installedTag,
+      latestTag: null,
+      updateAvailable: false,
+      binaryPath,
+      error: e?.message ?? String(e),
+    }
+  }
+}
+
+export async function updateBinary(win: BrowserWindow): Promise<LlamaReleaseInfo> {
+  if (isRunning()) {
+    emitBuild(win, 'Останавливаю текущий llama-server перед обновлением…')
+    stop()
+    await new Promise((r) => setTimeout(r, 1200))
+  }
+  await installLatestBinary(win, true)
+  return getLlamaReleaseInfo()
 }
 
 // ---------------------------------------------------------------------------
@@ -433,14 +535,24 @@ export function start(
     '--cache-type-k', la.cacheTypeK,
     '--cache-type-v', la.cacheTypeV,
   ]
-  // Large context: bigger batch speeds up prompt ingestion (fewer steps). Default -b 2048, -ub 512.
+  // Prompt-ingestion throughput is dominated by how many tokens llama.cpp
+  // processes in one forward pass. `--batch-size` is the logical batch
+  // (queued work), `--ubatch-size` is the physical batch (actually fed
+  // into the kernel at once). For GPU offload bigger ubatch = more
+  // parallelism = faster prefill, at the cost of a bit more VRAM for
+  // activations. These values are the empirical sweet spot for 7B–70B on
+  // consumer GPUs with Vulkan/CUDA; older code was pushing ub=512 across
+  // the board which left a lot of speed on the table.
   if (la.ctxSize >= 131072) {
-    cmdArgs.push('--batch-size', '512', '--ubatch-size', '512')
-  } else if (la.ctxSize >= 65536) {
-    cmdArgs.push('--batch-size', '512')
+    cmdArgs.push('--batch-size', '2048', '--ubatch-size', '1024')
   } else if (la.ctxSize >= 32768) {
-    cmdArgs.push('--batch-size', '512')
-  }
+    cmdArgs.push('--batch-size', '2048', '--ubatch-size', '1024')
+  } // else: llama-server defaults (-b 2048 -ub 512) are fine for small ctx
+  // Fuzzy KV-cache reuse: llama-server will match up to N leading tokens
+  // even if the overall prompt has slightly shifted. Essential when the
+  // agent's ephemeral messages (e.g. injected task-state) change across
+  // turns — without this flag the whole prefix would be re-prefilled.
+  cmdArgs.push('--cache-reuse', '256')
   // Lock model in RAM to avoid swap (consistent speed on local machine)
   if (process.platform !== 'win32') cmdArgs.push('--mlock')
   if (la.tensorSplit) cmdArgs.push('--tensor-split', la.tensorSplit)
@@ -513,8 +625,7 @@ export function start(
   serverProcess.on('exit', (code, signal) => {
     lastExitInfo = { code, signal, at: Date.now() }
     const pid = serverProcess?.pid
-    const crashed = code !== 0 || signal !== null
-    lastCrashReason = crashed ? (logLooksLikeOOM() ? 'oom' : 'other') : null
+    lastCrashReason = inferCrashReason(code, signal)
     console.log(`[server-manager] llama-server exited: pid=${pid}, code=${code}, signal=${signal}, crashReason=${lastCrashReason ?? 'clean'}`)
     try {
       serverLogStream?.write(`\n===== ${new Date().toISOString()} exit code=${code} signal=${signal} =====\n`)
@@ -560,10 +671,12 @@ export async function waitReady(timeoutSecs = 300, win?: BrowserWindow): Promise
   let lastReport = 0
   while (Date.now() < deadline) {
     if (!serverProcess || serverProcess.exitCode !== null) {
-      const code = serverProcess?.exitCode ?? 'unknown'
+      const exit = lastExitInfo
+      const code = serverProcess?.exitCode ?? exit?.code ?? 'unknown'
+      const signal = exit?.signal ? `, signal ${exit.signal}` : ''
       const tail = lastServerLog.slice(-10).join('\n')
       throw new Error(
-        `llama-server упал (код ${code}).\nПоследний вывод:\n${tail}`
+        `llama-server упал (код ${code}${signal}).\nПоследний вывод:\n${tail}`
       )
     }
 

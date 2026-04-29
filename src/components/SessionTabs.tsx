@@ -57,6 +57,16 @@ export function SessionTabs({
         onWheel={handleWheel}
         className="flex-1 flex items-center overflow-x-auto scrollbar-none gap-0"
       >
+        {sorted.length === 0 && (
+          <button
+            onClick={onNew}
+            disabled={busy}
+            className="h-full px-3 py-1.5 text-[11px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-900/40 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            title={t('Создать новый чат', 'Create a new chat')}
+          >
+            {t('+ Новый чат', '+ New chat')}
+          </button>
+        )}
         {sorted.map((s) => {
           const isActive = s.id === activeSessionId
           const isHovered = s.id === hoveredId

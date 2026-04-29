@@ -129,6 +129,35 @@ class BufferReader {
     }
   }
 
+  skipValue(type: GGUFValueType): void {
+    switch (type) {
+      case GGUFValueType.UINT8:
+      case GGUFValueType.INT8:
+      case GGUFValueType.BOOL:
+        this.ensure(1); this.pos += 1; return
+      case GGUFValueType.UINT16:
+      case GGUFValueType.INT16:
+        this.ensure(2); this.pos += 2; return
+      case GGUFValueType.UINT32:
+      case GGUFValueType.INT32:
+      case GGUFValueType.FLOAT32:
+        this.ensure(4); this.pos += 4; return
+      case GGUFValueType.UINT64:
+      case GGUFValueType.INT64:
+      case GGUFValueType.FLOAT64:
+        this.ensure(8); this.pos += 8; return
+      case GGUFValueType.STRING: {
+        const len = this.u64()
+        if (len > 10_000_000) throw new Error('GGUF: string too long')
+        this.ensure(len)
+        this.pos += len
+        return
+      }
+      default:
+        throw new Error(`GGUF: unknown value type ${type}`)
+    }
+  }
+
   readKV(): [string, string | number | boolean | (string | number | boolean)[]] {
     const key = this.string()
     const valType = this.u32() as GGUFValueType
@@ -136,8 +165,9 @@ class BufferReader {
       const elemType = this.u32() as GGUFValueType
       const count = this.u64()
       const arr: (string | number | boolean)[] = []
-      for (let i = 0; i < count && i < 100000; i++) {
-        arr.push(this.readValue(elemType))
+      for (let i = 0; i < count; i++) {
+        if (i < 100000) arr.push(this.readValue(elemType))
+        else this.skipValue(elemType)
       }
       return [key, arr]
     }
@@ -214,6 +244,7 @@ export function deriveArchInfo(meta: GGUFMetadata): ModelArchInfo {
   const headCountKv = getNum(meta, `${arch}.attention.head_count_kv`, 'llama.attention.head_count_kv') || headCount
   const expertCount = getNum(meta, `${arch}.expert_count`, 'llama.expert_count')
   const expertUsedCount = getNum(meta, `${arch}.expert_used_count`, 'llama.expert_used_count')
+  const fullAttentionInterval = getNum(meta, `${arch}.full_attention_interval`)
 
   // head dimension for KV: try explicit key_length, then derive from embedding/head_count
   let headDimKv = getNum(meta, `${arch}.attention.key_length`, `${arch}.attention.value_length`)
@@ -222,7 +253,9 @@ export function deriveArchInfo(meta: GGUFMetadata): ModelArchInfo {
   // Check for known architecture overrides
   const override = KNOWN_ARCH_OVERRIDES[arch]
   let kvLayers = blockCount
-  if (override) {
+  if (fullAttentionInterval > 1) {
+    kvLayers = Math.max(1, Math.ceil(blockCount / fullAttentionInterval))
+  } else if (override) {
     kvLayers = Math.round(blockCount * override.kvLayersFraction)
     if (override.headDimKvOverride) headDimKv = override.headDimKvOverride
   }

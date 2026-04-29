@@ -33,6 +33,7 @@ import { describeProjectRules } from './project-rules'
 import * as mcp from './mcp'
 import { TOOL_DEFINITIONS } from './tools'
 import { MODEL_FAMILIES } from './resources'
+import { normalizeTaskState } from './task-state'
 import { ensureWebSearchBackend, getWebSearchStatus } from './searxng'
 import {
   runAgent, resetAgent, setWorkspace, cancelAgent,
@@ -41,14 +42,19 @@ import {
   saveUiMessages, getUiMessages,
   getActiveSession, getSessionPathForWorker, saveSession as persistSession, isCancelRequested,
   updateSessionFromWorker,
+  computeContextBreakdown, toggleMessagePin, listPinnedMessages,
+  setSessionMode,
+  savePlanArtifact, savePlanArtifactContent,
   DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARIZE_PROMPT,
   type SessionInfo, type AgentBridge,
 } from './agent'
+import type { AgentMode } from './types'
 import * as terminalManager from './terminal-manager'
 import * as tsService from './ts-service'
 import * as pyResolve from './py-resolve'
 import * as git from './git'
 import * as recentWorkspaces from './recent-workspaces'
+import * as workspaceWatcher from './workspace-watcher'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
@@ -177,13 +183,15 @@ async function ensureLlamaServerRunning(): Promise<void> {
 
       console.log(`[ensure-server] attempt ${attempt + 1}/${layerSchedule.length}: quant=${quant}, ctx=${attemptArgs.ctxSize}, nGpuLayers=${attemptArgs.nGpuLayers} (full=${fullLayers})`)
       if (mainWindow) {
+        const statusText = attempt === 0
+          ? `⏳ Запускаю llama.cpp (ctx=${attemptArgs.ctxSize}, GPU-слоёв: ${attemptArgs.nGpuLayers})…`
+          : `⚠ Не хватило памяти — пробую с ${attemptArgs.nGpuLayers} GPU-слоями (остальное в RAM)…`
         try {
           mainWindow.webContents.send('agent-event', {
             type: 'status',
-            content: attempt === 0
-              ? `⏳ Запускаю llama.cpp (ctx=${attemptArgs.ctxSize}, GPU-слоёв: ${attemptArgs.nGpuLayers})…`
-              : `⚠ Не хватило VRAM — пробую с ${attemptArgs.nGpuLayers} GPU-слоями (остальное в RAM)…`,
+            content: statusText,
           })
+          mainWindow.webContents.send('build-status', statusText)
         } catch {}
       }
 
@@ -212,36 +220,6 @@ async function ensureLlamaServerRunning(): Promise<void> {
   })().finally(() => { ensureServerInFlight = null })
 
   return ensureServerInFlight
-}
-
-/** Kick the server off as soon as the app launches — if the binary and the
- *  model are already on disk, the user shouldn't have to click anything to
- *  get back to chatting after an app restart. Non-blocking: we just start it
- *  in the background and let the status poll flip the UI out of the wizard
- *  once /health comes back ok. */
-function scheduleAutoStartServer(): void {
-  setImmediate(async () => {
-    try {
-      if (serverManager.isRunning()) return
-      if (!serverManager.isReady()) {
-        console.log('[auto-start] skipped: llama-server binary not installed yet')
-        return
-      }
-      const modelPath = modelManager.getModelPath()
-      if (!modelPath) {
-        console.log('[auto-start] skipped: model not downloaded yet')
-        return
-      }
-      console.log('[auto-start] llama-server binary + model ready, starting in background')
-      await ensureLlamaServerRunning()
-      console.log('[auto-start] llama-server is up and serving requests')
-    } catch (err: any) {
-      // Swallow: the user will see whatever state the SetupWizard is in, and
-      // the on-demand path in `send-message` will retry with a visible error
-      // if they try to chat.
-      console.error('[auto-start] failed:', err?.message ?? err)
-    }
-  })
 }
 
 /** When a stream fetch blows up with "fetch failed" it almost always means
@@ -295,6 +273,19 @@ function getAgentWorker(): Worker {
         }
         ipcMain.on('command-approval-response', handler)
         try { mainWindow.webContents.send('agent-event', { type: 'command_approval', name: msg.name, args: msg.args, approvalId: msg.approvalId }) } catch {}
+      } else if (msg.type === 'hunk-review' && mainWindow) {
+        // Renderer replies via ipcMain 'hunk-review-response' carrying the user's
+        // per-hunk decision. The hunk-review event itself was already emitted by
+        // the agent (see runAgent → reviewAndApplyWrite), so we only wire the
+        // response channel here.
+        const review = msg.review as import('./types').HunkReviewPayload
+        const handler = (_: any, responseId: string, decision: import('./agent').HunkReviewDecision) => {
+          if (responseId === review.approvalId) {
+            ipcMain.removeListener('hunk-review-response', handler)
+            agentWorker?.postMessage({ type: 'hunk-review-result', approvalId: review.approvalId, decision })
+          }
+        }
+        ipcMain.on('hunk-review-response', handler)
       } else if (msg.type === 'workspace-changed' && mainWindow) {
         scheduleWorkspaceChangedNotify()
       } else if (msg.type === 'session-update') {
@@ -347,6 +338,17 @@ function createMainBridge(win: BrowserWindow): AgentBridge {
         }
         ipcMain.on('command-approval-response', handler)
         try { win.webContents.send('agent-event', { type: 'command_approval', name, args, approvalId: id }) } catch {}
+      })
+    },
+    requestHunkReview(review) {
+      return new Promise((resolve) => {
+        const handler = (_: any, responseId: string, decision: import('./agent').HunkReviewDecision) => {
+          if (responseId === review.approvalId) {
+            ipcMain.removeListener('hunk-review-response', handler)
+            resolve(decision)
+          }
+        }
+        ipcMain.on('hunk-review-response', handler)
       })
     },
     getConfig() { return config.load() },
@@ -676,10 +678,10 @@ app.whenReady().then(() => {
   createWindow()
   // Pre-create agent worker so first send-message doesn't block on Worker load
   setImmediate(() => { try { getAgentWorker() } catch {} })
-  // Auto-start llama-server in the background if everything was already set
-  // up in a previous session — the user shouldn't have to re-trigger the
-  // setup wizard on every cold start.
-  scheduleAutoStartServer()
+  // Do NOT auto-start llama-server on app launch. Users must first see the
+  // setup screen, review core settings (model, quant, context, GPU), and
+  // explicitly press Launch. On-demand startup still happens when the user
+  // sends a message after skipping setup.
 
   // Kick MCP servers in the background — any configured+enabled server
   // gets connected so its tools show up on the first send-message. Failures
@@ -705,6 +707,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   serverManager.stop()
   mcp.shutdownAll().catch(() => {})
+  try { workspaceWatcher.stopWatching() } catch {}
 })
 
 function registerIpcHandlers() {
@@ -812,14 +815,19 @@ function registerIpcHandlers() {
   ipcMain.handle('restart-server', async (_e) => {
     serverManager.stop()
     await new Promise((r) => setTimeout(r, 2000))
-    const modelPath = modelManager.getModelPath()
-    if (!modelPath) throw new Error('Модель не скачана')
     if (!serverManager.isReady()) throw new Error('llama-server не установлен')
+    let modelPath = modelManager.getModelPath()
+    if (!modelPath) {
+      if (!mainWindow) throw new Error('Модель не скачана')
+      const quant = modelManager.getSelectedQuant()
+      mainWindow.webContents.send('build-status', `⬇️ Модель ${quant} не найдена локально — скачиваю выбранную модель…`)
+      modelPath = await modelManager.download(mainWindow)
+    }
     loadModelArch(modelPath)
     const ctxSize = config.get('ctxSize')
     console.log(`[restart-server] Requested ctx=${ctxSize}, quant=${modelManager.getSelectedQuant()}`)
-    serverManager.start(modelPath, mainWindow ?? undefined, undefined, modelManager.getSelectedQuant(), ctxSize)
-    await serverManager.waitReady(300, mainWindow ?? undefined)
+    serverManager.resetCrashState()
+    await ensureLlamaServerRunning()
     const actualCtx = serverManager.getCtxSize()
     console.log(`[restart-server] Server ready, actual ctx=${actualCtx}`)
     return { requestedCtx: ctxSize, actualCtx }
@@ -853,6 +861,54 @@ function registerIpcHandlers() {
   ipcMain.handle('ensure-llama', async () => {
     if (!mainWindow) throw new Error('No window')
     await serverManager.ensureBinary(mainWindow)
+  })
+
+  ipcMain.handle('llama:get-release-info', async () => {
+    return serverManager.getLlamaReleaseInfo()
+  })
+
+  ipcMain.handle('llama:update', async () => {
+    if (!mainWindow) throw new Error('No window')
+    const wasRunning = serverManager.isRunning()
+    const previousArgs = serverManager.getLastLaunchArgs()
+    const info = await serverManager.updateBinary(mainWindow)
+
+    if (wasRunning) {
+      const restartStatus = previousArgs
+        ? `🔁 llama.cpp обновлён — перезапускаю сервер с прежними параметрами (ctx=${previousArgs.ctxSize}, GPU-слоёв: ${previousArgs.nGpuLayers})…`
+        : '🔁 llama.cpp обновлён — перезапускаю сервер…'
+      mainWindow.webContents.send('build-status', restartStatus)
+
+      let modelPath = modelManager.getModelPath()
+      if (!modelPath) {
+        const quant = modelManager.getSelectedQuant()
+        mainWindow.webContents.send('build-status', `⬇️ Модель ${quant} не найдена локально — скачиваю выбранную модель…`)
+        modelPath = await modelManager.download(mainWindow)
+      }
+      loadModelArch(modelPath)
+
+      if (previousArgs) {
+        try {
+          serverManager.resetCrashState()
+          serverManager.start(modelPath, mainWindow ?? undefined, previousArgs, modelManager.getSelectedQuant(), previousArgs.ctxSize)
+          await serverManager.waitReady(300, mainWindow ?? undefined)
+          mainWindow.webContents.send('build-status', '✅ llama.cpp обновлён и сервер перезапущен')
+          return serverManager.getLlamaReleaseInfo()
+        } catch (err: any) {
+          console.warn(`[llama:update] restart with previous launch args failed: ${err?.message ?? err}`)
+          if (serverManager.isRunning()) serverManager.stop()
+          await new Promise((r) => setTimeout(r, 1200))
+          serverManager.resetCrashState()
+          mainWindow.webContents.send('build-status', '⚠️ Прежние параметры не запустились — подбираю безопасные параметры…')
+        }
+      }
+
+      await ensureLlamaServerRunning()
+      mainWindow.webContents.send('build-status', '✅ llama.cpp обновлён и сервер перезапущен')
+      return serverManager.getLlamaReleaseInfo()
+    }
+
+    return info
   })
 
   ipcMain.handle('start-server', async () => {
@@ -993,6 +1049,7 @@ function registerIpcHandlers() {
     setWorkspace(ws)
     recentWorkspaces.addRecentWorkspace(ws)
     buildAppMenu()
+    try { workspaceWatcher.watchWorkspace(ws) } catch {}
   })
 
   // Session management (all workspace-scoped)
@@ -1004,6 +1061,17 @@ function registerIpcHandlers() {
   ipcMain.handle('get-active-session-id', (_e, workspace: string) => getActiveSessionId(workspace))
   ipcMain.handle('save-ui-messages', (_e, workspace: string, id: string, msgs: any[]) => saveUiMessages(workspace, id, msgs))
   ipcMain.handle('get-ui-messages', (_e, workspace: string, id: string) => getUiMessages(workspace, id))
+  ipcMain.handle('session:set-mode', (_e, workspace: string, id: string, mode: AgentMode) => {
+    if (mode !== 'chat' && mode !== 'plan' && mode !== 'agent') return null
+    return setSessionMode(workspace, id, mode)
+  })
+  ipcMain.handle('plan:save-artifact', (_e, workspace: string, id?: string, content?: string) => {
+    const saved = typeof content === 'string' && content.trim()
+      ? savePlanArtifactContent(workspace, content)
+      : savePlanArtifact(workspace, id)
+    try { mainWindow?.webContents.send('workspace-files-changed') } catch {}
+    return saved
+  })
 
   ipcMain.handle('get-recent-workspaces', () => recentWorkspaces.getRecentWorkspaces())
 
@@ -1037,6 +1105,35 @@ function registerIpcHandlers() {
     if (!workspace) return { files: [], truncated: false, totalBytes: 0 }
     try { return describeProjectRules(workspace) }
     catch { return { files: [], truncated: false, totalBytes: 0 } }
+  })
+
+  // ---- Context inspector (`/context`) and message pinning --------------
+  // The /context slash command asks for a per-category breakdown, so users
+  // can see which part of the conversation is eating budget. Pinning lets
+  // them mark messages to survive the next compaction.
+  ipcMain.handle('context:breakdown', (_e, workspace: string) => {
+    if (!workspace) return null
+    try { return computeContextBreakdown(workspace) } catch { return null }
+  })
+  ipcMain.handle('context:toggle-pin', (_e, workspace: string, messageId: string) => {
+    if (!workspace || !messageId) return { pinned: false }
+    try { return { pinned: toggleMessagePin(workspace, messageId) } }
+    catch { return { pinned: false } }
+  })
+  ipcMain.handle('context:pinned', (_e, workspace: string) => {
+    if (!workspace) return []
+    try { return listPinnedMessages(workspace) } catch { return [] }
+  })
+
+  // Read-only snapshot of the agent's task state (goal, plan, notes). The
+  // sidebar polls this on session change and on tool_result events so the
+  // UI always reflects whatever the agent last wrote through `update_plan`.
+  ipcMain.handle('task-state:get', (_e, workspace: string) => {
+    if (!workspace) return null
+    try {
+      const sess = getActiveSession(workspace)
+      return normalizeTaskState(sess?.taskState ?? null)
+    } catch { return null }
   })
 
   // ---- MCP (Model Context Protocol) -----------------------------------

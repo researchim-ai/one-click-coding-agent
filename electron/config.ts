@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import type { GpuMode } from './types'
+import type { GpuMode, AgentMode } from './types'
 
 export type WebSearchProvider = 'disabled' | 'managed-searxng' | 'custom-searxng'
 export type AppLanguage = 'ru' | 'en'
@@ -56,6 +56,10 @@ export interface AppConfig {
   approvalForFileOps: boolean
   /** Ask before execute_command */
   approvalForCommands: boolean
+  /** Default mode for newly-created chat sessions. Per-session overrides
+   *  live on `Session.mode` and are what the agent actually consults at
+   *  runtime. See `AgentMode` in types.ts for the semantics. */
+  defaultMode: AgentMode
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -76,6 +80,7 @@ const DEFAULT_CONFIG: AppConfig = {
   maxEmptyRetries: 3,
   approvalForFileOps: true,
   approvalForCommands: true,
+  defaultMode: 'agent',
 }
 
 export function resetToDefaults(): AppConfig {

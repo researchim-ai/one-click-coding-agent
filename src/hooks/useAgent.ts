@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import type { AgentEvent, DownloadProgress, AppStatus } from '../../electron/types'
+import type { AgentEvent, DownloadProgress, AppStatus, HunkReviewPayload } from '../../electron/types'
 import type { SessionInfo } from '../../electron/agent'
 
 export interface ToolCall {
@@ -40,6 +40,17 @@ interface SessionState {
   idCounter: number
 }
 
+type AgentMode = 'chat' | 'plan' | 'agent'
+
+function routeModeForMessage(text: string, current: AgentMode): AgentMode {
+  const s = text.toLowerCase()
+  if (/^\s*(продолжай|continue|go on|дальше|ок|давай|делай)\s*[.!?]*\s*$/i.test(text)) return current
+  if (/(^|\s)\/chat\b|обсуди|поговорим|что думаешь|объясни|поясни|explain|discuss|what do you think/.test(s)) return 'chat'
+  if (/(^|\s)\/plan\b|спланируй|составь план|план\b|архитектур|дизайн|roadmap|design|plan\b|proposal|подход/.test(s)) return 'plan'
+  if (/(^|\s)\/agent\b|сделай|реализуй|исправь|добавь|почини|удали|перепиши|создай|implement|fix|add|remove|refactor|write|update|build/.test(s)) return 'agent'
+  return current
+}
+
 export function useAgent() {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -54,6 +65,13 @@ export function useAgent() {
   const [workspace, setWorkspaceState] = useState(() => localStorage.getItem('workspace') || '')
   const [contextUsage, setContextUsage] = useState<{ usedTokens: number; budgetTokens: number; maxContextTokens: number; percent: number } | null>(null)
   const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null)
+  const [hunkReview, setHunkReview] = useState<HunkReviewPayload | null>(null)
+  const [planArtifactPath, setPlanArtifactPath] = useState<string | null>(null)
+  // Latest task-state snapshot pushed by the agent via `task_state`
+  // events. Bumped whenever the agent calls `update_plan`, so the task
+  // panel in the sidebar can re-render mid-turn (before any new chat
+  // message lands) without us having to poll getTaskState on a timer.
+  const [taskState, setTaskState] = useState<unknown>(null)
   const assistantRef = useRef<ChatMessage | null>(null)
   const idCounter = useRef(0)
 
@@ -97,6 +115,10 @@ export function useAgent() {
 
   // When workspace changes: load that project's sessions and active chat (no cross-project mixing)
   useEffect(() => {
+    // Any live task-state snapshot belongs to the previous workspace —
+    // drop it so the panel doesn't flash wrong data; the panel itself
+    // will refetch via IPC as soon as the new workspace is set.
+    setTaskState(null)
     if (!window.api || !workspace.trim()) {
       setSessions([])
       setActiveSessionId(null)
@@ -168,7 +190,32 @@ export function useAgent() {
   const refreshSessions = useCallback(async () => {
     if (!workspace || !window.api) return
     try {
-      const list = await window.api.listSessions(workspace)
+      let list = await window.api.listSessions(workspace)
+
+      // Self-heal an empty session list. This can happen after deleting
+      // every persisted chat (or after a race between delete/refresh).
+      // The app works best with exactly one active empty chat instead of
+      // a null active session that makes the "+" button look broken.
+      if (list.length === 0) {
+        const id = await window.api.createSession(workspace)
+        list = await window.api.listSessions(workspace)
+        setActiveSessionId(id)
+        setMessages([])
+        setTaskState(null)
+        assistantRef.current = null
+        idCounter.current = 0
+        sessionStates.current.delete(id)
+      } else {
+        const activeId = await window.api.getActiveSessionId(workspace)
+        if (!activeId || !list.some((s: SessionInfo) => s.id === activeId)) {
+          const next = list[0]
+          await window.api.switchSession(workspace, next.id)
+          setActiveSessionId(next.id)
+          setTaskState(null)
+          await loadFromMap(next.id)
+        }
+      }
+
       setSessions(list)
     } catch {}
   }, [workspace])
@@ -242,6 +289,22 @@ export function useAgent() {
     }
     if (ev.type === 'stream_stats') {
       if (ev.tokensPerSecond != null) setTokensPerSecond(ev.tokensPerSecond)
+      return
+    }
+    if (ev.type === 'hunk_review') {
+      // Show the inline-diff modal. The agent is now blocked inside
+      // reviewAndApplyWrite until we call `respondHunkReview`.
+      if (ev.hunkReview) setHunkReview(ev.hunkReview)
+      return
+    }
+    if (ev.type === 'task_state') {
+      // Live push from the backend after every `update_plan` tool call.
+      // We just park the snapshot — the TaskStatePanel subscribes to it.
+      if (ev.taskState !== undefined) setTaskState(ev.taskState)
+      return
+    }
+    if (ev.type === 'plan_artifact') {
+      if (typeof ev.planArtifactPath === 'string') setPlanArtifactPath(ev.planArtifactPath)
       return
     }
 
@@ -335,8 +398,36 @@ export function useAgent() {
     )
   }, [])
 
+  const respondHunkReview = useCallback((
+    approvalId: string,
+    decision:
+      | { decision: 'accept_all' }
+      | { decision: 'accept_selected'; selectedHunkIds: number[] }
+      | { decision: 'reject' },
+  ) => {
+    window.api.respondHunkReview(approvalId, decision)
+    setHunkReview(null)
+  }, [])
+
+  // Per-session mode (chat/plan/agent). Derived from `sessions` via
+  // `activeSessionId` — keeping it a derived constant means the chip
+  // switcher in the UI auto-updates after every `refreshSessions` call
+  // without us having to plumb an extra setter through.
+  const activeMode: AgentMode = (() => {
+    if (!activeSessionId) return 'agent'
+    const s = sessions.find((x) => x.id === activeSessionId)
+    return (s?.mode === 'chat' || s?.mode === 'plan' || s?.mode === 'agent') ? s.mode : 'agent'
+  })()
+
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || busy) return
+    const routedMode = routeModeForMessage(text, activeMode)
+    if (workspace && activeSessionId && routedMode !== activeMode) {
+      try {
+        await window.api.setSessionMode(workspace, activeSessionId, routedMode)
+        setSessions((prev) => prev.map((s) => s.id === activeSessionId ? { ...s, mode: routedMode } : s))
+      } catch {}
+    }
     setMessages((prev) => {
       const userMsg: ChatMessage = { id: nextId(), role: 'user', content: text }
       const assistantMsg: ChatMessage = { id: nextId(), role: 'assistant', content: '', toolCalls: [] }
@@ -351,7 +442,7 @@ export function useAgent() {
       setBusy(false)
     }
     refreshSessions()
-  }, [busy, workspace, refreshSessions])
+  }, [busy, workspace, activeSessionId, activeMode, refreshSessions])
 
   const cancel = useCallback(async () => {
     try {
@@ -385,12 +476,20 @@ export function useAgent() {
   const newSession = useCallback(async () => {
     if (busy || !workspace) return
     saveCurrentToMap()
-    const id = await window.api.createSession(workspace)
-    setActiveSessionId(id)
-    setMessages([])
-    assistantRef.current = null
-    idCounter.current = 0
-    await refreshSessions()
+    try {
+      const id = await window.api.createSession(workspace)
+      setActiveSessionId(id)
+      setMessages([])
+      setTaskState(null)
+      assistantRef.current = null
+      idCounter.current = 0
+      sessionStates.current.delete(id)
+      await refreshSessions()
+    } catch {
+      // If creation failed because frontend/backend state drifted, force
+      // one refresh; refreshSessions itself can recreate a missing chat.
+      await refreshSessions()
+    }
   }, [busy, workspace, activeSessionId, messages, refreshSessions])
 
   const switchToSession = useCallback(async (id: string) => {
@@ -399,9 +498,22 @@ export function useAgent() {
     const ok = await window.api.switchSession(workspace, id)
     if (ok) {
       setActiveSessionId(id)
+      setTaskState(null)
       loadFromMap(id)
     }
   }, [busy, workspace, activeSessionId, messages])
+
+  /** Change the mode of the active session. Persists server-side via
+   *  IPC and refreshes the sessions list so the UI picks up the new
+   *  value. Blocked while the agent is running — the mode is read at
+   *  the start of each turn, and yanking it mid-turn would be confusing. */
+  const setSessionMode = useCallback(async (mode: 'chat' | 'plan' | 'agent') => {
+    if (!workspace || !activeSessionId || busy) return
+    try {
+      await window.api.setSessionMode(workspace, activeSessionId, mode)
+      await refreshSessions()
+    } catch {}
+  }, [workspace, activeSessionId, busy, refreshSessions])
 
   const removeSession = useCallback(async (id: string) => {
     if (busy || !workspace) return
@@ -419,8 +531,10 @@ export function useAgent() {
         const newId = await window.api.createSession(workspace)
         setActiveSessionId(newId)
         setMessages([])
+        setTaskState(null)
         assistantRef.current = null
         idCounter.current = 0
+        sessionStates.current.delete(newId)
       }
     }
     await refreshSessions()
@@ -509,5 +623,10 @@ export function useAgent() {
     sessions, activeSessionId,
     newSession, switchToSession, removeSession, renameActiveSession,
     restoreCheckpoint,
+    hunkReview, respondHunkReview,
+    taskState,
+    planArtifactPath,
+    clearPlanArtifactPath: () => setPlanArtifactPath(null),
+    mode: activeMode, setMode: setSessionMode,
   }
 }

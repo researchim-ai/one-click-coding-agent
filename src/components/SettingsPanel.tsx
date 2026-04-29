@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import type { ModelVariantInfo, ToolInfo, SystemResources, GpuMode, ModelFamily, WebSearchStatus } from '../../electron/types'
+import type { ModelVariantInfo, ToolInfo, SystemResources, GpuMode, ModelFamily, WebSearchStatus, LlamaReleaseInfo } from '../../electron/types'
 import type { AppConfig, CustomTool, McpServerConfig, WebSearchProvider } from '../../electron/config'
 import type { McpServerStatus } from '../../electron/mcp'
 
@@ -70,6 +70,10 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
   const [selectedGpuIndex, setSelectedGpuIndex] = useState<number>(0)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [llamaInfo, setLlamaInfo] = useState<LlamaReleaseInfo | null>(null)
+  const [llamaUpdating, setLlamaUpdating] = useState(false)
+  const [llamaBuildStatus, setLlamaBuildStatus] = useState<string | null>(null)
+  const [modelDownloadStatus, setModelDownloadStatus] = useState<string | null>(null)
   const [editingTool, setEditingTool] = useState<CustomTool | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
@@ -119,7 +123,8 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       window.api.getPrompts(),
       window.api.getModelFamilies?.() ?? Promise.resolve([] as ModelFamily[]),
       window.api.getWebSearchStatus?.() ?? Promise.resolve(null as WebSearchStatus | null),
-    ]).then(async ([c, r, toolsList, p, fams, wsSt]) => {
+      window.api.getLlamaReleaseInfo?.() ?? Promise.resolve(null as LlamaReleaseInfo | null),
+    ]).then(async ([c, r, toolsList, p, fams, wsSt, llama]) => {
       const gpuMode = c.gpuMode ?? 'single'
       const gpuIndex = c.gpuIndex ?? r.gpus[0]?.index ?? 0
       const v = await window.api.getModelVariants({ gpuMode, gpuIndex })
@@ -129,6 +134,9 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       setVariants(v)
       setTools(toolsList)
       setFamilies(fams ?? [])
+      setLlamaInfo(llama)
+      setLlamaBuildStatus(null)
+      setModelDownloadStatus(null)
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
       const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q4_K_XL')
@@ -159,6 +167,20 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       setDefaultSumPrompt(p.defaultSummarizePrompt)
       setPromptsDirty(false)
     }).catch(() => {})
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    return window.api.onBuildStatus((status) => {
+      setLlamaBuildStatus(status)
+    })
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    return window.api.onDownloadProgress((progress) => {
+      setModelDownloadStatus(progress.status)
+    })
   }, [open])
 
   useEffect(() => {
@@ -218,6 +240,8 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
         gpuIndex: selectedGpuIndex,
       })
       await window.api.selectModelVariant(selectedQuant)
+      setModelDownloadStatus(null)
+      setLlamaBuildStatus(null)
       const result = await window.api.restartServer()
       setDirty(false)
       if (result?.actualCtx && result.actualCtx < selectedCtx) {
@@ -232,6 +256,26 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       alert((L === 'ru' ? 'Ошибка: ' : 'Error: ') + (e.message ?? e))
     } finally {
       setSaving(false)
+    }
+  }
+
+  const refreshLlamaInfo = async () => {
+    const info = await window.api.getLlamaReleaseInfo()
+    setLlamaInfo(info)
+    return info
+  }
+
+  const handleUpdateLlama = async () => {
+    setLlamaUpdating(true)
+    setLlamaBuildStatus(null)
+    try {
+      const info = await window.api.updateLlama()
+      setLlamaInfo(info)
+    } catch (e: any) {
+      alert((L === 'ru' ? 'Ошибка обновления llama.cpp: ' : 'llama.cpp update error: ') + (e?.message ?? e))
+      await refreshLlamaInfo().catch(() => null)
+    } finally {
+      setLlamaUpdating(false)
     }
   }
 
@@ -405,6 +449,11 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
                 await refreshVariantsForGpu(selectedGpuMode, gpuIndex)
                 setDirty(true)
               }}
+              llamaInfo={llamaInfo}
+              llamaBuildStatus={llamaBuildStatus}
+              llamaUpdating={llamaUpdating}
+              onRefreshLlama={refreshLlamaInfo}
+              onUpdateLlama={handleUpdateLlama}
             />
           )}
           {tab === 'web-search' && (
@@ -475,9 +524,18 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
         {/* Footer */}
         {tab === 'model' && dirty && (
           <div className="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 shrink-0">
-            <span className="text-xs text-zinc-500 flex-1">
-              {t('Сервер будет перезапущен с новыми настройками', 'Server will restart with new settings')}
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs text-zinc-500">
+                {saving
+                  ? t('Сервер перезапускается, модель загружается…', 'Server is restarting, model is loading…')
+                  : t('Сервер будет перезапущен с новыми настройками', 'Server will restart with new settings')}
+              </div>
+              {saving && (modelDownloadStatus || llamaBuildStatus) && (
+                <div className="mt-1 truncate font-mono text-[11px] text-zinc-400" title={modelDownloadStatus ?? llamaBuildStatus ?? undefined}>
+                  {modelDownloadStatus ?? llamaBuildStatus}
+                </div>
+              )}
+            </div>
             <button
               onClick={handleApplyRestart}
               disabled={saving}
@@ -550,6 +608,7 @@ function ModelTab({
   variants, families, selectedFamily, availableGpus, hasMultipleGpus,
   selectedQuant, selectedCtx, selectedGpuMode, selectedGpuIndex, maxCtx, appLanguage,
   onFamilyChange, onQuantChange, onCtxChange, onGpuModeChange, onGpuIndexChange,
+  llamaInfo, llamaBuildStatus, llamaUpdating, onRefreshLlama, onUpdateLlama,
 }: {
   variants: ModelVariantInfo[]
   families: ModelFamily[]
@@ -567,12 +626,101 @@ function ModelTab({
   onCtxChange: (c: number) => void
   onGpuModeChange: (mode: GpuMode) => void | Promise<void>
   onGpuIndexChange: (index: number) => void | Promise<void>
+  llamaInfo: LlamaReleaseInfo | null
+  llamaBuildStatus: string | null
+  llamaUpdating: boolean
+  onRefreshLlama: () => void | Promise<unknown>
+  onUpdateLlama: () => void | Promise<void>
 }) {
   const L = appLanguage
   const t = (ru: string, en: string) => tr(ru, en, L)
   const familyVariants = selectedFamily ? variants.filter((v) => v.family === selectedFamily) : variants
   return (
     <div className="space-y-6">
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-zinc-200">llama.cpp</div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              {llamaInfo?.installed
+                ? t('Локальный сервер установлен', 'Local server installed')
+                : t('Локальный сервер ещё не установлен', 'Local server is not installed yet')}
+            </div>
+          </div>
+          {llamaInfo?.updateAvailable ? (
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+              {t('доступно обновление', 'update available')}
+            </span>
+          ) : llamaInfo?.latestTag && llamaInfo?.installedTag && llamaInfo.latestTag === llamaInfo.installedTag ? (
+            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+              {t('актуально', 'up to date')}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+          <div className="rounded-lg bg-zinc-950/40 px-2.5 py-2">
+            <div className="text-zinc-600">{t('Установлено', 'Installed')}</div>
+            <div className="mt-0.5 font-mono text-zinc-300">
+              {llamaInfo?.installedTag ?? (llamaInfo?.installed ? t('неизвестно', 'unknown') : '—')}
+            </div>
+          </div>
+          <div className="rounded-lg bg-zinc-950/40 px-2.5 py-2">
+            <div className="text-zinc-600">{t('Последний релиз', 'Latest release')}</div>
+            <div className="mt-0.5 font-mono text-zinc-300">
+              {llamaInfo?.latestTag ?? (llamaInfo?.error ? t('ошибка проверки', 'check failed') : '…')}
+            </div>
+          </div>
+          <div className="col-span-2 rounded-lg bg-zinc-950/40 px-2.5 py-2">
+            <div className="text-zinc-600">{t('Бинарь', 'Binary')}</div>
+            <div className="mt-0.5 truncate font-mono text-zinc-400" title={llamaInfo?.binaryPath ?? ''}>
+              {llamaInfo?.installedVariant ?? '—'}{llamaInfo?.binaryPath ? ` · ${llamaInfo.binaryPath}` : ''}
+            </div>
+          </div>
+        </div>
+
+        {llamaInfo?.error && (
+          <div className="mt-2 text-[11px] text-red-300/80">
+            {t('Не удалось проверить обновления:', 'Could not check updates:')} {llamaInfo.error}
+          </div>
+        )}
+
+        {llamaBuildStatus && (
+          <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/50 px-2.5 py-2 font-mono text-[11px] text-zinc-400">
+            {llamaBuildStatus}
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={onRefreshLlama}
+            disabled={llamaUpdating}
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t('Проверить обновления', 'Check updates')}
+          </button>
+          <button
+            onClick={onUpdateLlama}
+            disabled={llamaUpdating || !llamaInfo?.latestTag}
+            className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            title={t('Скачает последний релиз и заменит старую версию llama.cpp', 'Download the latest release and replace the old llama.cpp')}
+          >
+            {llamaUpdating
+              ? t('Обновление…', 'Updating…')
+              : llamaInfo?.installed
+                ? t('Обновить llama.cpp', 'Update llama.cpp')
+                : t('Установить llama.cpp', 'Install llama.cpp')}
+          </button>
+        </div>
+
+        <p className="mt-2 text-[11px] leading-snug text-zinc-600">
+          {t(
+            'При обновлении текущий llama-server будет остановлен. Новый бинарь скачивается во временную папку и заменяет старый только после успешной проверки.',
+            'Updating stops the current llama-server. The new binary is downloaded into a temporary folder and replaces the old one only after verification.',
+          )}
+        </p>
+      </div>
+
       {hasMultipleGpus && (
         <div>
           <label className="block text-sm font-medium text-zinc-300 mb-3">{t('Режим GPU', 'GPU mode')}</label>
@@ -665,7 +813,7 @@ function ModelTab({
           {familyVariants.map((v) => {
             const isSel = v.quant === selectedQuant
             const colorClass = BITS_COLOR[v.bits] ?? 'text-zinc-400'
-            const displayQuant = v.quant.replace(/^9B-/, '').replace('UD-', '')
+            const displayQuant = v.quant.replace(/^9B-/, '').replace(/^27B-/, '').replace(/^36-/, '').replace('UD-', '')
             return (
               <button
                 key={v.quant}
@@ -1294,9 +1442,46 @@ interface McpPreset {
   args: string[]
   envHints?: { key: string; description: string }[]
   description: { ru: string; en: string }
+  /** Zero-config presets work out of the box with just `npx`/`uvx` —
+   *  no API keys, no paths to fill in. UI gives these a one-click
+   *  "add + connect" button instead of opening the editor. */
+  zeroConfig?: boolean
 }
 
 const MCP_PRESETS: McpPreset[] = [
+  // ---- Zero-config, works out of the box -------------------------------
+  {
+    name: 'memory',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-memory'],
+    zeroConfig: true,
+    description: {
+      ru: 'Долговременная память агента: граф сущностей/отношений между сессиями',
+      en: 'Long-term agent memory: entities and relations graph across sessions',
+    },
+  },
+  {
+    name: 'sequential-thinking',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+    zeroConfig: true,
+    description: {
+      ru: 'Структурированное пошаговое рассуждение — помогает модели продумывать сложные задачи',
+      en: 'Structured step-by-step reasoning — helps the model think through complex tasks',
+    },
+  },
+  {
+    name: 'everything',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-everything'],
+    zeroConfig: true,
+    description: {
+      ru: 'Эталонный тестовый сервер — проверить что MCP в принципе работает (echo, add, длинные ответы и т.п.)',
+      en: 'Reference test server — verify MCP works end-to-end (echo, add, long outputs, etc.)',
+    },
+  },
+
+  // ---- Need path / API key ---------------------------------------------
   {
     name: 'filesystem',
     command: 'npx',
@@ -1403,6 +1588,29 @@ function McpTab({ appLanguage }: { appLanguage: 'ru' | 'en' }) {
     try { await window.api.mcpSaveServer(s) } catch {}
     setEditing(null)
     await refresh()
+  }
+
+  /** One-click install for zero-config presets: skip the editor entirely,
+   *  save straight to config, and kick a connect. Status dots will light
+   *  up as the background connect finishes. */
+  async function quickAddPreset(preset: McpPreset) {
+    const cfg = newServerFromPreset(preset)
+    setBusyId(cfg.id)
+    try {
+      await window.api.mcpSaveServer(cfg)
+      // mcpSaveServer already auto-connects enabled servers, but we also
+      // want the user to see the "connecting…" state on THIS button, so
+      // we block until the status updates.
+      await refresh()
+    } catch {}
+    setBusyId(null)
+  }
+
+  const installedCmdArgs = new Set(
+    servers.map((s) => `${s.command} ${s.args.join(' ')}`),
+  )
+  function isPresetInstalled(p: McpPreset): boolean {
+    return installedCmdArgs.has(`${p.command} ${p.args.join(' ')}`)
   }
 
   function newServerFromPreset(preset?: McpPreset): McpServerConfig {
@@ -1578,18 +1786,57 @@ function McpTab({ appLanguage }: { appLanguage: 'ru' | 'en' }) {
 
       {/* Add new */}
       {!editing && (
-        <div className="space-y-2">
-          <button
-            onClick={() => setEditing(newServerFromPreset())}
-            className="text-xs px-3 py-1.5 rounded-lg bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors"
-          >
-            + {t('Добавить сервер', 'Add server')}
-          </button>
-
+        <div className="space-y-3">
+          {/* Zero-config presets — big cards with one-click "Install". */}
           <div className="pt-2 border-t border-zinc-800">
-            <p className="text-[11px] text-zinc-500 mb-2">{t('Популярные пресеты:', 'Popular presets:')}</p>
+            <p className="text-[11px] text-zinc-500 mb-2">
+              {t('Попробовать сейчас (без настройки):', 'Try now (no config):')}
+            </p>
+            <div className="grid grid-cols-1 gap-1.5">
+              {MCP_PRESETS.filter((p) => p.zeroConfig).map((p) => {
+                const installed = isPresetInstalled(p)
+                return (
+                  <div
+                    key={p.name}
+                    className={`px-3 py-2 rounded-lg border flex items-start gap-2.5 ${
+                      installed ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-zinc-800 hover:border-zinc-700'
+                    } transition-colors`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[12px] font-mono text-zinc-200">{p.name}</span>
+                        {installed && (
+                          <span className="text-[10px] text-emerald-400/80">{t('добавлен', 'installed')}</span>
+                        )}
+                      </div>
+                      <p className="text-[10.5px] text-zinc-500 mt-0.5">{p.description[L]}</p>
+                    </div>
+                    <button
+                      onClick={() => quickAddPreset(p)}
+                      disabled={installed}
+                      className="shrink-0 text-[11px] px-2.5 py-1 rounded bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {installed ? '✓' : t('Установить', 'Install')}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="text-[10px] text-zinc-600 mt-1.5">
+              {t(
+                'Первая установка скачает npm-пакет (~10–30 сек), дальше мгновенно.',
+                'First install fetches the npm package (~10–30 s), then it\'s instant.',
+              )}
+            </p>
+          </div>
+
+          {/* Preset chips that need config + fully custom "Add server" button. */}
+          <div className="pt-2 border-t border-zinc-800">
+            <p className="text-[11px] text-zinc-500 mb-2">
+              {t('Требуют настройки (API-ключ или путь):', 'Need config (API key or path):')}
+            </p>
             <div className="flex flex-wrap gap-1.5">
-              {MCP_PRESETS.map((p) => (
+              {MCP_PRESETS.filter((p) => !p.zeroConfig).map((p) => (
                 <button
                   key={p.name}
                   onClick={() => setEditing(newServerFromPreset(p))}
@@ -1599,6 +1846,12 @@ function McpTab({ appLanguage }: { appLanguage: 'ru' | 'en' }) {
                   {p.name}
                 </button>
               ))}
+              <button
+                onClick={() => setEditing(newServerFromPreset())}
+                className="text-[11px] px-2 py-1 rounded border border-blue-500/40 text-blue-400 hover:border-blue-500 hover:bg-blue-500/10 cursor-pointer"
+              >
+                + {t('свой', 'custom')}
+              </button>
             </div>
           </div>
         </div>

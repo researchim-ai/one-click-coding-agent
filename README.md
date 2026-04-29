@@ -271,6 +271,25 @@ one-click-coding-agent/
 - **react-markdown** — рендеринг markdown в чате
 - **electron-builder** — пакетирование (AppImage/deb/rpm/dmg/nsis)
 
+## Тесты
+
+Тесты поделены на два слоя:
+
+- **Юнит-тесты** (`tests/*.test.ts`) покрывают чистую бизнес-логику: кэш инструментов, task-state, архив истории, repo-map, project-rules, checkpoints, slash-команды, файловые tools.
+- **Интеграционные тесты** (`tests/integration/*.test.ts`) прогоняют `runAgent` в Node-режиме с мок-`AgentBridge` и заглушкой `fetch`, которая отдаёт скриптованный SSE-стрим. Проверяются стыки между `agent.ts` и модулями контекста: попадания в tool-cache, `update_plan` → system prompt следующего хода, поиск через `recall`, передача `cache_prompt: true` в запрос и наличие repo map в первом системном промпте.
+
+```bash
+npm test                  # все тесты (юнит + интеграционные)
+npm run test:unit         # только юнит-тесты
+npm run test:integration  # только интеграционные
+npm run test:watch        # watch-режим во время разработки
+npm run test:coverage     # с отчётом покрытия (html в ./coverage)
+```
+
+CI (`.github/workflows/ci.yml`) на каждый push/PR прогоняет `tsc --noEmit`, `npm test` и `vite build`.
+
+Интеграционные тесты НЕ запускают реальный llama.cpp или Electron — все внешние эффекты отводятся через `AgentBridge`/мок `fetch`, и вся изолированная файловая активность ведётся под временной `$HOME`. Это позволяет держать весь прогон в районе 300 мс на CI. Для ручной проверки полного Electron-пайплайна см. `npm run dev`.
+
 ## Участие в разработке
 
 Проект развивается в организации [researchim-ai](https://github.com/researchim-ai). Pull requests и issues приветствуются.
@@ -279,7 +298,7 @@ one-click-coding-agent/
 git clone https://github.com/researchim-ai/one-click-coding-agent.git
 cd one-click-coding-agent
 npm install
-npm run dev
+npm run dev     # или npm test для юнит-тестов
 ```
 
 ## Лицензия

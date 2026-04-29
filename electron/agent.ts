@@ -1,8 +1,23 @@
 import { TOOL_DEFINITIONS, executeTool, executeCustomTool, getBuiltinToolDefinitions } from './tools'
 import { createCheckpoint, describeToolForCheckpoint } from './checkpoints'
-import { loadProjectRules } from './project-rules'
+import * as archive from './archive'
+import { RECALL_TOOL_DEF } from './archive'
+import * as projectMemory from './project-memory'
+import * as toolCache from './tool-cache'
+import { previewWriteFile, previewEditFile, applySelectedHunks } from './diff-hunks'
+import type { HunkReviewPayload, AgentMode } from './types'
+import { Agent as UndiciAgent } from 'undici'
+import {
+  TaskState,
+  emptyTaskState,
+  applyTaskStateUpdate,
+  normalizeTaskState,
+  renderTaskStateForPrompt,
+  UPDATE_PLAN_TOOL_DEF,
+} from './task-state'
 import type { AgentEvent } from './types'
 import type { AppConfig } from './config'
+import { load as loadConfig } from './config'
 import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -12,6 +27,17 @@ import * as os from 'os'
 export interface AgentBridge {
   emit(event: AgentEvent): void
   requestApproval(toolName: string, args: Record<string, any>): Promise<boolean>
+  /** Inline per-hunk review for `write_file`/`edit_file`. The UI gets the
+   *  full diff and lets the user tick which hunks to accept; we apply
+   *  only the accepted ones.
+   *
+   *  Implementations may fall back to the plain yes/no approval path if
+   *  the frontend doesn't support hunk review — in that case return
+   *  `{ decision: 'accept_all' }` on yes and `{ decision: 'reject' }` on
+   *  no, so the agent can't tell the difference.
+   *
+   *  Optional so existing test harnesses keep working unchanged. */
+  requestHunkReview?(payload: import('./types').HunkReviewPayload): Promise<HunkReviewDecision>
   getConfig(): AppConfig
   getSession(): Session
   saveSession(session: Session): void
@@ -29,6 +55,11 @@ export interface AgentBridge {
    *  the tool isn't registered. */
   callMcpTool(qualifiedName: string, args: Record<string, any>): Promise<string>
 }
+
+export type HunkReviewDecision =
+  | { decision: 'accept_all' }
+  | { decision: 'accept_selected'; selectedHunkIds: number[] }
+  | { decision: 'reject' }
 
 /** Snapshot of one MCP tool, shape kept minimal so it crosses worker
  *  boundaries cheaply. */
@@ -149,13 +180,123 @@ function maybeCheckpoint(
   }
 }
 
+/** Ask the user to review a proposed file change hunk by hunk, then apply
+ *  only the hunks they approved. Returns the string the agent sees as the
+ *  tool result. Errors from the preview (e.g. `edit_file` old_string
+ *  missing) short-circuit back to the model unchanged, so the model can
+ *  self-correct — exactly like before inline review existed. */
+async function reviewAndApplyWrite(
+  toolName: 'write_file' | 'edit_file',
+  toolArgs: Record<string, any>,
+  workspace: string,
+  approvalId: string,
+): Promise<string> {
+  const preview = toolName === 'write_file'
+    ? previewWriteFile({ path: String(toolArgs.path ?? ''), content: String(toolArgs.content ?? '') }, workspace)
+    : previewEditFile(
+        { path: String(toolArgs.path ?? ''), old_string: String(toolArgs.old_string ?? ''), new_string: String(toolArgs.new_string ?? '') },
+        workspace,
+      )
+
+  if ('error' in preview) return preview.error
+
+  // Zero-change writes: silently accept without bugging the user.
+  if (preview.identical) {
+    return `No-op: ${preview.path} already has the requested content.`
+  }
+
+  const payload: HunkReviewPayload = {
+    approvalId,
+    toolName,
+    filePath: preview.path,
+    oldContent: preview.oldContent,
+    newContent: preview.newContent,
+    hunks: preview.hunks,
+    isNewFile: preview.oldContent === null,
+  }
+  doEmit({ type: 'hunk_review', name: toolName, approvalId, args: toolArgs, hunkReview: payload })
+
+  const decision = await doRequestHunkReview(payload)
+
+  if (decision.decision === 'reject') {
+    return `[Denied by user] Operation "${toolName}" was not approved.`
+  }
+
+  const fs = require('fs') as typeof import('fs')
+  const path = require('path') as typeof import('path')
+  const absPath = path.isAbsolute(preview.path) ? preview.path : path.join(workspace, preview.path)
+
+  if (decision.decision === 'accept_all') {
+    try {
+      fs.mkdirSync(path.dirname(absPath), { recursive: true })
+      fs.writeFileSync(absPath, preview.newContent)
+    } catch (e: any) {
+      return `Error: ${e?.message ?? String(e)}`
+    }
+    return toolName === 'write_file'
+      ? `Created ${preview.path} (${preview.newContent.split('\n').length} lines, ${preview.newContent.length} bytes)`
+      : `Edited ${preview.path}: replaced via hunk-review (${preview.hunks.length} hunk(s) accepted)`
+  }
+
+  // accept_selected
+  const selectedIds = decision.selectedHunkIds ?? []
+  if (selectedIds.length === 0) {
+    return `[Denied by user] No hunks accepted for "${toolName}" on ${preview.path}.`
+  }
+  const baseText = preview.oldContent ?? ''
+  const applied = applySelectedHunks(baseText, preview.hunks, selectedIds)
+  try {
+    fs.mkdirSync(path.dirname(absPath), { recursive: true })
+    fs.writeFileSync(absPath, applied)
+  } catch (e: any) {
+    return `Error: ${e?.message ?? String(e)}`
+  }
+  const accepted = selectedIds.length
+  const total = preview.hunks.length
+  return `${toolName === 'write_file' ? 'Wrote' : 'Edited'} ${preview.path}: applied ${accepted}/${total} hunk(s) via review (${applied.split('\n').length} lines, ${applied.length} bytes)`
+}
+
 const FALLBACK_CTX_TOKENS = 32768
 const SUMMARIZE_TIMEOUT_MS = 60000
 
 let currentBridge: AgentBridge | null = null
 
+/** Dedicated undici dispatcher for the streaming LLM endpoint.
+ *
+ *  Node 18+ uses undici as its fetch implementation, which defaults to
+ *  `headersTimeout = 300s` and `bodyTimeout = 300s`. A cold llama.cpp
+ *  server on Vulkan prefilling a 90K-token prompt can take minutes to
+ *  send even the FIRST byte of the SSE stream, after which the default
+ *  fetch dies with a cryptic `fetch failed` / `UND_ERR_HEADERS_TIMEOUT`.
+ *
+ *  For this one endpoint we explicitly want "wait as long as it takes":
+ *  the user has already been told "this is going to be slow" the moment
+ *  they asked a question against a huge context, and our application-
+ *  level idle timer inside `streamLlmResponse` is the source of truth
+ *  for stall detection (and it only starts ticking after the first byte
+ *  arrives). So turn off undici's own impatience here.
+ */
+const llmStreamDispatcher = new UndiciAgent({
+  headersTimeout: 0,      // never give up waiting for the response headers
+  bodyTimeout: 0,         // never give up mid-stream either
+  keepAliveTimeout: 600_000, // keep the connection warm for reuse across turns
+  keepAliveMaxTimeout: 600_000,
+  connectTimeout: 10_000, // initial TCP connect can still fail fast
+})
+
 function doEmit(e: AgentEvent): void { currentBridge!.emit(e) }
 function doRequestApproval(name: string, args: Record<string, any>): Promise<boolean> { return currentBridge!.requestApproval(name, args) }
+function doRequestHunkReview(payload: HunkReviewPayload): Promise<HunkReviewDecision> {
+  const fn = currentBridge?.requestHunkReview
+  if (!fn) {
+    // Host doesn't know about hunk review — fall back to a plain approval so
+    // the agent flow stays identical to the old "yes/no" world.
+    return doRequestApproval(payload.toolName, { path: payload.filePath }).then((ok) =>
+      ok ? ({ decision: 'accept_all' } as HunkReviewDecision) : ({ decision: 'reject' } as HunkReviewDecision),
+    )
+  }
+  return fn.call(currentBridge, payload)
+}
 function doGetConfig(): AppConfig { return currentBridge!.getConfig() }
 function doGetSession(): Session { return currentBridge!.getSession() }
 function doSaveSession(s: Session): void { currentBridge!.saveSession(s) }
@@ -165,10 +306,23 @@ function doSetCtxSize(n: number): void { currentBridge!.setCtxSize(n) }
 function doQueryActualCtxSize(): Promise<void> { return currentBridge!.queryActualCtxSize() }
 function doIsCancelRequested(): boolean { return currentBridge!.isCancelRequested() }
 
+function getDefaultAgentMode(): AgentMode {
+  try {
+    return (currentBridge?.getConfig() ?? loadConfig()).defaultMode ?? 'agent'
+  } catch {
+    return 'agent'
+  }
+}
+
 function getMaxIterations(): number { return doGetConfig().maxIterations || 200 }
 function getBaseTemperature(): number { return doGetConfig().temperature ?? 0.3 }
 function getIdleTimeoutMs(): number { return (doGetConfig().idleTimeoutSec || 60) * 1000 }
 function getMaxEmptyRetries(): number { return doGetConfig().maxEmptyRetries || 3 }
+
+const LOOP_GUARDED_READONLY_TOOLS = new Set(['read_file', 'list_directory', 'find_files'])
+const MAX_IDENTICAL_READONLY_TOOL_CALLS_PER_TURN = 2
+const MAX_LOOP_NUDGES_PER_TURN = 3
+
 /** Whether this tool requires user approval given current config (file ops vs commands split). */
 function needsApprovalForTool(toolName: string, isCustom: boolean): boolean {
   const cfg = doGetConfig()
@@ -178,11 +332,19 @@ function needsApprovalForTool(toolName: string, isCustom: boolean): boolean {
   return false
 }
 
-// Graduated compression thresholds (fraction of message budget)
-const COMPRESS_TOOL_RESULTS_AT = 0.35
-const SUMMARIZE_AT = 0.55
-const AGGRESSIVE_PRUNE_AT = 0.80
-const EMERGENCY_AT = 0.92
+// Graduated compression thresholds (fraction of message budget).
+//
+// These were deliberately tightened in the perf pass: large contexts
+// turn prefill latency O(N^2) on the attention side, so keeping the
+// typical prompt ~half the window is a much better trade than letting
+// it drift toward the emergency ceiling on every turn. With the KV
+// cache now actually reused (taskState is no longer baked into the
+// system prompt), tier 1/2/3 compaction runs far less often AND costs
+// less when it does.
+const COMPRESS_TOOL_RESULTS_AT = 0.25
+const SUMMARIZE_AT = 0.45
+const AGGRESSIVE_PRUNE_AT = 0.65
+const EMERGENCY_AT = 0.85
 
 function keepRecentTurns(): number {
   const budget = getMessageBudget()
@@ -243,8 +405,23 @@ export const DEFAULT_SYSTEM_PROMPT = `You are an expert software engineer workin
 5. **Verify your work.** After making changes, run the project's test suite, linter, or type-checker. If you broke something, fix it immediately.
 6. **Iterate.** Complex tasks require multiple rounds of explore → edit → verify. Don't try to do everything in one shot.
 
+## Dynamic context discovery
+
+- The initial prompt contains only a compact project index. Pull deeper context on demand instead of assuming it is already loaded.
+- Use get_project_context(section="overview") to orient, section="rules" before editing when rule files exist, and section="repo_map" to jump to likely implementation files.
+- Do not repeatedly list/read broad project context if you already have enough evidence. Prefer focused find_files/read_file calls.
+
+## Self-check before final answer
+
+When you changed files, installed dependencies, altered configuration, or affected runtime behavior:
+- Before your final visible answer, run the most relevant available checks with execute_command: type-check, lint, tests, build, or a narrower command if the repo clearly has one.
+- If a check is too expensive, unavailable, or unsafe, state that explicitly in the final checklist.
+- Your final answer must include a short verification checklist with pass/fail/skipped status.
+- If checks fail, fix the issue and rerun the relevant check before finalizing whenever possible.
+
 ## Tool usage
 
+- **get_project_context**: Dynamically fetch overview, project rules, or repo map only when needed. Prefer this over relying on a huge initial prompt.
 - **read_file**: Returns line-numbered content. Use offset/limit for files > 500 lines. Always read before editing.
 - **edit_file**: old_string must exactly match file content (whitespace, indentation). If not unique, include more surrounding lines for context.
 - **write_file**: Only for NEW files. Creates parent directories automatically.
@@ -304,19 +481,20 @@ CONVERSATION:
 const COMPACT_SYSTEM_PROMPT = `You are an expert autonomous coding agent with access to tools.
 
 ## Workflow
-1. Explore first: list_directory, read_file on key files
+1. Explore first: get_project_context overview/rules/repo_map as needed, then read_file on key files
 2. Search before guessing: find_files with type="content"
 3. Read before editing: always read_file first
 4. Make targeted edits: use edit_file, not full rewrites
-5. Verify: run tests/linter after changes
+5. Verify: after changes, run relevant tests/linter/type-check/build before final answer
 
 ## Rules
 - Match existing code style exactly
 - Keep changes minimal and focused
 - Think step by step in <think>...</think> tags
 - Be concise. Respond in the user's language
-- Use tools efficiently — prefer read_file over execute_command cat
+- Use tools efficiently — fetch project context dynamically with get_project_context and prefer read_file over execute_command cat
 - write_file: max 80 lines per call. For larger files: write skeleton first, then edit_file to fill sections
+- Final answer after edits must include a short verification checklist; mark unavailable/expensive checks as skipped with reason
 - Use append_file to add content to existing files incrementally`
 
 function getOsInfo(): string {
@@ -335,6 +513,223 @@ function getSystemPrompt(): string {
   const custom = doGetConfig().systemPrompt
   const base = custom || (ctxTokens() < 16384 ? COMPACT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT)
   return base + getOsInfo()
+}
+
+/** Sentinel marking the ephemeral task-state message so we can find and
+ *  replace/strip it in-place without touching anything else. Lives in the
+ *  CONTENT of a synthetic user message that sits directly before the
+ *  latest real user message — keeping the system prompt and the entire
+ *  history stable across turns so llama.cpp's `cache_prompt` KV-cache
+ *  actually kicks in.
+ *
+ *  Historical note: this block used to be appended to the system prompt
+ *  directly. That looked clean, but any `update_plan` change would
+ *  mutate the first message's tokens and invalidate the whole KV cache —
+ *  re-prefilling every tool result, message, and system prompt on every
+ *  turn. On long contexts (90K+ tokens) that was minutes of compute. */
+const TASK_STATE_BEGIN = '<!--taskstate:begin-->'
+const TASK_STATE_END = '<!--taskstate:end-->'
+
+const UPDATE_PROJECT_MEMORY_TOOL_DEF = {
+  type: 'function',
+  function: {
+    name: 'update_project_memory',
+    description:
+      'Persist an important project-level memory for future sessions: architecture decisions, user/project preferences, known issues, or durable notes. Use sparingly for facts that should survive chat resets.',
+    parameters: {
+      type: 'object',
+      properties: {
+        category: {
+          type: 'string',
+          enum: ['decision', 'preference', 'known_issue', 'note'],
+          description: 'Kind of memory to store.',
+        },
+        title: { type: 'string', description: 'Short title.' },
+        content: { type: 'string', description: 'Concrete durable detail to remember.' },
+      },
+      required: ['category', 'title', 'content'],
+    },
+  },
+}
+
+const SAVE_PLAN_ARTIFACT_TOOL_DEF = {
+  type: 'function',
+  function: {
+    name: 'save_plan_artifact',
+    description:
+      'Save a polished Markdown implementation plan as PLAN.md in the workspace and show it to the user. Use in Plan mode after you have explored the project and called update_plan. This is the only workspace write allowed in Plan mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: {
+          type: 'string',
+          description: 'Full Markdown content for PLAN.md. Include headings, implementation steps, risks, verification checklist, and Mermaid diagrams when useful.',
+        },
+      },
+      required: ['content'],
+    },
+  },
+}
+
+function isTaskStateEphemeral(m: { role: string; content?: string | null }): boolean {
+  return m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(TASK_STATE_BEGIN)
+}
+
+function stripOldTaskState(messages: Message[]): void {
+  // Remove any legacy in-place blocks from the system prompt (older
+  // sessions may still carry them) and drop any stale ephemeral messages.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isTaskStateEphemeral(messages[i])) messages.splice(i, 1)
+  }
+  const sys = messages[0]
+  if (sys && sys.role === 'system' && typeof sys.content === 'string' && sys.content.includes(TASK_STATE_BEGIN)) {
+    const re = new RegExp(`\\n*${TASK_STATE_BEGIN}[\\s\\S]*?${TASK_STATE_END}\\n*`, 'g')
+    const stripped = sys.content.replace(re, '').trimEnd()
+    if (stripped !== sys.content) messages[0] = { ...sys, content: stripped }
+  }
+}
+
+/** Mode-specific instruction block. Rendered into the ephemeral
+ *  task-state message (not the system prompt!) so switching mode mid-
+ *  session doesn't invalidate the KV cache. Returns '' for agent mode
+ *  to avoid adding extra tokens in the default case. */
+function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
+  if (mode === 'agent') return ''
+  if (mode === 'chat') {
+    return lang === 'ru'
+      ? '## Режим: Chat (обсуждение)\n\nТы в режиме обсуждения. Инструменты отключены: ты не можешь читать или менять файлы, запускать команды, искать в интернете. Отвечай текстом — объясняй, анализируй, предлагай варианты. Если задача требует действий над проектом, предложи пользователю переключиться в режим Plan (для исследования) или Agent (для выполнения).'
+      : '## Mode: Chat (discussion)\n\nYou are in discussion mode. All tools are disabled: you cannot read or modify files, run commands, or search the web. Respond with text only — explain, analyse, offer options. If the task needs hands-on actions, suggest the user switch to Plan mode (for exploration) or Agent mode (for execution).'
+  }
+  // plan
+  return lang === 'ru'
+    ? `## Режим: Plan (планирование, только чтение)
+
+Ты в режиме планирования. Доступны только read-only инструменты: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan.
+
+Писать/редактировать файлы и запускать команды ЗАПРЕЩЕНО. Plan-режим должен вести себя как продвинутый planning-агент: сначала изучить проект, затем выдать полноценный Markdown-документ плана, а не короткий ответ.
+
+Обязательный процесс:
+1. Исследуй проект read-only инструментами. Не отвечай "на глаз", если можно проверить файлы.
+2. Если задача неоднозначна, задай 1-3 уточняющих вопроса и не придумывай лишнее.
+3. Вызови update_plan с конкретной целью и 6-10 выполнимыми шагами. Шаги должны быть пригодны для последующего Agent-режима.
+4. Сохрани полноценный Markdown-план через save_plan_artifact — это создаст/обновит PLAN.md и автоматически покажет его пользователю.
+5. Markdown PLAN.md должен включать:
+   - "Цель"
+   - "Что известно из проекта"
+   - "Архитектура / поток" с Mermaid-диаграммой, если есть процесс/компоненты
+   - "Пошаговый план реализации"
+   - "Файлы и зоны изменений"
+   - "Риски и неизвестные"
+   - "План проверки / тесты"
+   - "Критерии готовности"
+6. Диаграммы пиши в fenced-блоках mermaid. Если диаграмма неуместна, явно напиши почему.
+7. Заверши фразой: «План сохранён в PLAN.md. Нажмите «Выполнить план», чтобы переключиться в режим Agent».
+
+НЕ начинай выполнять шаги плана — это сделает режим Agent после подтверждения пользователем.`
+    : `## Mode: Plan (read-only planning)
+
+You are in planning mode. Only read-only tools are available: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan.
+
+Writing/editing files and running commands is FORBIDDEN. Plan mode should behave like an advanced planning agent: first inspect the project, then produce a full Markdown planning document, not a short reply.
+
+Required process:
+1. Explore the project with read-only tools. Do not answer from vibes when files can be inspected.
+2. If the task is ambiguous, ask 1-3 clarifying questions and do not invent requirements.
+3. Call update_plan with a concrete goal and 6-10 executable steps suitable for the later Agent mode.
+4. Save the full Markdown plan via save_plan_artifact — this creates/updates PLAN.md and automatically shows it to the user.
+5. PLAN.md must include:
+   - "Goal"
+   - "What is known from the project"
+   - "Architecture / flow" with a Mermaid diagram when components or process exist
+   - "Implementation steps"
+   - "Files and change areas"
+   - "Risks and unknowns"
+   - "Verification / tests"
+   - "Done criteria"
+6. Write diagrams in fenced mermaid blocks. If a diagram is not appropriate, say why.
+7. End with: "Plan saved to PLAN.md. Press 'Apply plan' to switch to Agent mode."
+
+Do NOT start executing plan steps — Agent mode will do that after the user confirms.`
+}
+
+function renderProjectMemoryForPrompt(workspace: string, lang: 'ru' | 'en'): string {
+  const memory = projectMemory.readProjectMemory(workspace)
+  if (!memory) return ''
+  return lang === 'ru'
+    ? `## Память проекта\n\nЭто долговременная память по текущему workspace: архитектурные решения, предпочтения и известные проблемы. Учитывай её, но если она конфликтует с текущим кодом или прямым запросом пользователя — проверь файлы и следуй более свежему источнику.\n\n${memory}`
+    : `## Project Memory\n\nThis is long-term memory for the current workspace: architecture decisions, preferences, and known issues. Use it, but if it conflicts with current code or the user's direct request, inspect files and follow the fresher source.\n\n${memory}`
+}
+
+/** Build a NEW message array with the current taskState AND mode
+ *  instruction inserted as an ephemeral user message right before the
+ *  latest real user turn. The source array (and session.messages) is
+ *  never mutated — this keeps the persisted history clean and lets us
+ *  regenerate the note per turn without worrying about stale copies.
+ *
+ *  Also strips any legacy taskState block that older sessions may have
+ *  embedded directly in the system prompt. */
+function withTaskStateEphemeral(messages: Message[], session: Session): Message[] {
+  if (!messages.length) return messages
+  let out = messages
+
+  // 1. Strip legacy in-system-prompt block (migration for old sessions).
+  const sys = out[0]
+  if (sys && sys.role === 'system' && typeof sys.content === 'string' && sys.content.includes(TASK_STATE_BEGIN)) {
+    const re = new RegExp(`\\n*${TASK_STATE_BEGIN}[\\s\\S]*?${TASK_STATE_END}\\n*`, 'g')
+    const stripped = sys.content.replace(re, '').trimEnd()
+    if (stripped !== sys.content) {
+      out = [{ ...sys, content: stripped }, ...out.slice(1)]
+    }
+  }
+
+  // 2. Drop any ephemeral left over from a previous call (defensive — we
+  //    never persist them, so in practice there won't be any).
+  if (out.some(isTaskStateEphemeral)) {
+    out = out.filter((m) => !isTaskStateEphemeral(m))
+  }
+
+  const lang: 'ru' | 'en' = (doGetConfig().appLanguage === 'en' ? 'en' : 'ru')
+  const mode: AgentMode = session.mode ?? getDefaultAgentMode()
+  const modeText = renderModeInstruction(mode, lang)
+  const memoryText = renderProjectMemoryForPrompt(workspace, lang)
+  const taskText = renderTaskStateForPrompt(session.taskState, lang)
+
+  // If there's nothing to say (agent mode + empty taskState), keep the
+  // prompt minimal to maximise KV-cache reuse.
+  if (!modeText && !memoryText && !taskText) return out
+
+  const body = [modeText, memoryText, taskText].filter(Boolean).join('\n\n')
+  // Use role=user — every chat template handles user messages; a
+  // mid-conversation second system message trips some jinja templates.
+  const ephemeral: Message = {
+    role: 'user',
+    content: `${TASK_STATE_BEGIN}\n${body}\n${TASK_STATE_END}`,
+  }
+
+  // Find the last *real* user message (skip compaction prologue). Drop
+  // the ephemeral IMMEDIATELY before it, so everything earlier — system
+  // prompt, compacted summary, all older turns — stays byte-identical
+  // across turns. That's what lets llama.cpp's `cache_prompt` reuse the
+  // huge prefix KV instead of re-prefilling tens of thousands of tokens.
+  let insertAt = out.length
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = out[i]
+    if (m.role === 'user' && !isCompactionPrologue(m)) {
+      insertAt = i
+      break
+    }
+  }
+  const next = out.slice()
+  next.splice(insertAt, 0, ephemeral)
+  return next
+}
+
+// Legacy name kept as an alias for a one-shot compat shim during the
+// refactor — intentionally NOT used anywhere. All call-sites now go
+// through `withTaskStateEphemeral`.
+function refreshSystemPromptWithTaskState(_messages: Message[], _session: Session): void {
+  // no-op — kept to preserve the symbol in case of external references.
+  void _messages; void _session; void stripOldTaskState
 }
 
 function getSummarizePrompt(): string {
@@ -360,7 +755,26 @@ function compactToolDefs(tools: any[]): any[] {
   })
 }
 
-function getAllTools(): any[] {
+/** Names of the built-in tools that are safe to expose in `plan` mode:
+ *  they read the workspace or the web, but never mutate files, run
+ *  commands, or call out to write-capable APIs. Kept narrow by design —
+ *  when in doubt, omit, and let the user switch to `agent` mode. */
+const PLAN_MODE_BUILTIN_ALLOWLIST = new Set([
+  'get_project_context',
+  'read_file',
+  'list_directory',
+  'find_files',
+  'search_web',
+  'fetch_url',
+])
+
+function getAllTools(mode: AgentMode = 'agent'): any[] {
+  // In `chat` mode we strip all tools. The model becomes a plain
+  // chatbot — faster prefill (no tool defs in the prompt), zero risk of
+  // accidental writes, and the jinja template still works because
+  // llama-server treats an empty tools array as "no tool calls".
+  if (mode === 'chat') return []
+
   const cfg = doGetConfig()
   const customTools = cfg.customTools.filter((t) => t.enabled)
   const customDefs = customTools.map((ct) => ({
@@ -395,9 +809,40 @@ function getAllTools(): any[] {
     },
   }))
 
-  const all = [...builtins, ...customDefs, ...mcpDefs]
+  let all = [...builtins, UPDATE_PLAN_TOOL_DEF, SAVE_PLAN_ARTIFACT_TOOL_DEF, UPDATE_PROJECT_MEMORY_TOOL_DEF, RECALL_TOOL_DEF, ...customDefs, ...mcpDefs]
+
+  if (mode === 'plan') {
+      // Plan mode: keep the read-only builtins, drop every custom and MCP
+      // tool (we can't reason about their side effects), keep
+      // `save_plan_artifact` is the one allowed write in plan mode: it can
+      // only create/update PLAN.md. This is the set advertised to the LLM; the
+    // tool dispatcher additionally double-checks at call time so a
+    // jailbroken prompt can't slip past the allowlist.
+    all = all.filter((t) => {
+      const name = t?.function?.name
+      if (!name) return false
+      if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'update_project_memory' || name === 'recall') return true
+      return PLAN_MODE_BUILTIN_ALLOWLIST.has(name)
+    })
+  }
+
   // On small contexts, use compact descriptions to save ~40% tool overhead
   return ctxTokens() < 16384 ? compactToolDefs(all) : all
+}
+
+/** Runtime guard used by the tool dispatcher. Returns `true` iff a tool
+ *  with the given name is allowed to execute under the current mode. In
+ *  `chat` mode nothing is; in `plan` only the allowlist (plus
+ *  update_plan/recall); in `agent` everything is allowed. Kept in sync
+ *  with `getAllTools` but applied defensively because the LLM may still
+ *  try to call a tool that it "remembers" from a previous turn or a
+ *  prompt injection. */
+function isToolAllowedInMode(name: string, mode: AgentMode): boolean {
+  if (mode === 'agent') return true
+  if (mode === 'chat') return false
+  // plan
+  if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'update_project_memory' || name === 'recall') return true
+  return PLAN_MODE_BUILTIN_ALLOWLIST.has(name)
 }
 
 function isMcpTool(name: string): boolean {
@@ -417,6 +862,10 @@ export interface SessionInfo {
   createdAt: number
   updatedAt: number
   messageCount: number
+  /** Per-session operating mode (chat/plan/agent). Defaults to
+   *  `config.defaultMode` on new sessions. Sent to the UI so the sidebar
+   *  can tag each chat and so the mode switcher knows what to pre-select. */
+  mode?: AgentMode
 }
 
 export interface Session {
@@ -429,6 +878,16 @@ export interface Session {
   updatedAt: number
   /** Workspace key (hash) so we know which folder to save to when updating from worker. */
   workspaceKey?: string
+  /** Persistent task state — goal / plan / notes. Surfaced in the system
+   *  prompt so the agent never forgets what it was doing. See task-state.ts. */
+  taskState?: TaskState
+  /** Message ids that the user has "pinned" — these survive compaction
+   *  and summarisation. Keyed by the `id` we attach to UI messages. */
+  pinnedMessageIds?: string[]
+  /** Operating mode (chat/plan/agent). Undefined means "use the app
+   *  default" — we normalise that to a concrete value the moment it
+   *  matters. See `AgentMode` in types.ts. */
+  mode?: AgentMode
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +954,9 @@ function loadSessionsForWorkspace(ws: string): void {
             createdAt: data.createdAt ?? Date.now(),
             updatedAt: data.updatedAt ?? Date.now(),
             workspaceKey: key,
+            taskState: data.taskState && typeof data.taskState === 'object' ? data.taskState : undefined,
+            pinnedMessageIds: Array.isArray(data.pinnedMessageIds) ? data.pinnedMessageIds : [],
+            mode: (data.mode === 'chat' || data.mode === 'plan' || data.mode === 'agent') ? data.mode : undefined,
           }
           map.set(session.id, session)
         }
@@ -535,6 +997,9 @@ export function saveSession(session: Session): void {
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       workspaceKey: session.workspaceKey ?? key,
+      taskState: session.taskState,
+      pinnedMessageIds: session.pinnedMessageIds ?? [],
+      mode: session.mode,
     }), 'utf-8')
   } catch {}
 }
@@ -576,6 +1041,7 @@ export function getActiveSession(ws: string): Session {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     workspaceKey: key,
+    mode: getDefaultAgentMode(),
   }
   map.set(id, session)
   activeIdByWorkspace.set(key, id)
@@ -602,6 +1068,7 @@ export function createSession(ws: string): string {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     workspaceKey: key,
+    mode: getDefaultAgentMode(),
   }
   map.set(id, session)
   activeIdByWorkspace.set(key, id)
@@ -631,7 +1098,93 @@ export function listSessions(ws: string): SessionInfo[] {
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
       messageCount: s.messages.filter((m) => m.role === 'user').length,
+      mode: s.mode,
     }))
+}
+
+/** Update the operating mode of a session (chat/plan/agent). Returns
+ *  the new mode. Safe to call while the agent is idle; if a request is
+ *  in flight the change will take effect on the next turn because the
+ *  system prompt is rebuilt at the top of each iteration. */
+export function setSessionMode(ws: string, id: string, mode: AgentMode): AgentMode {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  const session = map.get(id)
+  if (!session) return mode
+  session.mode = mode
+  session.updatedAt = Date.now()
+  saveSession(session)
+  return mode
+}
+
+function renderPlanArtifact(session: Session): string {
+  const ts = normalizeTaskState(session.taskState) ?? emptyTaskState()
+  const goal = ts.goal?.trim() || session.title || 'Implementation plan'
+  const plan = Array.isArray(ts.plan) ? ts.plan : []
+  const lines: string[] = [
+    '# PLAN',
+    '',
+    '## Goal',
+    '',
+    goal,
+    '',
+    '## Task State',
+    '',
+  ]
+  if (plan.length > 0) {
+    lines.push(...plan.map((step, idx) => {
+      const status = step.status ?? 'pending'
+      const note = step.note ? `\n  - Note: ${step.note}` : ''
+      return `${idx + 1}. [${status}] ${step.title}${note}`
+    }))
+  } else {
+    lines.push('- No structured plan steps recorded yet.')
+  }
+  lines.push(
+    '',
+    '## Notes',
+    '',
+    ts.notes?.trim() || '- No notes recorded.',
+    '',
+    '## Flow',
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '  A[Plan saved] --> B[Apply plan]',
+    '  B --> C[Agent executes steps]',
+    '  C --> D[Run verification]',
+    '  D --> E[Final checklist]',
+    '```',
+    '',
+    '## Verification Checklist',
+    '',
+    '- [ ] Relevant tests selected',
+    '- [ ] Type-check/lint/build run where applicable',
+    '- [ ] Risks reviewed',
+    '- [ ] Done criteria satisfied',
+    '',
+  )
+  return lines.join('\n')
+}
+
+export function savePlanArtifact(ws: string, id?: string): { path: string; content: string } {
+  if (!ws?.trim()) throw new Error('Workspace is required')
+  loadSessionsForWorkspace(ws)
+  const session = id ? getSessionsMap(ws).get(id) : getActiveSession(ws)
+  if (!session) throw new Error('Session not found')
+  const content = renderPlanArtifact(session)
+  const file = path.join(ws, 'PLAN.md')
+  fs.writeFileSync(file, content, 'utf-8')
+  return { path: file, content }
+}
+
+export function savePlanArtifactContent(ws: string, content: string): { path: string; content: string } {
+  if (!ws?.trim()) throw new Error('Workspace is required')
+  const trimmed = String(content ?? '').trim()
+  if (!trimmed) throw new Error('PLAN.md content is required')
+  const file = path.join(ws, 'PLAN.md')
+  fs.writeFileSync(file, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', 'utf-8')
+  return { path: file, content: trimmed }
 }
 
 export function deleteSession(ws: string, id: string): void {
@@ -640,6 +1193,7 @@ export function deleteSession(ws: string, id: string): void {
   const map = getSessionsMap(ws)
   map.delete(id)
   deleteSessionFile(ws, id)
+  try { archive.deleteArchive(key, id) } catch {}
   if (activeIdByWorkspace.get(key) === id) {
     const first = map.keys().next().value
     if (first) activeIdByWorkspace.set(key, first)
@@ -725,6 +1279,94 @@ function emitContextUsage(msgs: Message[]) {
   })
 }
 
+export interface ContextBreakdown {
+  usedTokens: number
+  budgetTokens: number
+  maxContextTokens: number
+  percent: number
+  categories: Array<{ key: string; label: string; tokens: number; messages: number }>
+  cache: { hits: number; misses: number; size: number }
+}
+
+/** Produce a per-category breakdown of what's currently eating context.
+ *  Used by the /context slash command and the Context meter tooltip. */
+export function computeContextBreakdown(ws: string): ContextBreakdown {
+  const session = getActiveSession(ws)
+  const msgs = session.messages ?? []
+  const budget = getMessageBudget()
+  const maxCtx = ctxTokens()
+  const used = estimateContextTokens(msgs)
+
+  const cats: Record<string, { label: string; tokens: number; messages: number }> = {
+    system: { label: 'System prompt', tokens: 0, messages: 0 },
+    prologue: { label: 'Compacted prologue', tokens: 0, messages: 0 },
+    user: { label: 'User messages', tokens: 0, messages: 0 },
+    assistant: { label: 'Assistant replies', tokens: 0, messages: 0 },
+    thinking: { label: 'Assistant thinking (<think>)', tokens: 0, messages: 0 },
+    tool: { label: 'Tool results', tokens: 0, messages: 0 },
+    tool_calls: { label: 'Tool call requests', tokens: 0, messages: 0 },
+  }
+  const ratio = calibratedRatio
+  const tok = (s: string | undefined) => (s ? Math.ceil((s?.length ?? 0) / ratio) : 0)
+
+  for (const m of msgs) {
+    if (m.role === 'system') {
+      cats.system.tokens += tok(m.content)
+      cats.system.messages++
+    } else if (isCompactionPrologue(m as any)) {
+      cats.prologue.tokens += tok(m.content)
+      cats.prologue.messages++
+    } else if (m.role === 'user') {
+      cats.user.tokens += tok(m.content)
+      cats.user.messages++
+    } else if (m.role === 'assistant') {
+      const c = m.content ?? ''
+      const thinkMatches = [...c.matchAll(/<think>([\s\S]*?)<\/think>/g)]
+      let thinkChars = 0
+      for (const mm of thinkMatches) thinkChars += (mm[1]?.length ?? 0)
+      cats.thinking.tokens += Math.ceil(thinkChars / ratio)
+      cats.assistant.tokens += Math.max(0, tok(c) - Math.ceil(thinkChars / ratio))
+      cats.assistant.messages++
+      if (m.tool_calls) {
+        cats.tool_calls.tokens += Math.ceil(JSON.stringify(m.tool_calls).length / ratio)
+      }
+    } else if (m.role === 'tool') {
+      cats.tool.tokens += tok(m.content)
+      cats.tool.messages++
+    }
+  }
+
+  return {
+    usedTokens: used,
+    budgetTokens: budget,
+    maxContextTokens: maxCtx,
+    percent: Math.min(100, Math.round((used / budget) * 100)),
+    categories: Object.entries(cats)
+      .map(([key, v]) => ({ key, ...v }))
+      .sort((a, b) => b.tokens - a.tokens),
+    cache: toolCache.getStats(),
+  }
+}
+
+/** Toggle "pinned" status for an assistant/user message (by its uiMessage
+ *  id). Pinned messages are protected from compaction/summarisation. */
+export function toggleMessagePin(ws: string, messageId: string): boolean {
+  const session = getActiveSession(ws)
+  const set = new Set(session.pinnedMessageIds ?? [])
+  let pinned: boolean
+  if (set.has(messageId)) { set.delete(messageId); pinned = false }
+  else { set.add(messageId); pinned = true }
+  session.pinnedMessageIds = [...set]
+  session.updatedAt = Date.now()
+  saveSession(session)
+  return pinned
+}
+
+export function listPinnedMessages(ws: string): string[] {
+  const session = getActiveSession(ws)
+  return [...(session.pinnedMessageIds ?? [])]
+}
+
 function extractThinking(content: string): [string, string] {
   let thinking = ''
   let visible = content
@@ -735,6 +1377,10 @@ function extractThinking(content: string): [string, string] {
   }
   visible = content.replace(re, '').trim()
   return [thinking, visible]
+}
+
+function hasOpenThinkingBlock(content: string): boolean {
+  return content.lastIndexOf('<think>') > content.lastIndexOf('</think>')
 }
 
 // ---------------------------------------------------------------------------
@@ -856,7 +1502,15 @@ async function streamLlmResponse(
   signal: AbortSignal,
   maxTokensOverride?: number,
   temperatureOverride?: number,
+  mode: AgentMode = 'agent',
 ): Promise<StreamResult> {
+  const throwIfAborted = () => {
+    if (signal.aborted || doIsCancelRequested()) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
+  }
+  throwIfAborted()
+
   const cleanMsgs = sanitizeMessages(msgs)
   const maxTok = (maxTokensOverride && maxTokensOverride > 0) ? maxTokensOverride : getMaxResponseTokens()
   const temp = temperatureOverride ?? getBaseTemperature()
@@ -864,21 +1518,44 @@ async function streamLlmResponse(
   debugLog('STREAM', `Sending request: ${cleanMsgs.length} msgs [${msgRoles}], max_tokens=${maxTok}, temp=${temp}, ctx=${ctxTokens()}, budget=${getMessageBudget()}, used=${estimateContextTokens(cleanMsgs)}`)
 
   const startMs = Date.now()
+  // NOTE: we use undici's fetch with a custom dispatcher that disables
+  // `headersTimeout` / `bodyTimeout`. Prefill on huge contexts can take
+  // minutes before the server emits the first byte; the default 300s
+  // undici timeout would otherwise kill the connection with a cryptic
+  // "fetch failed" and the user would see a stack trace instead of a
+  // working response. Our application-level idle timer (below) is the
+  // sole authority for stall detection, and it only starts counting
+  // AFTER the first chunk arrives.
+  // We go through the global fetch (which IS undici in Node 18+), but
+  // pass our custom dispatcher via init. In tests, `globalThis.fetch` is
+  // stubbed by the harness and the dispatcher is harmlessly ignored.
   const r = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'qwen',
       messages: cleanMsgs,
-      tools: getAllTools(),
-      tool_choice: 'auto',
+      tools: getAllTools(mode),
+      // In chat mode we explicitly forbid tool calls (belt + suspenders
+      // on top of sending no tool defs at all).
+      tool_choice: mode === 'chat' ? 'none' : 'auto',
       temperature: temp,
       max_tokens: maxTok,
       stream: true,
+      // llama.cpp-specific: tell the server to keep the prompt prefix in the
+      // KV cache across requests. When the conversation grows by appending,
+      // this lets the server reuse the cached prefix and prefill only the
+      // new suffix — big latency win, especially on long contexts. Ignored
+      // by non-llama.cpp servers.
+      cache_prompt: true,
     }),
     signal,
-  })
+    // `dispatcher` is an undici extension (fetch === undici's fetch in
+    // Node 18+). The DOM types don't know about it, hence the cast.
+    dispatcher: llmStreamDispatcher,
+  } as any)
 
+  throwIfAborted()
   debugLog('STREAM', `Response status: ${r.status} (${Date.now() - startMs}ms)`)
 
   if (!r.ok) {
@@ -894,6 +1571,10 @@ async function streamLlmResponse(
 
   const reader = (r.body as any).getReader()
   const decoder = new TextDecoder()
+  const abortReader = () => {
+    try { reader.cancel() } catch {}
+  }
+  signal.addEventListener('abort', abortReader, { once: true })
 
   let accContent = ''
   let lastThinkLen = 0
@@ -908,21 +1589,35 @@ async function streamLlmResponse(
   const STREAM_STATS_INTERVAL_MS = 500
   let finishReason: string | null = null
 
-  // Idle timeout: abort if no data received for 60s (server stalled)
-  const IDLE_TIMEOUT_MS = getIdleTimeoutMs()
+  // Two-phase idle timer:
+  //   Phase 1 (prefill) — before the FIRST byte arrives, the server is
+  //     ingesting the prompt. On huge contexts this can legitimately
+  //     take many minutes on a consumer GPU, so we give it a very
+  //     generous budget (15 minutes) and rely on the user's Cancel
+  //     button if something's wrong. Killing the connection here used
+  //     to be the #1 source of "fetch failed" spam.
+  //   Phase 2 (streaming) — once tokens start flowing, any silence of
+  //     >idleTimeoutSec means the server truly stalled and we bail.
+  const IDLE_TIMEOUT_STREAMING_MS = getIdleTimeoutMs()
+  const IDLE_TIMEOUT_PREFILL_MS = Math.max(IDLE_TIMEOUT_STREAMING_MS, 15 * 60 * 1000)
   let idleTimer: ReturnType<typeof setTimeout> | null = null
   let chunkCount = 0
   const resetIdle = () => {
     if (idleTimer) clearTimeout(idleTimer)
+    const ms = chunkCount === 0 ? IDLE_TIMEOUT_PREFILL_MS : IDLE_TIMEOUT_STREAMING_MS
     idleTimer = setTimeout(() => {
-      debugLog('STREAM', `IDLE TIMEOUT after ${Date.now() - startMs}ms, ${chunkCount} chunks received, content=${accContent.length}chars`)
+      const phase = chunkCount === 0 ? 'PREFILL' : 'STREAM'
+      debugLog('STREAM', `IDLE TIMEOUT (${phase}) after ${Date.now() - startMs}ms, ${chunkCount} chunks received, content=${accContent.length}chars`)
       try { reader.cancel() } catch {}
-    }, IDLE_TIMEOUT_MS)
+    }, ms)
   }
   resetIdle()
 
+  try {
   while (true) {
+    throwIfAborted()
     const { done, value } = await reader.read()
+    throwIfAborted()
     if (done) { if (idleTimer) clearTimeout(idleTimer); break }
     chunkCount++
     resetIdle()
@@ -932,6 +1627,7 @@ async function streamLlmResponse(
     sseBuffer = lines.pop()!
 
     for (const line of lines) {
+      throwIfAborted()
       const trimmed = line.trim()
       if (!trimmed || trimmed === 'data: [DONE]') continue
       if (!trimmed.startsWith('data: ')) continue
@@ -1053,6 +1749,10 @@ async function streamLlmResponse(
         }
       }
     }
+  }
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer)
+    signal.removeEventListener('abort', abortReader)
   }
 
   // Final visible emission to ensure nothing is lost
@@ -1489,7 +2189,11 @@ function tryRepairTruncatedToolCall(tc: any): { name: string; args: Record<strin
 // ---------------------------------------------------------------------------
 
 function stripThinking(content: string): string {
-  return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  const closed = content.replace(/<think>[\s\S]*?<\/think>/g, '')
+  if (hasOpenThinkingBlock(closed)) {
+    return closed.slice(0, closed.lastIndexOf('<think>')).trim()
+  }
+  return closed.trim()
 }
 
 function compressToolResultText(content: string, maxChars: number): string {
@@ -1615,6 +2319,42 @@ function extractWorkingMemory(msgs: Message[]): WorkingMemory {
   mem.filesModified = [...modifiedFiles].slice(0, 20)
   mem.filesRead = [...readFiles].slice(0, 15)
   return mem
+}
+
+/** Marker inserted into the compaction-prologue so tier4 / later code can
+ *  identify and strip it without heuristics. */
+const COMPACTION_PROLOGUE_TAG = '<!--compaction:prologue-->'
+
+function isCompactionPrologue(m: { role: string; content?: string | null }): boolean {
+  return typeof m.content === 'string' && m.content.includes(COMPACTION_PROLOGUE_TAG)
+}
+
+/** Build a short synthetic user/assistant pair that carries the summary
+ *  and working-memory block. Lives AFTER the system message, keeping the
+ *  system prompt stable across turns for KV-cache reuse. */
+function buildCompactionPrologue(summaryText: string, memText: string): Message[] {
+  if (!summaryText && !memText) return []
+  const lines: string[] = [COMPACTION_PROLOGUE_TAG]
+  lines.push('## Context so far (compacted)')
+  lines.push('')
+  lines.push('_This block replaces older conversation turns that were summarised to save context. Treat it as authoritative memory of what has happened up to this point._')
+  if (summaryText) {
+    lines.push('')
+    lines.push('### Summary of earlier conversation')
+    lines.push(summaryText)
+  }
+  if (memText) {
+    lines.push('')
+    lines.push('### Working memory')
+    lines.push(memText)
+  }
+  const userContent = lines.join('\n')
+  // Using user→assistant shape is chat-template-safe everywhere. The
+  // assistant "ack" is terse so it doesn't waste budget.
+  return [
+    { role: 'user', content: userContent },
+    { role: 'assistant', content: 'Understood — continuing from the compacted state above.' },
+  ]
 }
 
 function formatWorkingMemory(mem: WorkingMemory): string {
@@ -1836,42 +2576,44 @@ async function tier3Summarize(
     const memBlock = formatWorkingMemory(workingMem)
     const baseSystem = systemMsg?.content ?? getSystemPrompt()
 
-    const marker = '\n\n## Working memory\n'
-    const markerIdx = baseSystem.indexOf(marker)
-    const cleanBase = markerIdx >= 0 ? baseSystem.slice(0, markerIdx) : baseSystem
-
-    const summaryMarker = '\n\n## Summary of earlier conversation\n'
-    const summaryIdx = cleanBase.indexOf(summaryMarker)
-    const pureBase = summaryIdx >= 0 ? cleanBase.slice(0, summaryIdx) : cleanBase
-
-    // Budget for system prompt: leave enough room for recent messages
-    const budget = getMessageBudget()
-    const recentTokens = estimateContextTokens(recentMessages)
-    const sysTokenBudget = Math.max(500, budget - recentTokens - 100)
-    const sysCharBudget = Math.floor(sysTokenBudget * calibratedRatio)
-
-    // Build system content, truncating summary/memory if needed
-    let summaryText = summary
-    let memText = memBlock
-    const baseLen = pureBase.length + marker.length + summaryMarker.length + 20
-    const availForSummary = sysCharBudget - baseLen
-    if (availForSummary < 200) {
-      summaryText = ''
-      memText = ''
-    } else {
-      const memLen = memText.length
-      const summaryBudget = availForSummary - Math.min(memLen, Math.floor(availForSummary * 0.3))
-      if (summaryText.length > summaryBudget) {
-        summaryText = summaryText.slice(0, summaryBudget - 10) + '\n…[truncated]'
-      }
-      if (memText.length > Math.floor(availForSummary * 0.3)) {
-        memText = memText.slice(0, Math.floor(availForSummary * 0.3) - 10) + '\n…'
-      }
+    // KV-cache friendliness: keep the system prompt STABLE across turns.
+    // Instead of stuffing summary/memory into messages[0].content (which
+    // invalidates the entire prefix on every summarisation), we:
+    //   - strip any legacy summary/memory blocks out of system,
+    //   - externalise the new summary as a synthetic user/assistant pair
+    //     placed right after the system message. This way only the new
+    //     tail gets prefilled on the next request; the base system prompt
+    //     + tools prefix remains cacheable.
+    const markerMem = '\n\n## Working memory\n'
+    const markerSum = '\n\n## Summary of earlier conversation\n'
+    let pureBase = baseSystem
+    const memIdx = pureBase.indexOf(markerMem)
+    if (memIdx >= 0) pureBase = pureBase.slice(0, memIdx)
+    const sumIdx = pureBase.indexOf(markerSum)
+    if (sumIdx >= 0) pureBase = pureBase.slice(0, sumIdx)
+    // Preserve the task-state block if present (lives at the very end).
+    const tsBeginIdx = baseSystem.indexOf(TASK_STATE_BEGIN)
+    const tsTail = tsBeginIdx >= 0 ? baseSystem.slice(tsBeginIdx) : ''
+    if (tsTail && !pureBase.includes(TASK_STATE_BEGIN)) {
+      pureBase = pureBase.trimEnd() + '\n\n' + tsTail
     }
 
-    const newSystem = pureBase +
-      (memText ? marker + memText + '\n' : '') +
-      (summaryText ? summaryMarker + summaryText + '\n' : '')
+    const budget = getMessageBudget()
+    const recentTokens = estimateContextTokens(recentMessages)
+
+    // Budget for the synthetic summary message — cap at a fraction of
+    // total so we never blow the budget even with a verbose summary.
+    const maxSummaryTokens = Math.max(300, Math.floor((budget - recentTokens - 500) * 0.5))
+    const maxSummaryChars = Math.max(800, Math.floor(maxSummaryTokens * calibratedRatio))
+    let summaryText = summary
+    if (summaryText.length > maxSummaryChars) {
+      summaryText = summaryText.slice(0, maxSummaryChars - 10) + '\n…[truncated]'
+    }
+    const memMaxChars = Math.max(400, Math.floor(maxSummaryChars * 0.3))
+    let memText = memBlock
+    if (memText.length > memMaxChars) memText = memText.slice(0, memMaxChars - 10) + '\n…'
+
+    const externalizedPrologue = buildCompactionPrologue(summaryText, memText)
 
     // Also truncate recent tool results if still too big
     const compactRecent = recentMessages.map((m) => {
@@ -1882,7 +2624,8 @@ async function tier3Summarize(
     })
 
     const compacted: Message[] = [
-      { role: 'system', content: newSystem },
+      { role: 'system', content: pureBase },
+      ...externalizedPrologue,
       ...compactRecent,
     ]
 
@@ -1913,7 +2656,9 @@ function tier4EmergencyPrune(msgs: Message[]): Message[] {
     }
   }
 
-  // Step 2: Strip summary and working memory from system prompt
+  // Step 2: Strip summary and working memory from system prompt (legacy
+  // pre-KV-friendly compaction path) and compress any externalised
+  // compaction-prologue user message.
   const sysIdx = result.findIndex((m) => m.role === 'system')
   if (sysIdx >= 0 && result[sysIdx].content) {
     let sysTxt = result[sysIdx].content!
@@ -1922,6 +2667,11 @@ function tier4EmergencyPrune(msgs: Message[]): Message[] {
     const memMark = sysTxt.indexOf('\n\n## Working memory')
     if (memMark >= 0) sysTxt = sysTxt.slice(0, memMark)
     result[sysIdx] = { ...result[sysIdx], content: sysTxt }
+  }
+  for (let i = 0; i < result.length; i++) {
+    if (isCompactionPrologue(result[i]) && result[i].content && result[i].content!.length > 600) {
+      result[i] = { ...result[i], content: result[i].content!.slice(0, 500) + '\n…[prologue pruned]' }
+    }
   }
 
   let tokens = estimateContextTokens(result)
@@ -2022,7 +2772,7 @@ function injectRehydrationHint(msgs: Message[], originalMsgs: Message[]): Messag
   const recentFiles = mem.filesModified.slice(-3)
 
   const parts: string[] = [
-    '[Context was compacted to save space. Summary of earlier work is in the system prompt above.]',
+    '[Context was compacted to save space. See the "Context so far (compacted)" message above for the summary of earlier work.]',
   ]
   if (lastAction !== 'unknown') {
     parts.push(`Your last action was: ${lastAction}`)
@@ -2124,39 +2874,11 @@ function getProjectContext(ws: string): string {
       return budgetTrimProjectContext(projectContextCache.ctx)
     }
 
-    // Build full context (cached at max detail level)
-    const tree = executeTool('list_directory', { depth: 2 }, ws)
-    let ctx = `## Project: ${ws}\n\`\`\`\n${tree}\n\`\`\`\n`
-
-    const fs = require('fs')
-    const path = require('path')
-    const indicators: [string, string][] = [
-      ['package.json', 'Node.js'],
-      ['Cargo.toml', 'Rust'],
-      ['go.mod', 'Go'],
-      ['pyproject.toml', 'Python'],
-      ['requirements.txt', 'Python'],
-      ['pom.xml', 'Java/Maven'],
-      ['CMakeLists.txt', 'C/C++ CMake'],
-      ['Dockerfile', 'Docker'],
-    ]
-    const detected: string[] = []
-    for (const [file, desc] of indicators) {
-      if (fs.existsSync(path.join(ws, file))) detected.push(desc)
-    }
-    if (detected.length > 0) {
-      ctx += `Type: ${detected.join(', ')}\n`
-    }
-
-    // Project rules (AGENTS.md / CLAUDE.md / .cursorrules / ...) — highest-
-    // value piece of the prompt, put it FIRST so the model sees it before
-    // the directory tree drowns attention.
-    const rules = loadProjectRules(ws)
-    if (rules.content) {
-      ctx = rules.content + '\n' + ctx
-      const fileList = rules.files.map((f) => f.relativePath).join(', ')
-      debugLog('RULES', `loaded ${rules.files.length} rule file(s) (${rules.truncated ? 'truncated, ' : ''}total bytes=${rules.files.reduce((a, f) => a + f.bytes, 0)}): ${fileList}`)
-    }
+    // Dynamic context discovery: keep the stable prompt small. Instead of
+    // stuffing rules + directory tree + repo map into the first system
+    // message, ship a compact index and let the agent fetch deeper sections
+    // with get_project_context when the task actually needs them.
+    const ctx = executeTool('get_project_context', { section: 'overview', max_bytes: ctxTokens() < 16384 ? 1800 : 3200 }, ws)
 
     projectContextCache = { ws, ctx, ts: Date.now() }
     return budgetTrimProjectContext(ctx)
@@ -2222,6 +2944,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
   workspace = ws
   cancelRequested = false
   lastTier3Iteration = -10
+  toolCache.resetStats()
 
   const session = doGetSession()
   let { messages } = session
@@ -2252,6 +2975,15 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
   messages.push({ role: 'user', content: userMessage })
   session.messages = messages
 
+  // Archive the user message immediately — it will be preserved even if
+  // later compaction replaces it with a summary pointer.
+  try {
+    const archiveKey = session.workspaceKey ?? ''
+    archive.appendMessages(archiveKey, session.id, [
+      { role: 'user', content: userMessage, turn: messages.length, ts: Date.now() },
+    ])
+  } catch {}
+
   const apiUrl = `${doGetApiUrl()}/v1/chat/completions`
 
   // Calibrate token ratio from server (non-blocking, happens once)
@@ -2271,11 +3003,89 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
   const filesCreatedThisTurn = new Set<string>()
   let consecutiveReReads = 0
 
-  // General loop detection: same tool + same args repeated
-  let lastToolSig = ''
-  let sameToolRepeatCount = 0
+  // General loop detection: same read-only tool + same args repeated across
+  // the whole user turn. The old guard only caught consecutive duplicates;
+  // models can still loop by alternating read_file with thoughts/commands.
+  const readonlyToolCallCounts = new Map<string, number>()
+  let loopNudgesThisTurn = 0
+  let workspaceChangedThisTurn = false
+  let verificationCommandAfterChange = false
+  let selfCheckNudgedThisTurn = false
 
-  for (let i = 0; i < getMaxIterations(); i++) {
+  const checkRepeatedReadonlyTool = (toolName: string, toolArgs: Record<string, any>) => {
+    const toolSig = `${toolName}:${JSON.stringify(toolArgs)}`
+    if (!LOOP_GUARDED_READONLY_TOOLS.has(toolName)) return { action: 'allow' as const }
+
+    const callCount = (readonlyToolCallCounts.get(toolSig) ?? 0) + 1
+    readonlyToolCallCounts.set(toolSig, callCount)
+    if (callCount <= MAX_IDENTICAL_READONLY_TOOL_CALLS_PER_TURN) return { action: 'allow' as const }
+
+    loopNudgesThisTurn++
+    debugLog('LOOP', `Duplicate ${toolName} call #${callCount} in turn: ${toolArgs.path ?? toolArgs.pattern ?? ''}`)
+    const message = `Loop guard: you already called ${toolName} with these exact arguments ${callCount} times during this user request. The result is available in the conversation history; do not call it again. Continue with the next concrete action: edit the file, run a focused check, update the plan, or give the user a concise stuck report.`
+    if (loopNudgesThisTurn >= MAX_LOOP_NUDGES_PER_TURN) {
+      return {
+        action: 'recover' as const,
+        message,
+      }
+    }
+
+    return { action: 'skip' as const, message }
+  }
+
+  const injectLoopRecovery = (message: string): void => {
+    const recovery = `[System: loop guard intervention]
+You are repeating the same read-only tool call and not making progress.
+
+${message}
+
+Do not call that same read-only tool with the same arguments again in this turn.
+Use the content already present in the conversation and choose a different next action now:
+- if you already know the needed change, call edit_file/write_file;
+- if verification is needed, run one focused command;
+- if the plan changed, call update_plan;
+- if genuinely blocked, explain the missing information briefly.
+Before the next tool call, state the new strategy in one sentence.`
+    debugLog('LOOP', 'Injected loop-recovery supervisor message')
+    doEmit({ type: 'status', content: '🧭 Агент повторяет одно действие — переключаю его на другой следующий шаг…' })
+    messages.push({ role: 'user', content: recovery })
+  }
+
+  const markWorkspaceChanged = (): void => {
+    workspaceChangedThisTurn = true
+    verificationCommandAfterChange = false
+  }
+
+  // Archive cursor: how many messages have already been written to the
+  // append-only archive. At the top of each iteration we flush everything
+  // after this index, so the archive is complete even if we later compact.
+  let archivedUpTo = messages.length
+
+  agentLoop: for (let i = 0; i < getMaxIterations(); i++) {
+    // Flush newly-appended messages to the session archive. We do this at
+    // the START of each iteration (not just the end) so if the model
+    // crashes mid-stream the archive still has the previous turn's
+    // assistant + tool outputs.
+    try {
+      const key = session.workspaceKey ?? ''
+      const batch: archive.ArchivedMessage[] = []
+      for (let k = archivedUpTo; k < messages.length; k++) {
+        const m = messages[k] as any
+        if (!m || m.role === 'system') continue
+        const toolNames = Array.isArray(m.tool_calls) ? m.tool_calls.map((tc: any) => tc?.function?.name).filter(Boolean) : undefined
+        batch.push({
+          role: m.role,
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
+          turn: k,
+          ts: Date.now(),
+          toolNames: toolNames?.length ? toolNames : undefined,
+          toolName: m.role === 'tool' ? (m._toolName ?? undefined) : undefined,
+        })
+      }
+      if (batch.length) archive.appendMessages(key, session.id, batch)
+      archivedUpTo = messages.length
+    } catch {}
+
     if (doIsCancelRequested()) {
       doEmit( { type: 'status', content: '⏹ Запрос агента остановлен пользователем' })
       session.updatedAt = Date.now()
@@ -2289,7 +3099,10 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
       fullResponse = ''
     }
 
-    // Pre-flight: sanitize structure + ensure messages fit in context budget
+    // Pre-flight: sanitize structure + ensure messages fit in context budget.
+    // NOTE: taskState is NOT stitched into `messages` here — it's added as
+    // an ephemeral user turn inside streamLlmResponse only, so we never
+    // persist it or count its tokens against the session history.
     messages = sanitizeMessages(messages)
     const accurateTokens = await countContextTokensAccurate(messages)
     const preflightBudget = getMessageBudget()
@@ -2322,7 +3135,11 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
       // Only abort on user cancel or server idle (120s no data)
 
       const retryTemp = emptyRetries > 0 ? getBaseTemperature() + emptyRetries * 0.2 : undefined
-      streamResult = await streamLlmResponse(apiUrl, messages, fullResponse, controller.signal, effectiveMaxTokens, retryTemp)
+      // Attach the per-turn taskState note. This message lives only
+      // inside this request — it is NOT written back to session.messages.
+      const messagesForRequest = withTaskStateEphemeral(messages, session)
+      const sessionMode: AgentMode = session.mode ?? getDefaultAgentMode()
+      streamResult = await streamLlmResponse(apiUrl, messagesForRequest, fullResponse, controller.signal, effectiveMaxTokens, retryTemp, sessionMode)
     } catch (e: any) {
       debugLog('ERROR', `Catch in runAgent: name=${e?.name}, message=${e?.message}, cancelRequested=${cancelRequested}, stack=${(e?.stack ?? '').slice(0, 500)}`)
       if (doIsCancelRequested()) {
@@ -2364,7 +3181,8 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
         try {
           const retryController = new AbortController()
           currentAbort = retryController
-          streamResult = await streamLlmResponse(apiUrl, messages, fullResponse, retryController.signal)
+          const sessionMode: AgentMode = session.mode ?? getDefaultAgentMode()
+          streamResult = await streamLlmResponse(apiUrl, withTaskStateEphemeral(messages, session), fullResponse, retryController.signal, undefined, undefined, sessionMode)
         } catch (retryErr: any) {
           doEmit( { type: 'error', content: `LLM request failed after recovery: ${retryErr.message}` })
           session.updatedAt = Date.now()
@@ -2414,6 +3232,7 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
             const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
             if (fsModTools.has(repairName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+              markWorkspaceChanged()
               invalidateProjectContextCache()
               try { currentBridge!.notifyWorkspaceChanged() } catch {}
             }
@@ -2472,6 +3291,26 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
         const recoveredCustomTools = doGetConfig().customTools
         for (const tc of textCalls) {
+          const loopGuard = checkRepeatedReadonlyTool(tc.name, tc.args)
+          if (loopGuard.action !== 'allow') {
+            const callId = `text_tc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+            const result = loopGuard.message
+            messages.push({
+              role: 'assistant',
+              content: stripThinking(content),
+              tool_calls: [{ id: callId, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args) } }],
+            })
+            messages.push({ role: 'tool', tool_call_id: callId, content: result })
+            if (loopGuard.action === 'recover') {
+              injectLoopRecovery(loopGuard.message)
+              session.messages = messages
+              doSaveSession(session)
+              emitContextUsage(messages)
+              continue agentLoop
+            }
+            continue
+          }
+
           const cpText = maybeCheckpoint(tc.name, tc.args, workspace)
           doEmit( { type: 'tool_call', name: tc.name, args: tc.args, checkpoint: cpText })
 
@@ -2506,8 +3345,13 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
           const fsModToolsText = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
           if (fsModToolsText.has(tc.name) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+            markWorkspaceChanged()
             invalidateProjectContextCache()
             try { currentBridge!.notifyWorkspaceChanged() } catch {}
+          }
+
+          if (tc.name === COMMAND_TOOL && workspaceChangedThisTurn && !result.startsWith('[Denied')) {
+            verificationCommandAfterChange = true
           }
 
           // Build proper tool_calls message format
@@ -2569,6 +3413,25 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
     // No tool calls → final response
     if (!toolCalls || toolCalls.length === 0) {
       const finalText = visible || content
+      if (workspaceChangedThisTurn && !verificationCommandAfterChange && !selfCheckNudgedThisTurn) {
+        selfCheckNudgedThisTurn = true
+        const savedDraft = stripThinking(content)
+        if (savedDraft) messages.push({ role: 'assistant', content: savedDraft })
+        messages.push({
+          role: 'user',
+          content: `[System: verification required before final answer]
+You changed files during this task but have not run a verification command after the latest successful change.
+
+Before giving the final answer, run one focused execute_command check that best fits this project and change: tests, type-check, lint, build, or a narrow command. If no safe or relevant command exists, explain why in one concise sentence and then finalize with a verification checklist.
+
+Do not redo completed edits unless the verification output shows a problem.`,
+        })
+        debugLog('VERIFY', 'Injected self-check nudge after workspace changes')
+        doEmit({ type: 'status', content: '✅ Перед финалом прошу агента запустить проверку изменений…' })
+        session.messages = messages
+        doSaveSession(session)
+        continue
+      }
       fullResponse += (fullResponse ? '\n\n' : '') + finalText
       doEmit( { type: 'response', content: fullResponse, done: true })
       // Store without <think> blocks to save context
@@ -2618,6 +3481,40 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
         toolArgs = {}
       }
 
+      // Mode-level tool guard. Belt-and-suspenders on top of not
+      // sending the tool def to the LLM at all — a prompt-injection or
+      // a model "remembering" a tool from a previous turn shouldn't be
+      // able to sneak past.
+      const currentMode: AgentMode = session.mode ?? getDefaultAgentMode()
+      if (!isToolAllowedInMode(toolName, currentMode)) {
+        const deniedMsg = `[Denied by mode] Tool "${toolName}" is not available in ${currentMode} mode. ${
+          currentMode === 'chat'
+            ? 'All tools are disabled in chat mode.'
+            : 'In plan mode only read-only tools are allowed; ask the user to switch to agent mode to make changes.'
+        }`
+        doEmit({ type: 'tool_call', name: toolName, args: toolArgs })
+        doEmit({ type: 'tool_result', name: toolName, result: deniedMsg })
+        messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: deniedMsg })
+        continue
+      }
+
+      // General loop detection: same read-only tool + same args called
+      // repeatedly anywhere in this user turn. Allow two calls because a
+      // healthy flow often does "read -> edit -> read to verify"; from the
+      // third identical call onward, the result is stale process, not signal.
+      const loopGuard = checkRepeatedReadonlyTool(toolName, toolArgs)
+      if (loopGuard.action !== 'allow') {
+        messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: loopGuard.message })
+        if (loopGuard.action === 'recover') {
+          injectLoopRecovery(loopGuard.message)
+          session.messages = messages
+          doSaveSession(session)
+          emitContextUsage(messages)
+          continue agentLoop
+        }
+        continue
+      }
+
       const cpNative = maybeCheckpoint(toolName, toolArgs, workspace)
       doEmit( { type: 'tool_call', name: toolName, args: toolArgs, checkpoint: cpNative })
 
@@ -2625,23 +3522,6 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
       if ((toolName === 'write_file' || toolName === 'append_file' || toolName === 'create_directory') && toolArgs.path) {
         filesCreatedThisTurn.add(toolArgs.path)
       }
-
-      // General loop detection: same tool + same args called repeatedly
-      const readOnlyTools = new Set(['read_file', 'list_directory', 'find_files'])
-      const toolSig = `${toolName}:${JSON.stringify(toolArgs)}`
-      if (toolSig === lastToolSig && readOnlyTools.has(toolName)) {
-        sameToolRepeatCount++
-        debugLog('LOOP', `Duplicate ${toolName} call #${sameToolRepeatCount + 1}: ${toolArgs.path ?? ''}`)
-        if (sameToolRepeatCount >= 2) {
-          const skipMsg = `You already called ${toolName} with these exact arguments ${sameToolRepeatCount + 1} times. The result hasn't changed. Stop re-reading and proceed with the actual task. If you need to modify a file, use edit_file. If you're stuck, explain what you're trying to do.`
-          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: skipMsg })
-          doEmit( { type: 'tool_result', name: toolName, result: skipMsg })
-          continue
-        }
-      } else {
-        sameToolRepeatCount = 0
-      }
-      lastToolSig = toolSig
 
       // Detect pointless re-reads of files we JUST created
       if (toolName === 'read_file' && toolArgs.path && filesCreatedThisTurn.has(toolArgs.path)) {
@@ -2659,16 +3539,113 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
 
       // Request user approval when enabled for file ops or commands (or custom tools)
       let result: string
+      let cacheHit = false
       const customTools = doGetConfig().customTools
       const isCustom = customTools.some((ct) => ct.name === toolName)
       const isMcp = isMcpTool(toolName)
 
-      const needsApproval = needsApprovalForTool(toolName, isCustom) && !isMcp
-      // NB: MCP tools aren't gated by the built-in approval toggle — if a
-      // user wired up a destructive MCP server, that's on them (and the
-      // server itself usually has its own permission model).
+      // ---- Built-in: update_plan (task-state mutator) ---------------------
+      // Handled inline because it mutates the session, not the workspace,
+      // and we want the updated state to flow into the NEXT system prompt
+      // without a full context rebuild.
+      if (toolName === 'update_plan') {
+        const prev = session.taskState ?? emptyTaskState()
+        const { next, summary } = applyTaskStateUpdate(prev, toolArgs)
+        session.taskState = next
+        debugLog('TASKSTATE', `update_plan: ${summary}`)
+        // Push a live snapshot to the UI so the task panel can re-render
+        // immediately — without this, the sidebar would freeze until the
+        // agent's whole cycle finishes and a new chat message appears.
+        doEmit({ type: 'task_state', taskState: next })
+        const result = `Task state updated (${summary}). This will be visible in the system prompt on the next turn.`
+        doEmit({ type: 'tool_result', name: toolName, result })
+        messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        continue
+      }
 
-      if (needsApproval) {
+      // ---- Built-in: save_plan_artifact (PLAN.md only) ---------------------
+      if (toolName === 'save_plan_artifact') {
+        try {
+          const saved = savePlanArtifactContent(workspace, String(toolArgs.content ?? ''))
+          const result = `PLAN.md saved: ${saved.path}`
+          doEmit({ type: 'plan_artifact', planArtifactPath: saved.path })
+          doEmit({ type: 'tool_result', name: toolName, result })
+          try { currentBridge!.notifyWorkspaceChanged() } catch {}
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        } catch (err: any) {
+          const result = `Error saving PLAN.md: ${err?.message ?? String(err)}`
+          doEmit({ type: 'tool_result', name: toolName, result })
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        }
+        continue
+      }
+
+      // ---- Built-in: update_project_memory (durable workspace memory) -----
+      if (toolName === 'update_project_memory') {
+        try {
+          const category = ['decision', 'preference', 'known_issue', 'note'].includes(String(toolArgs.category))
+            ? String(toolArgs.category) as projectMemory.ProjectMemoryCategory
+            : 'note'
+          const file = projectMemory.appendProjectMemory(workspace, {
+            category,
+            title: String(toolArgs.title ?? ''),
+            content: String(toolArgs.content ?? ''),
+          })
+          const result = `Project memory updated: ${file}`
+          doEmit({ type: 'tool_result', name: toolName, result })
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        } catch (err: any) {
+          const result = `Error updating project memory: ${err?.message ?? String(err)}`
+          doEmit({ type: 'tool_result', name: toolName, result })
+          messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        }
+        continue
+      }
+
+      // ---- Built-in: recall (search archived history) ----------------------
+      if (toolName === 'recall') {
+        const q = typeof toolArgs.query === 'string' ? toolArgs.query : ''
+        let result: string
+        if (!q.trim()) {
+          result = 'Error: `query` is required and must be a non-empty string.'
+        } else {
+          const key = session.workspaceKey ?? ''
+          const hits = archive.recall(key, session.id, q, 8)
+          if (hits.length === 0) {
+            result = `No matches for "${q}" in the archive.`
+          } else {
+            const parts = hits.map((h, idx) => {
+              const when = new Date(h.ts).toISOString().replace('T', ' ').slice(0, 19)
+              const who = h.toolName ? `${h.role}(${h.toolName})` : h.role
+              return `#${idx + 1} [turn ${h.turn}, ${when}, ${who}]\n${h.excerpt}`
+            })
+            result = `Found ${hits.length} match(es) for "${q}":\n\n${parts.join('\n\n---\n\n')}`
+          }
+        }
+        doEmit({ type: 'tool_result', name: toolName, result: result.length > 2000 ? result.slice(0, 2000) + '…' : result })
+        messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        continue
+      }
+
+      // ---- Tool-result cache (builtins only) ------------------------------
+      // Check BEFORE executing: if the same (tool, args) was called recently
+      // and the relevant filesystem state hasn't changed, reuse the result.
+      // MCP/custom tools are not cached — we don't know their semantics.
+      let cacheEntry: toolCache.CacheEntry | null = null
+      if (!isCustom && !isMcp) {
+        cacheEntry = toolCache.lookup(toolName, toolArgs, workspace)
+      }
+
+      const needsApproval = needsApprovalForTool(toolName, isCustom) && !isMcp
+
+      if (cacheEntry) {
+        result = toolCache.renderCachedShortCircuit(cacheEntry, i)
+        cacheHit = true
+      } else if (needsApproval && !isCustom && (toolName === 'write_file' || toolName === 'edit_file')) {
+        // Inline per-hunk review replaces the plain yes/no prompt for file
+        // writes. The user sees the diff and picks which hunks to apply.
+        result = await reviewAndApplyWrite(toolName, toolArgs, workspace, tc.id)
+      } else if (needsApproval) {
         const approved = await doRequestApproval( toolName, toolArgs)
         if (approved) {
           if (isCustom) {
@@ -2702,10 +3679,38 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
       // Notify renderer to refresh file tree when agent modifies filesystem
       const fsModTools = new Set(['write_file', 'edit_file', 'delete_file', 'create_directory', 'append_file'])
       if (fsModTools.has(toolName) && !result.startsWith('Error') && !result.startsWith('[Denied')) {
+        markWorkspaceChanged()
         invalidateProjectContextCache()
+        // Invalidate any cached read_file for the path we just wrote.
+        try {
+          const p = typeof (toolArgs as any).path === 'string' ? (toolArgs as any).path : null
+          if (p) {
+            const abs = require('path').isAbsolute(p) ? p : require('path').join(workspace, p)
+            toolCache.invalidateFile(abs)
+          }
+        } catch {}
         try {
           try { currentBridge!.notifyWorkspaceChanged() } catch {}
         } catch {}
+      }
+
+      if (toolName === COMMAND_TOOL && workspaceChangedThisTurn && !result.startsWith('[Denied')) {
+        verificationCommandAfterChange = true
+      }
+
+      // Store fresh successful results in the cache and dedup older copies.
+      if (!cacheHit && !isCustom && !isMcp &&
+          !result.startsWith('Error') && !result.startsWith('[Denied')) {
+        const stored = toolCache.put(toolName, toolArgs, result, workspace, i)
+        if (stored) {
+          try {
+            const pointer = toolCache.renderDedupPointer(i, toolName)
+            const nRepl = toolCache.dedupHistoricalResults(messages as any, session.id, stored.contentHash, pointer)
+            if (nRepl > 0) debugLog('CACHE', `retro-dedup: replaced ${nRepl} older identical tool_result(s)`)
+          } catch (err: any) {
+            debugLog('CACHE', 'dedup error:', err?.message ?? err)
+          }
+        }
       }
 
       // Truncate for LLM context — dynamic limit based on context window
@@ -2726,6 +3731,23 @@ export async function runAgent(userMessage: string, ws: string, bridge: AgentBri
   doEmit( { type: 'response', content: fullResponse, done: true })
   session.updatedAt = Date.now()
   doSaveSession(session)
+  // Final archive flush — so the last turn's messages make it to the log
+  // even when we hit the iteration limit.
+  try {
+    const key = session.workspaceKey ?? ''
+    const batch: archive.ArchivedMessage[] = []
+    for (let k = archivedUpTo; k < messages.length; k++) {
+      const m = messages[k] as any
+      if (!m || m.role === 'system') continue
+      batch.push({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
+        turn: k,
+        ts: Date.now(),
+      })
+    }
+    if (batch.length) archive.appendMessages(key, session.id, batch)
+  } catch {}
   return fullResponse
   } finally {
     currentBridge = null

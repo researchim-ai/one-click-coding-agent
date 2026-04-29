@@ -6,8 +6,8 @@
 
 import { parentPort } from 'worker_threads'
 import fs from 'fs'
-import { runAgent, type AgentBridge, type McpToolSnapshot, type Session } from './agent'
-import type { AgentEvent } from './types'
+import { cancelAgent, runAgent, type AgentBridge, type McpToolSnapshot, type Session, type HunkReviewDecision } from './agent'
+import type { AgentEvent, HunkReviewPayload } from './types'
 import type { AppConfig } from './config'
 
 if (!parentPort) throw new Error('agent-worker must run as worker thread')
@@ -15,6 +15,7 @@ if (!parentPort) throw new Error('agent-worker must run as worker thread')
 let workerCancelRequested = false
 let workerCtxSize = 32768
 const pendingApprovals = new Map<string, (approved: boolean) => void>()
+const pendingHunkReviews = new Map<string, (d: HunkReviewDecision) => void>()
 const pendingQueryCtx = new Map<string, () => void>()
 const pendingMcpCalls = new Map<string, { resolve: (v: string) => void; reject: (e: Error) => void }>()
 
@@ -39,6 +40,12 @@ function createWorkerBridge(payload: {
       return new Promise((resolve) => {
         pendingApprovals.set(approvalId, resolve)
         parentPort!.postMessage({ type: 'approval', approvalId, name: toolName, args })
+      })
+    },
+    async requestHunkReview(review: HunkReviewPayload): Promise<HunkReviewDecision> {
+      return new Promise((resolve) => {
+        pendingHunkReviews.set(review.approvalId, resolve)
+        parentPort!.postMessage({ type: 'hunk-review', review })
       })
     },
     getConfig(): AppConfig {
@@ -95,8 +102,21 @@ parentPort.on('message', async (msg: any) => {
     }
     return
   }
+  if (msg.type === 'hunk-review-result') {
+    const resolve = pendingHunkReviews.get(msg.approvalId)
+    if (resolve) {
+      pendingHunkReviews.delete(msg.approvalId)
+      resolve(msg.decision as HunkReviewDecision)
+    }
+    return
+  }
   if (msg.type === 'cancel') {
     workerCancelRequested = true
+    // `runAgent` runs inside this worker, so the active AbortController
+    // also lives inside this worker. Calling main-process cancel only
+    // flips the UI-side flag; this call aborts the actual in-flight
+    // fetch/reader while the model is still prefill/thinking/streaming.
+    cancelAgent()
     return
   }
   if (msg.type === 'query-ctx-result') {
