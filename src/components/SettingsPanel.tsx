@@ -90,8 +90,8 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
   const [temperature, setTemperature] = useState(0.3)
   const [idleTimeoutSec, setIdleTimeoutSec] = useState(60)
   const [maxEmptyRetries, setMaxEmptyRetries] = useState(3)
-  const [approvalForFileOps, setApprovalForFileOps] = useState(true)
-  const [approvalForCommands, setApprovalForCommands] = useState(true)
+  const [approvalForFileOps, setApprovalForFileOps] = useState(false)
+  const [approvalForCommands, setApprovalForCommands] = useState(false)
   const [agentDirty, setAgentDirty] = useState(false)
 
   // Prompts state
@@ -157,8 +157,8 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       setTemperature(c.temperature ?? 0.3)
       setIdleTimeoutSec(c.idleTimeoutSec ?? 60)
       setMaxEmptyRetries(c.maxEmptyRetries ?? 3)
-      setApprovalForFileOps(c.approvalForFileOps ?? (c as any).approvalRequired ?? true)
-      setApprovalForCommands(c.approvalForCommands ?? (c as any).approvalRequired ?? true)
+      setApprovalForFileOps(c.approvalForFileOps ?? (c as any).approvalRequired ?? false)
+      setApprovalForCommands(c.approvalForCommands ?? (c as any).approvalRequired ?? false)
       setAgentDirty(false)
 
       setSysPrompt(p.systemPrompt ?? p.defaultSystemPrompt)

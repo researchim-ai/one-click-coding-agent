@@ -34,4 +34,37 @@ describe('session management cold start', () => {
     expect(list[0].mode).toBe('agent')
     expect(agent.getActiveSessionId(workspace)).toBe(id)
   })
+
+  it('can read task state for a specific non-active session', async () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'oca-session-state-'))
+    process.env.HOME = tmpHome
+    vi.resetModules()
+
+    const agent = await import('../electron/agent')
+    const workspace = path.join(tmpHome, 'workspace')
+    fs.mkdirSync(workspace, { recursive: true })
+
+    const first = agent.createSession(workspace)
+    const firstSession = agent.getActiveSession(workspace)
+    firstSession.taskState = {
+      goal: 'first goal',
+      plan: [{ id: 1, title: 'first step', status: 'in_progress' }],
+      notes: '',
+      updatedAt: Date.now(),
+    }
+    agent.saveSession(firstSession)
+
+    const second = agent.createSession(workspace)
+    const secondSession = agent.getActiveSession(workspace)
+    secondSession.taskState = {
+      goal: 'second goal',
+      plan: [{ id: 1, title: 'second step', status: 'in_progress' }],
+      notes: '',
+      updatedAt: Date.now(),
+    }
+    agent.saveSession(secondSession)
+
+    expect(agent.getSessionById(workspace, first)?.taskState?.goal).toBe('first goal')
+    expect(agent.getSessionById(workspace, second)?.taskState?.goal).toBe('second goal')
+  })
 })

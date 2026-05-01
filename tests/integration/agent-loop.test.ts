@@ -491,7 +491,6 @@ describe('runAgent integration', () => {
       expect(toolNames).toContain('find_files')
       expect(toolNames).toContain('update_plan')
       expect(toolNames).toContain('save_plan_artifact')
-      expect(toolNames).toContain('update_project_memory')
       expect(toolNames).toContain('recall')
 
       // Forbidden in plan mode (write/exec tools):
@@ -499,6 +498,7 @@ describe('runAgent integration', () => {
       expect(toolNames).not.toContain('execute_command')
       expect(toolNames).not.toContain('append_file')
       expect(toolNames).not.toContain('delete_file')
+      expect(toolNames).not.toContain('update_project_memory')
 
       // Plan-mode instruction lives in the ephemeral message, not the
       // system prompt. Same KV-cache-preservation reasoning as above.
@@ -548,6 +548,26 @@ describe('runAgent integration', () => {
       expect(fs.readFileSync(planPath, 'utf-8')).toContain('Ship a polished plan viewer')
       const ev = live.events.find((e) => e.type === 'plan_artifact')
       expect(ev?.planArtifactPath).toBe(planPath)
+    })
+
+    it('plan mode: stores draft steps as pending instead of execution progress', async () => {
+      live = await makeHarness({ sessionMode: 'plan' })
+      live.enqueueAssistantToolCall({
+        name: 'update_plan',
+        args: {
+          goal: 'draft a real plan',
+          plan: [
+            { title: 'Inspect current flow', status: 'completed' },
+            { title: 'Design approval gate', status: 'in_progress' },
+            { title: 'Ask about rollout preference', status: 'blocked' },
+          ],
+        },
+      })
+      live.enqueueAssistantText('План ожидает подтверждения.')
+
+      await runAgent('составь план', live.workspace, live.bridge)
+
+      expect(live.session.taskState?.plan.map((s) => s.status)).toEqual(['pending', 'pending', 'blocked'])
     })
 
     it('agent mode (default): exposes all tools and no mode note', async () => {

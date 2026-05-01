@@ -56,6 +56,8 @@ export interface AppConfig {
   approvalForFileOps: boolean
   /** Ask before execute_command */
   approvalForCommands: boolean
+  /** Internal migration marker: old builds accidentally defaulted approvals on. */
+  approvalDefaultsMigrated?: boolean
   /** Default mode for newly-created chat sessions. Per-session overrides
    *  live on `Session.mode` and are what the agent actually consults at
    *  runtime. See `AgentMode` in types.ts for the semantics. */
@@ -78,8 +80,9 @@ const DEFAULT_CONFIG: AppConfig = {
   temperature: 0.3,
   idleTimeoutSec: 60,
   maxEmptyRetries: 3,
-  approvalForFileOps: true,
-  approvalForCommands: true,
+  approvalForFileOps: false,
+  approvalForCommands: false,
+  approvalDefaultsMigrated: true,
   defaultMode: 'agent',
 }
 
@@ -108,6 +111,14 @@ export function load(): AppConfig {
     if (parsed.approvalRequired !== undefined && (parsed.approvalForFileOps === undefined || parsed.approvalForCommands === undefined)) {
       loaded.approvalForFileOps = Boolean(parsed.approvalRequired)
       loaded.approvalForCommands = Boolean(parsed.approvalRequired)
+      loaded.approvalDefaultsMigrated = true
+    } else if (parsed.approvalDefaultsMigrated !== true) {
+      // Builds before 0.1.2 accidentally wrote approvals as enabled by
+      // default. Treat unmarked configs as old defaults, not as an explicit
+      // user choice, so upgrades stop asking on every file edit.
+      loaded.approvalForFileOps = false
+      loaded.approvalForCommands = false
+      loaded.approvalDefaultsMigrated = true
     }
     cached = loaded
     return loaded
@@ -119,7 +130,8 @@ export function load(): AppConfig {
 
 export function save(partial: Partial<AppConfig>): AppConfig {
   const current = load()
-  const updated = { ...current, ...partial }
+  const touchesApprovals = 'approvalForFileOps' in partial || 'approvalForCommands' in partial
+  const updated = { ...current, ...partial, ...(touchesApprovals ? { approvalDefaultsMigrated: true } : {}) }
   const dir = path.dirname(configPath())
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(configPath(), JSON.stringify(updated, null, 2))

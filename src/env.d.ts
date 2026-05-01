@@ -47,6 +47,8 @@ interface ElectronAPI {
   getGitStatus(workspace: string): Promise<import('../electron/git').GitStatus>
   getGitNumstat(workspace: string): Promise<import('../electron/git').GitNumstatEntry[]>
   getGitFileAtHead(workspace: string, relativePath: string): Promise<string | null>
+  getGitFileDiff(workspace: string, filePath: string, currentContent?: string): Promise<import('../electron/git').GitFileDiff>
+  discardGitFileChanges(workspace: string, filePath: string): Promise<{ ok: true; deleted: boolean; path: string }>
   readFileContent(filePath: string): Promise<{ content: string; size: number; lines: number }>
   writeFile(filePath: string, content: string): Promise<void>
   tsGetDefinition(workspacePath: string, filePath: string, fileContent: string, line: number, column: number): Promise<{ path: string; startLine: number; startColumn: number; endLine: number; endColumn: number } | null>
@@ -62,7 +64,7 @@ interface ElectronAPI {
       | { decision: 'accept_selected'; selectedHunkIds: number[] }
       | { decision: 'reject' },
   ): void
-  getTaskState(workspace: string): Promise<import('../electron/task-state').TaskState | null>
+  getTaskState(workspace: string, sessionId?: string): Promise<import('../electron/task-state').TaskState | null>
 
   // Session management (workspace-scoped)
   createSession(workspace: string): Promise<string>

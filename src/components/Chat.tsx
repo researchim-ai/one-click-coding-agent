@@ -747,7 +747,7 @@ export function Chat({
                   : mode === 'chat'
                     ? t('Обсуждение (без инструментов)… @ — прикрепить файл', 'Discussion (no tools)… @ — attach file')
                     : mode === 'plan'
-                      ? t('Планирование (только чтение)… @ — прикрепить файл', 'Planning (read-only)… @ — attach file')
+                      ? t('Планирование и вопросы перед выполнением… @ — прикрепить файл', 'Planning and questions before execution… @ — attach file')
                       : t('Опиши задачу… @ — прикрепить файл', 'Describe the task… @ — attach file')}
               rows={1}
               className="flex-1 bg-transparent px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none disabled:opacity-50"
@@ -898,8 +898,8 @@ function ModeSwitcher({
       id: 'plan',
       label: t('Plan', 'Plan'),
       tip: t(
-        'Планирование (только чтение). Модель исследует проект и составляет план, но не меняет файлы.',
-        'Planning (read-only). The model explores the project and drafts a plan without modifying files.',
+        'Планирование (только чтение). Модель исследует проект, задаёт вопросы и готовит план на согласование.',
+        'Planning (read-only). The model explores the project, asks questions, and drafts a plan for approval.',
       ),
     },
     {

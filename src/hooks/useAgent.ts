@@ -42,9 +42,10 @@ interface SessionState {
 
 type AgentMode = 'chat' | 'plan' | 'agent'
 
-function routeModeForMessage(text: string, current: AgentMode): AgentMode {
+export function routeModeForMessage(text: string, current: AgentMode): AgentMode {
   const s = text.toLowerCase()
   if (/^\s*(продолжай|continue|go on|дальше|ок|давай|делай)\s*[.!?]*\s*$/i.test(text)) return current
+  if (/выполни\s+(этот\s+)?план|выполняй\s+(этот\s+)?план|приступай\s+к\s+(выполнению|реализации)|начинай\s+(выполнение|реализацию)|apply\s+(the\s+)?plan|execute\s+(the\s+)?plan/.test(s)) return 'agent'
   if (/(^|\s)\/chat\b|обсуди|поговорим|что думаешь|объясни|поясни|explain|discuss|what do you think/.test(s)) return 'chat'
   if (/(^|\s)\/plan\b|спланируй|составь план|план\b|архитектур|дизайн|roadmap|design|plan\b|proposal|подход/.test(s)) return 'plan'
   if (/(^|\s)\/agent\b|сделай|реализуй|исправь|добавь|почини|удали|перепиши|создай|implement|fix|add|remove|refactor|write|update|build/.test(s)) return 'agent'
@@ -113,6 +114,19 @@ export function useAgent() {
     assistantRef.current = null
   }
 
+  async function hydrateTaskState(sessionId: string | null) {
+    if (!workspace || !window.api || !sessionId) {
+      setTaskState(null)
+      return
+    }
+    try {
+      const ts = await window.api.getTaskState(workspace, sessionId)
+      setTaskState(ts ?? null)
+    } catch {
+      setTaskState(null)
+    }
+  }
+
   // When workspace changes: load that project's sessions and active chat (no cross-project mixing)
   useEffect(() => {
     // Any live task-state snapshot belongs to the previous workspace —
@@ -148,9 +162,11 @@ export function useAgent() {
       if (targetId) {
         setActiveSessionId(targetId)
         await loadFromMap(targetId)
+        await hydrateTaskState(targetId)
       } else {
         setActiveSessionId(null)
         setMessages([])
+        setTaskState(null)
       }
     })()
   }, [workspace])
@@ -211,8 +227,8 @@ export function useAgent() {
           const next = list[0]
           await window.api.switchSession(workspace, next.id)
           setActiveSessionId(next.id)
-          setTaskState(null)
           await loadFromMap(next.id)
+          await hydrateTaskState(next.id)
         }
       }
 
@@ -441,7 +457,8 @@ export function useAgent() {
       setMessages((prev) => [...prev, { id: nextId(), role: 'status', content: `⚠ ${e.message ?? e}` }])
       setBusy(false)
     }
-    refreshSessions()
+    await refreshSessions()
+    await hydrateTaskState(activeSessionId)
   }, [busy, workspace, activeSessionId, activeMode, refreshSessions])
 
   const cancel = useCallback(async () => {
@@ -485,6 +502,7 @@ export function useAgent() {
       idCounter.current = 0
       sessionStates.current.delete(id)
       await refreshSessions()
+      await hydrateTaskState(id)
     } catch {
       // If creation failed because frontend/backend state drifted, force
       // one refresh; refreshSessions itself can recreate a missing chat.
@@ -498,8 +516,8 @@ export function useAgent() {
     const ok = await window.api.switchSession(workspace, id)
     if (ok) {
       setActiveSessionId(id)
-      setTaskState(null)
-      loadFromMap(id)
+      await loadFromMap(id)
+      await hydrateTaskState(id)
     }
   }, [busy, workspace, activeSessionId, messages])
 
@@ -526,7 +544,8 @@ export function useAgent() {
         const next = remaining[0]
         await window.api.switchSession(workspace, next.id)
         setActiveSessionId(next.id)
-        loadFromMap(next.id)
+        await loadFromMap(next.id)
+        await hydrateTaskState(next.id)
       } else {
         const newId = await window.api.createSession(workspace)
         setActiveSessionId(newId)

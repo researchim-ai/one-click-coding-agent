@@ -1,5 +1,7 @@
 import { spawnSync } from 'child_process'
+import fs from 'fs'
 import path from 'path'
+import { computeHunks, type Hunk } from './diff-hunks'
 
 export interface GitFileStatus {
   /** Path relative to repo root (forward slashes) */
@@ -126,4 +128,94 @@ export function getFileContentAtHead(workspace: string, relativePath: string): s
 
   if (result.error || result.status !== 0) return null
   return result.stdout ?? null
+}
+
+function relativeToWorkspace(workspace: string, filePath: string): string {
+  const ws = path.resolve(workspace)
+  const abs = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(workspace, filePath)
+  const rel = path.relative(ws, abs)
+  return normalizeRelPath(rel)
+}
+
+function resolveInWorkspace(workspace: string, filePath: string): string {
+  const ws = path.resolve(workspace)
+  const abs = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(workspace, filePath)
+  if (!abs.startsWith(ws) && !abs.startsWith(ws + path.sep)) {
+    throw new Error(`Access denied: ${abs} is outside workspace ${ws}`)
+  }
+  return abs
+}
+
+export interface GitFileDiff {
+  isRepo: boolean
+  path: string
+  oldContent: string | null
+  newContent: string
+  hunks: Hunk[]
+  additions: number
+  removals: number
+  isNewFile: boolean
+  hasChanges: boolean
+}
+
+export function getFileDiff(workspace: string, filePath: string, currentContent?: string): GitFileDiff {
+  if (!workspace?.trim() || !filePath?.trim()) {
+    return { isRepo: false, path: filePath, oldContent: null, newContent: currentContent ?? '', hunks: [], additions: 0, removals: 0, isNewFile: false, hasChanges: false }
+  }
+  const status = getStatus(workspace)
+  if (!status.isRepo) {
+    return { isRepo: false, path: filePath, oldContent: null, newContent: currentContent ?? '', hunks: [], additions: 0, removals: 0, isNewFile: false, hasChanges: false }
+  }
+  const rel = relativeToWorkspace(workspace, filePath)
+  const abs = resolveInWorkspace(workspace, filePath)
+  const oldContent = getFileContentAtHead(workspace, rel)
+  const newContent = typeof currentContent === 'string'
+    ? currentContent
+    : fs.existsSync(abs)
+      ? fs.readFileSync(abs, 'utf-8')
+      : ''
+
+  if (oldContent === null) {
+    if (!newContent) {
+      return { isRepo: true, path: rel, oldContent: null, newContent, hunks: [], additions: 0, removals: 0, isNewFile: true, hasChanges: false }
+    }
+    const hunks = computeHunks('', newContent)
+    return {
+      isRepo: true,
+      path: rel,
+      oldContent: null,
+      newContent,
+      hunks,
+      additions: hunks.reduce((n, h) => n + h.additions, 0),
+      removals: 0,
+      isNewFile: true,
+      hasChanges: hunks.length > 0,
+    }
+  }
+
+  const hunks = computeHunks(oldContent, newContent)
+  return {
+    isRepo: true,
+    path: rel,
+    oldContent,
+    newContent,
+    hunks,
+    additions: hunks.reduce((n, h) => n + h.additions, 0),
+    removals: hunks.reduce((n, h) => n + h.removals, 0),
+    isNewFile: false,
+    hasChanges: hunks.length > 0,
+  }
+}
+
+export function discardFileChanges(workspace: string, filePath: string): { ok: true; deleted: boolean; path: string } {
+  const rel = relativeToWorkspace(workspace, filePath)
+  const abs = resolveInWorkspace(workspace, filePath)
+  const oldContent = getFileContentAtHead(workspace, rel)
+  if (oldContent === null) {
+    if (fs.existsSync(abs)) fs.rmSync(abs, { force: true })
+    return { ok: true, deleted: true, path: rel }
+  }
+  fs.mkdirSync(path.dirname(abs), { recursive: true })
+  fs.writeFileSync(abs, oldContent, 'utf-8')
+  return { ok: true, deleted: false, path: rel }
 }

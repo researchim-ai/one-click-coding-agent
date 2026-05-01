@@ -40,7 +40,7 @@ import {
   createSession, switchSession, listSessions, deleteSession,
   renameSession, getActiveSessionId, initSessions,
   saveUiMessages, getUiMessages,
-  getActiveSession, getSessionPathForWorker, saveSession as persistSession, isCancelRequested,
+  getActiveSession, getSessionById, getSessionPathForWorker, saveSession as persistSession, isCancelRequested,
   updateSessionFromWorker,
   computeContextBreakdown, toggleMessagePin, listPinnedMessages,
   setSessionMode,
@@ -1128,10 +1128,10 @@ function registerIpcHandlers() {
   // Read-only snapshot of the agent's task state (goal, plan, notes). The
   // sidebar polls this on session change and on tool_result events so the
   // UI always reflects whatever the agent last wrote through `update_plan`.
-  ipcMain.handle('task-state:get', (_e, workspace: string) => {
+  ipcMain.handle('task-state:get', (_e, workspace: string, sessionId?: string) => {
     if (!workspace) return null
     try {
-      const sess = getActiveSession(workspace)
+      const sess = sessionId ? getSessionById(workspace, sessionId) : getActiveSession(workspace)
       return normalizeTaskState(sess?.taskState ?? null)
     } catch { return null }
   })
@@ -1232,6 +1232,12 @@ function registerIpcHandlers() {
   ipcMain.handle('git-status', (_e, workspace: string) => git.getStatus(workspace))
   ipcMain.handle('git-numstat', (_e, workspace: string) => git.getNumstat(workspace))
   ipcMain.handle('git-file-at-head', (_e, workspace: string, relativePath: string) => git.getFileContentAtHead(workspace, relativePath))
+  ipcMain.handle('git-file-diff', (_e, workspace: string, filePath: string, currentContent?: string) => git.getFileDiff(workspace, filePath, currentContent))
+  ipcMain.handle('git-discard-file', (_e, workspace: string, filePath: string) => {
+    const result = git.discardFileChanges(workspace, filePath)
+    scheduleWorkspaceChangedNotify()
+    return result
+  })
 
   ipcMain.handle('read-file-content', async (_e, filePath: string) => {
     try {

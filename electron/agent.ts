@@ -9,6 +9,7 @@ import type { HunkReviewPayload, AgentMode } from './types'
 import { Agent as UndiciAgent } from 'undici'
 import {
   TaskState,
+  type PlanStep,
   emptyTaskState,
   applyTaskStateUpdate,
   normalizeTaskState,
@@ -326,9 +327,9 @@ const MAX_LOOP_NUDGES_PER_TURN = 3
 /** Whether this tool requires user approval given current config (file ops vs commands split). */
 function needsApprovalForTool(toolName: string, isCustom: boolean): boolean {
   const cfg = doGetConfig()
-  if (isCustom) return (cfg.approvalForFileOps ?? true) || (cfg.approvalForCommands ?? true)
-  if (FILE_OPS_TOOLS.has(toolName)) return cfg.approvalForFileOps ?? true
-  if (toolName === COMMAND_TOOL) return cfg.approvalForCommands ?? true
+  if (isCustom) return (cfg.approvalForFileOps ?? false) || (cfg.approvalForCommands ?? false)
+  if (FILE_OPS_TOOLS.has(toolName)) return cfg.approvalForFileOps ?? false
+  if (toolName === COMMAND_TOOL) return cfg.approvalForCommands ?? false
   return false
 }
 
@@ -571,6 +572,29 @@ const SAVE_PLAN_ARTIFACT_TOOL_DEF = {
   },
 }
 
+function updatePlanToolDefForMode(mode: AgentMode): any {
+  if (mode !== 'plan') return UPDATE_PLAN_TOOL_DEF
+  const toolDef = JSON.parse(JSON.stringify(UPDATE_PLAN_TOOL_DEF))
+  toolDef.function.description =
+    'Record a DRAFT plan for user review. In Plan mode this is not execution progress: every implementation step must be pending unless it is genuinely blocked by missing information. Do not mark steps in_progress or completed in Plan mode. After writing the draft plan, wait for the user to approve it or request changes.'
+  toolDef.function.parameters.properties.plan.description =
+    'Ordered draft implementation steps for later Agent mode. Replace the whole plan, do not append. In Plan mode, statuses must be pending or blocked only.'
+  toolDef.function.parameters.properties.plan.items.properties.status.description =
+    'Draft status. In Plan mode use pending for normal steps and blocked only for unresolved questions; never use in_progress or completed.'
+  return toolDef
+}
+
+function taskStateUpdateForMode(args: Record<string, any>, mode: AgentMode): Record<string, any> {
+  if (mode !== 'plan' || !Array.isArray(args.plan)) return args
+  return {
+    ...args,
+    plan: args.plan.map((step: any): Partial<PlanStep> => ({
+      ...step,
+      status: step?.status === 'blocked' ? 'blocked' : 'pending',
+    })),
+  }
+}
+
 function isTaskStateEphemeral(m: { role: string; content?: string | null }): boolean {
   return m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(TASK_STATE_BEGIN)
 }
@@ -604,18 +628,19 @@ function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
   return lang === 'ru'
     ? `## Режим: Plan (планирование, только чтение)
 
-Ты в режиме планирования. Доступны только read-only инструменты: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan.
+Ты в режиме планирования. Это отдельный этап согласования, а не начало выполнения. Доступны только инструменты исследования и планирования: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
 
-Писать/редактировать файлы и запускать команды ЗАПРЕЩЕНО. Plan-режим должен вести себя как продвинутый planning-агент: сначала изучить проект, затем выдать полноценный Markdown-документ плана, а не короткий ответ.
+Писать/редактировать исходные файлы, запускать команды и выполнять шаги плана ЗАПРЕЩЕНО. Plan-режим должен вести себя как продвинутый planning-агент: уточнить требования, изучить проект, предложить план, обсудить корректировки и ждать явного подтверждения пользователя.
 
 Обязательный процесс:
 1. Исследуй проект read-only инструментами. Не отвечай "на глаз", если можно проверить файлы.
-2. Если задача неоднозначна, задай 1-3 уточняющих вопроса и не придумывай лишнее.
-3. Вызови update_plan с конкретной целью и 6-10 выполнимыми шагами. Шаги должны быть пригодны для последующего Agent-режима.
+2. Если задача неоднозначна или есть важные развилки, задай 1-3 уточняющих вопроса и остановись. Не создавай финальный план через догадки.
+3. Если информации достаточно, вызови update_plan с конкретной целью и 6-10 шагами для последующего Agent-режима. Все обычные шаги в Plan-режиме должны быть pending; используй blocked только для открытых вопросов. Никогда не ставь in_progress/completed в Plan-режиме.
 4. Сохрани полноценный Markdown-план через save_plan_artifact — это создаст/обновит PLAN.md и автоматически покажет его пользователю.
-5. Markdown PLAN.md должен включать:
+5. Markdown PLAN.md должен быть именно проектом плана на согласование и включать:
    - "Цель"
    - "Что известно из проекта"
+   - "Открытые вопросы / предположения"
    - "Архитектура / поток" с Mermaid-диаграммой, если есть процесс/компоненты
    - "Пошаговый план реализации"
    - "Файлы и зоны изменений"
@@ -623,23 +648,24 @@ function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
    - "План проверки / тесты"
    - "Критерии готовности"
 6. Диаграммы пиши в fenced-блоках mermaid. Если диаграмма неуместна, явно напиши почему.
-7. Заверши фразой: «План сохранён в PLAN.md. Нажмите «Выполнить план», чтобы переключиться в режим Agent».
+7. Заверши фразой: «План сохранён в PLAN.md и ожидает подтверждения. Обсудите правки или нажмите «Выполнить план», чтобы переключиться в режим Agent».
 
-НЕ начинай выполнять шаги плана — это сделает режим Agent после подтверждения пользователем.`
+НЕ начинай выполнять шаги плана, НЕ отмечай прогресс выполнения и НЕ переходи в Agent сам. Это сделает приложение только после явного подтверждения пользователя.`
     : `## Mode: Plan (read-only planning)
 
-You are in planning mode. Only read-only tools are available: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan.
+You are in planning mode. This is an approval/discussion stage, not execution. Only research and planning tools are available: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
 
-Writing/editing files and running commands is FORBIDDEN. Plan mode should behave like an advanced planning agent: first inspect the project, then produce a full Markdown planning document, not a short reply.
+Writing/editing source files, running commands, and executing plan steps is FORBIDDEN. Plan mode should behave like an advanced planning agent: clarify requirements, inspect the project, propose a plan, discuss revisions, and wait for explicit user approval.
 
 Required process:
 1. Explore the project with read-only tools. Do not answer from vibes when files can be inspected.
-2. If the task is ambiguous, ask 1-3 clarifying questions and do not invent requirements.
-3. Call update_plan with a concrete goal and 6-10 executable steps suitable for the later Agent mode.
+2. If the task is ambiguous or has important forks, ask 1-3 clarifying questions and stop. Do not create a final plan by guessing.
+3. If you have enough information, call update_plan with a concrete goal and 6-10 steps suitable for later Agent mode. In Plan mode all normal steps must be pending; use blocked only for open questions. Never set in_progress or completed in Plan mode.
 4. Save the full Markdown plan via save_plan_artifact — this creates/updates PLAN.md and automatically shows it to the user.
-5. PLAN.md must include:
+5. PLAN.md must be a draft for approval and include:
    - "Goal"
    - "What is known from the project"
+   - "Open questions / assumptions"
    - "Architecture / flow" with a Mermaid diagram when components or process exist
    - "Implementation steps"
    - "Files and change areas"
@@ -647,9 +673,9 @@ Required process:
    - "Verification / tests"
    - "Done criteria"
 6. Write diagrams in fenced mermaid blocks. If a diagram is not appropriate, say why.
-7. End with: "Plan saved to PLAN.md. Press 'Apply plan' to switch to Agent mode."
+7. End with: "Plan saved to PLAN.md and awaiting approval. Discuss revisions or press 'Apply plan' to switch to Agent mode."
 
-Do NOT start executing plan steps — Agent mode will do that after the user confirms.`
+Do NOT start executing plan steps, do NOT mark execution progress, and do NOT switch to Agent yourself. The app will do that only after explicit user approval.`
 }
 
 function renderProjectMemoryForPrompt(workspace: string, lang: 'ru' | 'en'): string {
@@ -809,7 +835,7 @@ function getAllTools(mode: AgentMode = 'agent'): any[] {
     },
   }))
 
-  let all = [...builtins, UPDATE_PLAN_TOOL_DEF, SAVE_PLAN_ARTIFACT_TOOL_DEF, UPDATE_PROJECT_MEMORY_TOOL_DEF, RECALL_TOOL_DEF, ...customDefs, ...mcpDefs]
+  let all = [...builtins, updatePlanToolDefForMode(mode), SAVE_PLAN_ARTIFACT_TOOL_DEF, UPDATE_PROJECT_MEMORY_TOOL_DEF, RECALL_TOOL_DEF, ...customDefs, ...mcpDefs]
 
   if (mode === 'plan') {
       // Plan mode: keep the read-only builtins, drop every custom and MCP
@@ -821,7 +847,7 @@ function getAllTools(mode: AgentMode = 'agent'): any[] {
     all = all.filter((t) => {
       const name = t?.function?.name
       if (!name) return false
-      if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'update_project_memory' || name === 'recall') return true
+      if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'recall') return true
       return PLAN_MODE_BUILTIN_ALLOWLIST.has(name)
     })
   }
@@ -841,7 +867,7 @@ function isToolAllowedInMode(name: string, mode: AgentMode): boolean {
   if (mode === 'agent') return true
   if (mode === 'chat') return false
   // plan
-  if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'update_project_memory' || name === 'recall') return true
+  if (name === 'update_plan' || name === 'save_plan_artifact' || name === 'recall') return true
   return PLAN_MODE_BUILTIN_ALLOWLIST.has(name)
 }
 
@@ -1048,6 +1074,11 @@ export function getActiveSession(ws: string): Session {
   saveSession(session)
   saveActiveId(ws)
   return session
+}
+
+export function getSessionById(ws: string, id: string): Session | null {
+  loadSessionsForWorkspace(ws)
+  return getSessionsMap(ws).get(id) ?? null
 }
 
 // ---------------------------------------------------------------------------
@@ -3327,7 +3358,15 @@ Before the next tool call, state the new strategy in one sentence.`
           }
 
           let result: string
-          if (isCustom) {
+          if (tc.name === 'update_plan') {
+            const prev = session.taskState ?? emptyTaskState()
+            const mode = session.mode ?? getDefaultAgentMode()
+            const { next, summary } = applyTaskStateUpdate(prev, taskStateUpdateForMode(tc.args, mode))
+            session.taskState = next
+            session.updatedAt = Date.now()
+            result = `Task state updated (${summary}). This will be visible in the system prompt on the next turn.`
+            doEmit({ type: 'task_state', taskState: next })
+          } else if (isCustom) {
             const ct = recoveredCustomTools.find((t: any) => t.name === tc.name)
             result = ct ? executeCustomTool(ct, tc.args, workspace) : `Error: custom tool "${tc.name}" not found`
           } else if (isMcpTool(tc.name)) {
@@ -3362,6 +3401,10 @@ Before the next tool call, state the new strategy in one sentence.`
             tool_calls: [{ id: callId, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.args) } }],
           })
           messages.push({ role: 'tool', tool_call_id: callId, content: smartTruncateToolResult(tc.name, result, dynamicToolResultLimit()) })
+          if (tc.name === 'update_plan') {
+            session.messages = messages
+            doSaveSession(session)
+          }
         }
 
         session.messages = messages
@@ -3550,8 +3593,10 @@ Do not redo completed edits unless the verification output shows a problem.`,
       // without a full context rebuild.
       if (toolName === 'update_plan') {
         const prev = session.taskState ?? emptyTaskState()
-        const { next, summary } = applyTaskStateUpdate(prev, toolArgs)
+        const mode = session.mode ?? getDefaultAgentMode()
+        const { next, summary } = applyTaskStateUpdate(prev, taskStateUpdateForMode(toolArgs, mode))
         session.taskState = next
+        session.updatedAt = Date.now()
         debugLog('TASKSTATE', `update_plan: ${summary}`)
         // Push a live snapshot to the UI so the task panel can re-render
         // immediately — without this, the sidebar would freeze until the
@@ -3560,6 +3605,8 @@ Do not redo completed edits unless the verification output shows a problem.`,
         const result = `Task state updated (${summary}). This will be visible in the system prompt on the next turn.`
         doEmit({ type: 'tool_result', name: toolName, result })
         messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result })
+        session.messages = messages
+        doSaveSession(session)
         continue
       }
 

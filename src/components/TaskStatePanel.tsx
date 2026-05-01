@@ -85,8 +85,11 @@ export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', live
     }
   }, [workspace, refreshKey])
 
-  // Use the live push if it's more recent than whatever we fetched.
-  const effective: TaskState | null = (liveState as TaskState | null | undefined) ?? state
+  // If parent provides a snapshot (including explicit null), treat it as
+  // authoritative for the active session. Falling back to local fetched
+  // state after `null` caused stale plans to remain visible after restart
+  // or session switches.
+  const effective: TaskState | null = liveState !== undefined ? (liveState as TaskState | null) : state
   if (!isMeaningful(effective)) return null
   const s = effective!
 
@@ -101,7 +104,7 @@ export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', live
         className="w-full px-3 py-1.5 flex items-center gap-2 text-left hover:bg-zinc-800/60 transition-colors cursor-pointer rounded-t-md"
       >
         <span className="text-blue-400/80 text-[11px] font-medium">
-          {t('Текущая задача', 'Current task')}
+          {mode === 'plan' ? t('План на согласовании', 'Plan for approval') : t('Текущая задача', 'Current task')}
         </span>
         {s.goal && (
           <span className="flex-1 truncate text-zinc-300" title={s.goal}>
@@ -172,15 +175,18 @@ export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', live
                   onClick={onApplyPlan}
                   className="px-2.5 py-1 rounded bg-blue-500/20 text-blue-200 text-[11px] font-medium hover:bg-blue-500/30 ring-1 ring-blue-500/30 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   title={t(
-                    'Переключить режим в Agent и начать выполнение плана',
-                    'Switch mode to Agent and start executing the plan',
+                    'Явно подтвердить план, переключиться в Agent и начать выполнение',
+                    'Explicitly approve the plan, switch to Agent, and start execution',
                   )}
                 >
-                  {t('▶ Выполнить план', '▶ Apply plan')}
+                  {t('▶ Выполнить утверждённый план', '▶ Apply approved plan')}
                 </button>
               )}
               <span className="text-[10.5px] text-zinc-500">
-                {t('План можно сохранить как артефакт или сразу выполнить.', 'Save the plan as an artifact or execute it.')}
+                {t(
+                  'Plan-режим только готовит и обсуждает план. Выполнение начнётся только после явного подтверждения.',
+                  'Plan mode only drafts and discusses the plan. Execution starts only after explicit approval.',
+                )}
               </span>
             </div>
           )}

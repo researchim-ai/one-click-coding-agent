@@ -3,6 +3,7 @@ import Editor from '@monaco-editor/react'
 import type { editor, IRange } from 'monaco-editor'
 import type { OpenFile } from '../hooks/useEditor'
 import { ContextMenu, type MenuItem } from './ContextMenu'
+import type { GitFileDiff } from '../../electron/git'
 
 export interface CodeSelectionInfo {
   filePath: string
@@ -138,7 +139,11 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const linkProviderDisposable = useRef<{ dispose(): void } | null>(null)
   const tsProvidersDisposable = useRef<{ dispose(): void } | null>(null)
+  const diffDecorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null)
+  const diffZoneIdsRef = useRef<string[]>([])
   const linksByLineRef = useRef<Map<number, { startCol: number; endCol: number; resolvedPath: string }[]>>(new Map())
+  const [fileDiff, setFileDiff] = useState<GitFileDiff | null>(null)
+  const [acceptedDiffFingerprint, setAcceptedDiffFingerprint] = useState<string | null>(null)
 
   const relPath = useCallback(
     (fullPath: string) => {
@@ -149,6 +154,11 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
     },
     [workspace]
   )
+
+  const diffFingerprint = fileDiff?.hasChanges
+    ? `${fileDiff.path}:${fileDiff.additions}:${fileDiff.removals}:${fileDiff.hunks.map((h) => `${h.oldStart}/${h.oldCount}/${h.newStart}/${h.newCount}`).join('|')}:${file.content.length}`
+    : null
+  const visibleDiff = fileDiff?.hasChanges && diffFingerprint !== acceptedDiffFingerprint ? fileDiff : null
 
   const importLinks = useRef<{ line: number; startCol: number; endCol: number; resolvedPath: string }[]>([])
   importLinks.current = (() => {
@@ -171,10 +181,37 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
     linksByLineRef.current = byLine
   }, [file.path, file.content])
 
+  useEffect(() => {
+    if (!workspace || !window.api?.getGitFileDiff) {
+      setFileDiff(null)
+      return
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      window.api!.getGitFileDiff(workspace, file.path, file.content)
+        .then((diff) => {
+          if (!cancelled) setFileDiff(diff?.hasChanges ? diff : null)
+        })
+        .catch(() => {
+          if (!cancelled) setFileDiff(null)
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [workspace, file.path, file.content])
+
+  useEffect(() => {
+    if (diffFingerprint && diffFingerprint !== acceptedDiffFingerprint) return
+    if (!diffFingerprint && acceptedDiffFingerprint) setAcceptedDiffFingerprint(null)
+  }, [diffFingerprint, acceptedDiffFingerprint])
+
   const handleEditorMount = useCallback(
     (editor: editor.IStandaloneCodeEditor, monaco: typeof import('monaco-editor')) => {
       editorRef.current = editor
       monacoRef.current = monaco
+      diffDecorationsRef.current = editor.createDecorationsCollection([])
       if (typeof document !== 'undefined') document.body.classList.add('monaco-editor')
 
       monaco.editor.setTheme('app-dark')
@@ -318,6 +355,9 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
 
   useEffect(() => {
     return () => {
+      diffDecorationsRef.current?.clear()
+      diffDecorationsRef.current = null
+      diffZoneIdsRef.current = []
       linkProviderDisposable.current?.dispose()
       linkProviderDisposable.current = null
       tsProvidersDisposable.current?.dispose()
@@ -325,6 +365,76 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
       if (typeof document !== 'undefined') document.body.classList.remove('monaco-editor')
     }
   }, [])
+
+  useEffect(() => {
+    const ed = editorRef.current
+    const monaco = monacoRef.current
+    const model = ed?.getModel()
+    if (!ed || !monaco || !model) return
+
+    const removeZones = () => {
+      if (!diffZoneIdsRef.current.length) return
+      ed.changeViewZones((accessor) => {
+        for (const id of diffZoneIdsRef.current) accessor.removeZone(id)
+      })
+      diffZoneIdsRef.current = []
+    }
+
+    removeZones()
+    if (!visibleDiff) {
+      diffDecorationsRef.current?.clear()
+      return
+    }
+
+    const decorations: editor.IModelDeltaDecoration[] = []
+    ed.changeViewZones((accessor) => {
+      for (const hunk of visibleDiff.hunks) {
+        const removeLines = hunk.lines.filter((line) => line.kind === 'remove')
+        if (removeLines.length > 0) {
+          const afterLineNumber = Math.max(0, Math.min(model.getLineCount(), hunk.newStart > 0 ? hunk.newStart - 1 : 0))
+          const dom = document.createElement('div')
+          dom.className = 'inline-diff-deleted-zone'
+          dom.textContent = removeLines.map((line) => `- ${line.text}`).join('\n')
+          const id = accessor.addZone({
+            afterLineNumber,
+            heightInLines: Math.min(removeLines.length, 8),
+            domNode: dom,
+          })
+          diffZoneIdsRef.current.push(id)
+        }
+
+        for (const line of hunk.lines) {
+          if (line.kind === 'add' && line.newLine != null) {
+            decorations.push({
+              range: new monaco.Range(line.newLine, 1, line.newLine, model.getLineMaxColumn(line.newLine)),
+              options: {
+                isWholeLine: true,
+                className: 'inline-diff-line-add',
+                glyphMarginClassName: 'inline-diff-glyph-add',
+                overviewRuler: { color: '#2ea043', position: monaco.editor.OverviewRulerLane.Left },
+              },
+            })
+          } else if (line.kind === 'remove') {
+            const anchorLine = Math.max(1, Math.min(model.getLineCount(), hunk.newStart || 1))
+            decorations.push({
+              range: new monaco.Range(anchorLine, 1, anchorLine, model.getLineMaxColumn(anchorLine)),
+              options: {
+                isWholeLine: true,
+                glyphMarginClassName: 'inline-diff-glyph-remove',
+                overviewRuler: { color: '#f85149', position: monaco.editor.OverviewRulerLane.Left },
+              },
+            })
+          }
+        }
+      }
+    })
+    diffDecorationsRef.current?.set(decorations)
+
+    return () => {
+      removeZones()
+      diffDecorationsRef.current?.clear()
+    }
+  }, [visibleDiff])
 
   // Prevent peek widget (References) and hover inner content from collapsing (re-apply min dimensions).
   useEffect(() => {
@@ -419,6 +529,22 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
     e.preventDefault()
     setCtxMenu({ x: e.clientX, y: e.clientY })
   }, [])
+
+  const acceptCurrentDiff = useCallback(() => {
+    if (diffFingerprint) setAcceptedDiffFingerprint(diffFingerprint)
+  }, [diffFingerprint])
+
+  const discardCurrentDiff = useCallback(async () => {
+    if (!workspace || !window.api?.discardGitFileChanges) return
+    try {
+      const result = await window.api.discardGitFileChanges(workspace, file.path)
+      setAcceptedDiffFingerprint(null)
+      if (result.deleted) onContentChange?.('')
+      onAfterSave?.()
+    } catch (err) {
+      console.error('Discard changes failed:', err)
+    }
+  }, [workspace, file.path, onAfterSave, onContentChange])
 
   const getSelection = useCallback((): string => {
     const ed = editorRef.current
@@ -544,6 +670,36 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
             )}
           </span>
         ))}
+        {visibleDiff && (
+          <div className="ml-auto flex items-center gap-2 font-sans">
+            <span className="px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700 text-[10px]">
+              <span className="text-emerald-400">+{visibleDiff.additions}</span>
+              <span className="mx-1 text-zinc-600">/</span>
+              <span className="text-red-400">-{visibleDiff.removals}</span>
+            </span>
+            {visibleDiff.isNewFile && (
+              <span className="text-[10px] text-blue-300 bg-blue-500/10 border border-blue-500/20 rounded px-1.5 py-0.5">
+                {t('новый файл', 'new file')}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={acceptCurrentDiff}
+              className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/20 cursor-pointer"
+              title={t('Принять текущие изменения в этом редакторе', 'Accept current changes in this editor')}
+            >
+              {t('Принять', 'Accept')}
+            </button>
+            <button
+              type="button"
+              onClick={discardCurrentDiff}
+              className="px-2 py-0.5 rounded bg-red-500/10 border border-red-500/25 text-red-300 hover:bg-red-500/20 cursor-pointer"
+              title={t('Откатить файл к версии из HEAD', 'Revert file to HEAD')}
+            >
+              {t('Откатить', 'Revert')}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-hidden" onContextMenu={handleContextMenu}>

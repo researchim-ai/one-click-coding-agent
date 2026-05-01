@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('git-numstat', workspace),
   getGitFileAtHead: (workspace: string, relativePath: string): Promise<string | null> =>
     ipcRenderer.invoke('git-file-at-head', workspace, relativePath),
+  getGitFileDiff: (workspace: string, filePath: string, currentContent?: string): Promise<import('./git').GitFileDiff> =>
+    ipcRenderer.invoke('git-file-diff', workspace, filePath, currentContent),
+  discardGitFileChanges: (workspace: string, filePath: string): Promise<{ ok: true; deleted: boolean; path: string }> =>
+    ipcRenderer.invoke('git-discard-file', workspace, filePath),
   readFileContent: (filePath: string): Promise<{ content: string; size: number; lines: number }> =>
     ipcRenderer.invoke('read-file-content', filePath),
   writeFile: (filePath: string, content: string): Promise<void> =>
@@ -97,7 +101,7 @@ contextBridge.exposeInMainWorld('api', {
   respondHunkReview: (approvalId: string, decision: { decision: 'accept_all' | 'accept_selected' | 'reject'; selectedHunkIds?: number[] }) => {
     ipcRenderer.send('hunk-review-response', approvalId, decision)
   },
-  getTaskState: (workspace: string) => ipcRenderer.invoke('task-state:get', workspace),
+  getTaskState: (workspace: string, sessionId?: string) => ipcRenderer.invoke('task-state:get', workspace, sessionId),
 
   // Session management (workspace-scoped)
   createSession: (workspace: string): Promise<string> => ipcRenderer.invoke('create-session', workspace),
