@@ -35,6 +35,9 @@ linux:
   desktop:
     StartupWMClass: one-click-coding-agent
 
+deb:
+  afterInstall: build/deb-after-install.sh
+
 mac:
   target:
     - target: dmg
