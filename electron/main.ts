@@ -9,10 +9,23 @@ const SESSION_WRITE_YIELD_EVERY = 12 // yield to event loop every N messages (av
 
 nativeTheme.themeSource = 'dark'
 
+function isRunningAsLinuxAppImage(): boolean {
+  if (process.platform !== 'linux') return false
+  return !!process.env.APPIMAGE || !!process.env.APPDIR || /\.AppImage$/i.test(process.argv[0] ?? '')
+}
+
 // Force dark GTK theme for native menu bar on Linux
 if (process.platform === 'linux') {
   process.env.GTK_THEME = 'Adwaita:dark'
   app.commandLine.appendSwitch('force-dark-mode')
+  // AppImage is mounted via FUSE, so Chromium's bundled `chrome-sandbox`
+  // cannot be owned by root with mode 4755. Disable only the legacy setuid
+  // helper for AppImage builds; Chromium can still use the normal Linux
+  // namespace sandbox where the kernel allows it. Keep full `--no-sandbox`
+  // as an explicit user/admin fallback below, not as the default.
+  if (isRunningAsLinuxAppImage()) {
+    app.commandLine.appendSwitch('disable-setuid-sandbox')
+  }
 }
 // Force dark title bar on Windows
 if (process.platform === 'win32') {

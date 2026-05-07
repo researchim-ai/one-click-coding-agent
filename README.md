@@ -141,6 +141,12 @@ chmod +x "One-Click Coding Agent-<version>.AppImage"
 ./"One-Click Coding Agent-<version>.AppImage"
 ```
 
+AppImage автоматически отключает только Chromium setuid sandbox helper,
+который несовместим с FUSE-монтированием AppImage (`chrome-sandbox` не может
+быть `root:4755` внутри временного mount). Полный `--no-sandbox` не используется
+по умолчанию и остаётся только аварийным ручным fallback для систем с жёстко
+отключёнными user namespaces.
+
 > **Примечание:** для ARM64 (Raspberry Pi 5, Ampere и т.д.) бинарники также собираются автоматически.
 
 ### macOS — DMG + ZIP
