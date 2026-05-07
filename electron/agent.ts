@@ -5,11 +5,13 @@ import { RECALL_TOOL_DEF } from './archive'
 import * as projectMemory from './project-memory'
 import * as toolCache from './tool-cache'
 import { previewWriteFile, previewEditFile, applySelectedHunks } from './diff-hunks'
+import { captureAgentFileBaseline } from './git'
 import type { HunkReviewPayload, AgentMode } from './types'
 import { Agent as UndiciAgent } from 'undici'
 import {
   TaskState,
   type PlanStep,
+  type PlanOption,
   emptyTaskState,
   applyTaskStateUpdate,
   normalizeTaskState,
@@ -172,6 +174,9 @@ function maybeCheckpoint(
     return undefined
   }
   try {
+    if (['write_file', 'edit_file', 'append_file', 'delete_file'].includes(toolName) && typeof toolArgs?.path === 'string') {
+      captureAgentFileBaseline(workspace, toolArgs.path)
+    }
     const cp = createCheckpoint(workspace, describeToolForCheckpoint(toolName, toolArgs))
     if (!cp) return undefined
     return cp
@@ -452,7 +457,7 @@ When you changed files, installed dependencies, altered configuration, or affect
 
 ## Communication
 
-- Think step by step. Before calling tools or replying, briefly reason in **hidden scratchpad** wrapped in \`<think> ... </think>\`. This will be shown in a separate \"thinking\" panel, not as part of the final answer.
+- If you need scratchpad, keep it brief (max 8 lines) and wrap it in \`<think> ... </think>\`. Never continue private reasoning outside those tags.
 - Keep the visible answer clean: no \`<think>\` tags, only the final plan and results.
 - Be concise. Explain WHAT you're doing and WHY, not HOW (the tool calls show that)
 - Use markdown: \`code\`, **bold** for emphasis, lists for multiple items
@@ -491,7 +496,7 @@ const COMPACT_SYSTEM_PROMPT = `You are an expert autonomous coding agent with ac
 ## Rules
 - Match existing code style exactly
 - Keep changes minimal and focused
-- Think step by step in <think>...</think> tags
+- If useful, write a very brief private scratchpad in <think>...</think>; never continue private reasoning outside those tags
 - Be concise. Respond in the user's language
 - Use tools efficiently — fetch project context dynamically with get_project_context and prefer read_file over execute_command cat
 - write_file: max 80 lines per call. For larger files: write skeleton first, then edit_file to fill sections
@@ -576,22 +581,41 @@ function updatePlanToolDefForMode(mode: AgentMode): any {
   if (mode !== 'plan') return UPDATE_PLAN_TOOL_DEF
   const toolDef = JSON.parse(JSON.stringify(UPDATE_PLAN_TOOL_DEF))
   toolDef.function.description =
-    'Record a DRAFT plan for user review. In Plan mode this is not execution progress: every implementation step must be pending unless it is genuinely blocked by missing information. Do not mark steps in_progress or completed in Plan mode. After writing the draft plan, wait for the user to approve it or request changes.'
+    'Record DRAFT plan options for user review. In Plan mode this is not execution progress: every implementation step must be pending unless it is genuinely blocked by missing information. Prefer 2-3 planOptions when there are meaningful approaches (quick fix, balanced, robust). Do not mark steps in_progress/completed and do not set selectedPlanOptionId unless the user explicitly chose an option.'
   toolDef.function.parameters.properties.plan.description =
-    'Ordered draft implementation steps for later Agent mode. Replace the whole plan, do not append. In Plan mode, statuses must be pending or blocked only.'
+    'Ordered draft steps for the recommended/default option. Replace the whole plan, do not append. In Plan mode, statuses must be pending or blocked only.'
   toolDef.function.parameters.properties.plan.items.properties.status.description =
     'Draft status. In Plan mode use pending for normal steps and blocked only for unresolved questions; never use in_progress or completed.'
+  toolDef.function.parameters.properties.planOptions.description =
+    '2-3 alternative implementation strategies for user selection. Include a quick/small option, a balanced recommended option, and a robust/architectural option when those trade-offs exist.'
+  toolDef.function.parameters.properties.selectedPlanOptionId.description =
+    'Only set after the user explicitly chooses an option. Leave empty while drafting choices.'
   return toolDef
 }
 
 function taskStateUpdateForMode(args: Record<string, any>, mode: AgentMode): Record<string, any> {
-  if (mode !== 'plan' || !Array.isArray(args.plan)) return args
-  return {
-    ...args,
-    plan: args.plan.map((step: any): Partial<PlanStep> => ({
+  if (mode !== 'plan') return args
+  const next = { ...args }
+  if (Array.isArray(args.plan)) {
+    next.plan = args.plan.map((step: any): Partial<PlanStep> => ({
       ...step,
       status: step?.status === 'blocked' ? 'blocked' : 'pending',
-    })),
+    }))
+  }
+  if (Array.isArray(args.planOptions)) {
+    next.planOptions = args.planOptions.map((opt: any): Partial<PlanOption> => ({
+      ...opt,
+      steps: Array.isArray(opt?.steps)
+        ? opt.steps.map((step: any): Partial<PlanStep> => ({
+          ...step,
+          status: step?.status === 'blocked' ? 'blocked' : 'pending',
+        }))
+        : [],
+    }))
+  }
+  delete next.selectedPlanOptionId
+  return {
+    ...next,
   }
 }
 
@@ -635,20 +659,22 @@ function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
 Обязательный процесс:
 1. Исследуй проект read-only инструментами. Не отвечай "на глаз", если можно проверить файлы.
 2. Если задача неоднозначна или есть важные развилки, задай 1-3 уточняющих вопроса и остановись. Не создавай финальный план через догадки.
-3. Если информации достаточно, вызови update_plan с конкретной целью и 6-10 шагами для последующего Agent-режима. Все обычные шаги в Plan-режиме должны быть pending; используй blocked только для открытых вопросов. Никогда не ставь in_progress/completed в Plan-режиме.
-4. Сохрани полноценный Markdown-план через save_plan_artifact — это создаст/обновит PLAN.md и автоматически покажет его пользователю.
-5. Markdown PLAN.md должен быть именно проектом плана на согласование и включать:
+3. Если есть несколько разумных подходов, вызови update_plan с 2-3 "planOptions": быстрый/минимальный, сбалансированный рекомендованный, и надёжный/архитектурный. У каждого варианта должны быть summary, tradeoffs, risk, effort, likely files, tests и steps.
+4. Также заполни "plan" шагами выбранного тобой рекомендуемого варианта, чтобы старый UI и Agent имели дефолтный путь. Все обычные шаги в Plan-режиме должны быть pending; используй blocked только для открытых вопросов. Никогда не ставь in_progress/completed в Plan-режиме и не выставляй selectedPlanOptionId без выбора пользователя.
+5. Сохрани полноценный Markdown-план через save_plan_artifact — это создаст/обновит PLAN.md и автоматически покажет его пользователю.
+6. Markdown PLAN.md должен быть именно проектом плана на согласование и включать:
    - "Цель"
    - "Что известно из проекта"
    - "Открытые вопросы / предположения"
+   - "Варианты исполнения" с 2-3 стратегиями, плюсами/минусами, риском и трудоёмкостью
    - "Архитектура / поток" с Mermaid-диаграммой, если есть процесс/компоненты
    - "Пошаговый план реализации"
    - "Файлы и зоны изменений"
    - "Риски и неизвестные"
    - "План проверки / тесты"
    - "Критерии готовности"
-6. Диаграммы пиши в fenced-блоках mermaid. Если диаграмма неуместна, явно напиши почему.
-7. Заверши фразой: «План сохранён в PLAN.md и ожидает подтверждения. Обсудите правки или нажмите «Выполнить план», чтобы переключиться в режим Agent».
+7. Диаграммы пиши в fenced-блоках mermaid. Если диаграмма неуместна, явно напиши почему.
+8. Заверши фразой: «План сохранён в PLAN.md и ожидает подтверждения. Выберите вариант исполнения, обсудите правки или нажмите «Выполнить план», чтобы переключиться в режим Agent».
 
 НЕ начинай выполнять шаги плана, НЕ отмечай прогресс выполнения и НЕ переходи в Agent сам. Это сделает приложение только после явного подтверждения пользователя.`
     : `## Mode: Plan (read-only planning)
@@ -660,20 +686,22 @@ Writing/editing source files, running commands, and executing plan steps is FORB
 Required process:
 1. Explore the project with read-only tools. Do not answer from vibes when files can be inspected.
 2. If the task is ambiguous or has important forks, ask 1-3 clarifying questions and stop. Do not create a final plan by guessing.
-3. If you have enough information, call update_plan with a concrete goal and 6-10 steps suitable for later Agent mode. In Plan mode all normal steps must be pending; use blocked only for open questions. Never set in_progress or completed in Plan mode.
-4. Save the full Markdown plan via save_plan_artifact — this creates/updates PLAN.md and automatically shows it to the user.
-5. PLAN.md must be a draft for approval and include:
+3. If there are multiple reasonable approaches, call update_plan with 2-3 "planOptions": a quick/minimal option, a balanced recommended option, and a robust/architectural option. Each option needs summary, tradeoffs, risk, effort, likely files, tests, and steps.
+4. Also fill "plan" with the steps of your recommended/default option so legacy UI and Agent have a default path. In Plan mode all normal steps must be pending; use blocked only for open questions. Never set in_progress/completed and never set selectedPlanOptionId without the user choosing an option.
+5. Save the full Markdown plan via save_plan_artifact — this creates/updates PLAN.md and automatically shows it to the user.
+6. PLAN.md must be a draft for approval and include:
    - "Goal"
    - "What is known from the project"
    - "Open questions / assumptions"
+   - "Execution options" with 2-3 strategies, pros/cons, risk, and effort
    - "Architecture / flow" with a Mermaid diagram when components or process exist
    - "Implementation steps"
    - "Files and change areas"
    - "Risks and unknowns"
    - "Verification / tests"
    - "Done criteria"
-6. Write diagrams in fenced mermaid blocks. If a diagram is not appropriate, say why.
-7. End with: "Plan saved to PLAN.md and awaiting approval. Discuss revisions or press 'Apply plan' to switch to Agent mode."
+7. Write diagrams in fenced mermaid blocks. If a diagram is not appropriate, say why.
+8. End with: "Plan saved to PLAN.md and awaiting approval. Choose an execution option, discuss revisions, or press 'Apply plan' to switch to Agent mode."
 
 Do NOT start executing plan steps, do NOT mark execution progress, and do NOT switch to Agent yourself. The app will do that only after explicit user approval.`
 }
@@ -1148,6 +1176,24 @@ export function setSessionMode(ws: string, id: string, mode: AgentMode): AgentMo
   return mode
 }
 
+export function selectPlanOption(ws: string, id: string, optionId: string): TaskState | null {
+  loadSessionsForWorkspace(ws)
+  const map = getSessionsMap(ws)
+  const session = map.get(id)
+  if (!session) return null
+  const prev = normalizeTaskState(session.taskState) ?? emptyTaskState()
+  const selected = prev.planOptions?.find((opt) => opt.id === optionId)
+  if (!selected) return prev
+  const { next } = applyTaskStateUpdate(prev, {
+    selectedPlanOptionId: selected.id,
+    plan: selected.steps,
+  })
+  session.taskState = next
+  session.updatedAt = Date.now()
+  saveSession(session)
+  return next
+}
+
 function renderPlanArtifact(session: Session): string {
   const ts = normalizeTaskState(session.taskState) ?? emptyTaskState()
   const goal = ts.goal?.trim() || session.title || 'Implementation plan'
@@ -1170,6 +1216,27 @@ function renderPlanArtifact(session: Session): string {
     }))
   } else {
     lines.push('- No structured plan steps recorded yet.')
+  }
+  if (ts.planOptions?.length) {
+    lines.push('', '## Execution Options', '')
+    for (const opt of ts.planOptions) {
+      const badges = [
+        opt.id === ts.selectedPlanOptionId ? 'selected' : '',
+        opt.recommended ? 'recommended' : '',
+        opt.risk ? `risk: ${opt.risk}` : '',
+        opt.effort ? `effort: ${opt.effort}` : '',
+      ].filter(Boolean).join(', ')
+      lines.push(`### ${opt.title}${badges ? ` (${badges})` : ''}`)
+      lines.push('', opt.summary)
+      if (opt.tradeoffs) lines.push('', `Trade-offs: ${opt.tradeoffs}`)
+      if (opt.files?.length) lines.push('', 'Likely files / areas:', ...opt.files.map((f) => `- ${f}`))
+      if (opt.tests?.length) lines.push('', 'Verification:', ...opt.tests.map((t) => `- ${t}`))
+      if (opt.steps.length) {
+        lines.push('', 'Steps:')
+        lines.push(...opt.steps.map((step, idx) => `${idx + 1}. ${step.title}${step.note ? ` — ${step.note}` : ''}`))
+      }
+      lines.push('')
+    }
   }
   lines.push(
     '',
@@ -1398,6 +1465,28 @@ export function listPinnedMessages(ws: string): string[] {
   return [...(session.pinnedMessageIds ?? [])]
 }
 
+const FINAL_ANSWER_MARKER_RE = /(?:^|\n)\s*(?:final answer|final|answer|ответ|итог|результат|кратко)\s*[:：]\s*/i
+const REASONING_LEAK_START_RE = /^\s*(?:the user (?:wants|asked|asks|is asking|said|provided)|user wants|i need to|i should|let me|we need to|actually,|wait,|first, i need|the task is|пользователь (?:хочет|просит|сказал|уточнил)|мне нужно сначала|я должен|сначала я|давайте я подумаю)/i
+
+function splitReasoningLeak(text: string): { thinking: string; visible: string; leaked: boolean; open: boolean } {
+  const trimmed = text.trim()
+  if (!trimmed || !REASONING_LEAK_START_RE.test(trimmed)) {
+    return { thinking: '', visible: text.trim(), leaked: false, open: false }
+  }
+
+  const marker = FINAL_ANSWER_MARKER_RE.exec(trimmed)
+  if (marker && marker.index > 0) {
+    return {
+      thinking: trimmed.slice(0, marker.index).trim(),
+      visible: trimmed.slice(marker.index + marker[0].length).trim(),
+      leaked: true,
+      open: false,
+    }
+  }
+
+  return { thinking: trimmed, visible: '', leaked: true, open: true }
+}
+
 function extractThinking(content: string): [string, string] {
   let thinking = ''
   let visible = content
@@ -1406,7 +1495,15 @@ function extractThinking(content: string): [string, string] {
   while ((match = re.exec(content)) !== null) {
     thinking += (thinking ? '\n' : '') + match[1].trim()
   }
-  visible = content.replace(re, '').trim()
+  visible = content.replace(re, '')
+  if (hasOpenThinkingBlock(visible)) {
+    const openIdx = visible.lastIndexOf('<think>')
+    thinking += (thinking ? '\n' : '') + visible.slice(openIdx + 7).trim()
+    visible = visible.slice(0, openIdx)
+  }
+  const leak = splitReasoningLeak(visible)
+  if (leak.leaked) thinking += (thinking ? '\n' : '') + leak.thinking
+  visible = leak.visible
   return [thinking, visible]
 }
 
@@ -1501,7 +1598,14 @@ function extractPartialFileContent(partialArgs: string, toolName: string): { pat
 
 function parseAccumulatedThinking(content: string): { thinking: string; visible: string; thinkingDone: boolean } {
   const openIdx = content.indexOf('<think>')
-  if (openIdx === -1) return { thinking: '', visible: content.trim(), thinkingDone: true }
+  if (openIdx === -1) {
+    const leak = splitReasoningLeak(content)
+    return {
+      thinking: leak.thinking,
+      visible: leak.visible,
+      thinkingDone: !leak.open,
+    }
+  }
 
   const closeIdx = content.indexOf('</think>')
   if (closeIdx === -1) {
@@ -1512,9 +1616,11 @@ function parseAccumulatedThinking(content: string): { thinking: string; visible:
     }
   }
 
-  const thinking = content.slice(openIdx + 7, closeIdx).trim()
-  const visible = (content.slice(0, openIdx) + content.slice(closeIdx + 8)).trim()
-  return { thinking, visible, thinkingDone: true }
+  let thinking = content.slice(openIdx + 7, closeIdx).trim()
+  const visibleCandidate = (content.slice(0, openIdx) + content.slice(closeIdx + 8)).trim()
+  const leak = splitReasoningLeak(visibleCandidate)
+  if (leak.leaked) thinking += (thinking ? '\n' : '') + leak.thinking
+  return { thinking, visible: leak.visible, thinkingDone: !leak.open }
 }
 
 interface StreamResult {
@@ -2220,11 +2326,7 @@ function tryRepairTruncatedToolCall(tc: any): { name: string; args: Record<strin
 // ---------------------------------------------------------------------------
 
 function stripThinking(content: string): string {
-  const closed = content.replace(/<think>[\s\S]*?<\/think>/g, '')
-  if (hasOpenThinkingBlock(closed)) {
-    return closed.slice(0, closed.lastIndexOf('<think>')).trim()
-  }
-  return closed.trim()
+  return extractThinking(content)[1].trim()
 }
 
 function compressToolResultText(content: string, maxChars: number): string {
@@ -3435,8 +3537,8 @@ Before the next tool call, state the new strategy in one sentence.`
           const lastMsg = messages[messages.length - 1]
           const afterTool = lastMsg?.role === 'tool'
           const nudge = afterTool
-            ? 'The tool above returned a result. Please analyze it and continue with the task. Respond in the user\'s language.'
-            : 'Please respond to the user\'s request. Think step by step and use tools as needed.'
+            ? 'The tool above returned a result. Continue with the next tool call or give a concise visible answer in the user\'s language. Do not continue hidden reasoning.'
+            : 'Your previous output contained only private reasoning. Now either call the next needed tool or give the concise visible answer in the user\'s language. Do not continue hidden reasoning.'
           messages.push({ role: 'user', content: `[System: empty response detected, retry ${emptyRetries}/${getMaxEmptyRetries()}] ${nudge}` })
           debugLog('EMPTY', `Added nudge message (afterTool=${afterTool})`)
           doEmit( { type: 'status', content: `⚠️ Пустой ответ от модели — повторяю с подсказкой (${emptyRetries}/${getMaxEmptyRetries()})…` })

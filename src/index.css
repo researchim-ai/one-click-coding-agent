@@ -178,30 +178,38 @@ body [class*="peekview"] .preview.inline .overflow-guard {
    additions are green in-place, removals are rendered as red view-zones
    between real file lines so the user can accept or revert from the editor. */
 .monaco-editor .inline-diff-line-add {
-  background: rgba(46, 160, 67, 0.16) !important;
-  border-left: 2px solid rgba(46, 160, 67, 0.9);
+  background: linear-gradient(90deg, rgba(46, 160, 67, 0.24), rgba(46, 160, 67, 0.09)) !important;
+  border-left: 2px solid rgba(46, 160, 67, 0.95);
 }
 .monaco-editor .inline-diff-glyph-add::before {
   content: '+';
   color: #3fb950;
   font-weight: 700;
+  display: block;
+  text-align: center;
 }
 .monaco-editor .inline-diff-glyph-remove::before {
   content: '-';
   color: #f85149;
   font-weight: 700;
+  display: block;
+  text-align: center;
 }
 .inline-diff-deleted-zone {
   white-space: pre;
   overflow: hidden;
   box-sizing: border-box;
-  padding-left: 64px;
+  padding: 1px 0 1px 62px;
   border-left: 2px solid rgba(248, 81, 73, 0.9);
-  background: rgba(248, 81, 73, 0.14);
+  background: linear-gradient(90deg, rgba(248, 81, 73, 0.22), rgba(248, 81, 73, 0.08));
   color: #ffb4ad;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 19px;
+  box-shadow: inset 0 1px 0 rgba(248, 81, 73, 0.12), inset 0 -1px 0 rgba(248, 81, 73, 0.12);
+}
+.inline-diff-deleted-zone::selection {
+  background: rgba(248, 81, 73, 0.35);
 }
 
 /* Off-screen messages skip rendering entirely (massive perf win) */

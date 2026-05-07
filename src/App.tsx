@@ -27,7 +27,7 @@ export function App() {
     hunkReview, respondHunkReview,
     taskState,
     planArtifactPath, clearPlanArtifactPath,
-    mode, setMode,
+    mode, setMode, selectPlanOption,
   } = useAgent()
 
   const {
@@ -524,6 +524,7 @@ export function App() {
                   liveTaskState={taskState}
                   mode={mode}
                   onModeChange={setMode}
+                  onSelectPlanOption={selectPlanOption}
                   onSavePlan={async () => {
                     if (!workspace) return
                     try {
@@ -532,10 +533,18 @@ export function App() {
                     } catch {}
                   }}
                   onApplyPlan={async () => {
+                    const ts: any = taskState
+                    const options = Array.isArray(ts?.planOptions) ? ts.planOptions : []
+                    const selected = options.find((opt: any) => opt.id === ts?.selectedPlanOptionId)
+                      ?? options.find((opt: any) => opt.recommended)
+                      ?? options[0]
+                    if (selected?.id && selected.id !== ts?.selectedPlanOptionId) {
+                      await selectPlanOption(selected.id)
+                    }
                     await setMode('agent')
                     const msg = appLanguage === 'ru'
-                      ? 'Выполни составленный план из Plan-режима. Действуй строго по шагам, учитывай риски/тесты из плана и отмечай прогресс через update_plan.'
-                      : 'Execute the plan drafted in Plan mode. Follow the steps closely, respect the risks/tests from the plan, and track progress via update_plan.'
+                      ? `Выполни утверждённый вариант плана из Plan-режима${selected ? `: "${selected.title}" (${selected.id}). ${selected.summary}` : ''}. Действуй строго по выбранным шагам, учитывай риски/тесты из плана и отмечай прогресс через update_plan.`
+                      : `Execute the approved Plan-mode option${selected ? `: "${selected.title}" (${selected.id}). ${selected.summary}` : ''}. Follow the selected steps closely, respect the risks/tests from the plan, and track progress via update_plan.`
                     sendMessage(msg)
                   }}
                 />

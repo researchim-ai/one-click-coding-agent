@@ -71,6 +71,7 @@ interface Props {
   /** "Apply plan" button handler in TaskStatePanel. Typically switches
    *  the session to agent mode and sends an execution prompt. */
   onApplyPlan?: () => void
+  onSelectPlanOption?: (optionId: string) => void | Promise<void>
   /** Persist current plan as PLAN.md. */
   onSavePlan?: () => void
   /** Open a workspace file from agent activity cards. */
@@ -103,6 +104,7 @@ export function Chat({
   mode = 'agent',
   onModeChange,
   onApplyPlan,
+  onSelectPlanOption,
   onSavePlan,
   onOpenFile,
 }: Props) {
@@ -442,6 +444,7 @@ export function Chat({
         liveState={liveTaskState}
         mode={mode}
         onApplyPlan={onApplyPlan}
+        onSelectPlanOption={onSelectPlanOption}
         onSavePlan={onSavePlan}
         busy={busy}
       />

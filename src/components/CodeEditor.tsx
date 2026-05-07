@@ -156,7 +156,7 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
   )
 
   const diffFingerprint = fileDiff?.hasChanges
-    ? `${fileDiff.path}:${fileDiff.additions}:${fileDiff.removals}:${fileDiff.hunks.map((h) => `${h.oldStart}/${h.oldCount}/${h.newStart}/${h.newCount}`).join('|')}:${file.content.length}`
+    ? `${fileDiff.baseline}:${fileDiff.path}:${fileDiff.additions}:${fileDiff.removals}:${fileDiff.hunks.map((h) => `${h.oldStart}/${h.oldCount}/${h.newStart}/${h.newCount}`).join('|')}:${file.content.length}`
     : null
   const visibleDiff = fileDiff?.hasChanges && diffFingerprint !== acceptedDiffFingerprint ? fileDiff : null
 
@@ -394,10 +394,10 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
           const afterLineNumber = Math.max(0, Math.min(model.getLineCount(), hunk.newStart > 0 ? hunk.newStart - 1 : 0))
           const dom = document.createElement('div')
           dom.className = 'inline-diff-deleted-zone'
-          dom.textContent = removeLines.map((line) => `- ${line.text}`).join('\n')
+          dom.textContent = removeLines.map((line) => `${String(line.oldLine ?? '').padStart(4, ' ')}  - ${line.text}`).join('\n')
           const id = accessor.addZone({
             afterLineNumber,
-            heightInLines: Math.min(removeLines.length, 8),
+            heightInLines: Math.min(removeLines.length, 12),
             domNode: dom,
           })
           diffZoneIdsRef.current.push(id)
@@ -530,9 +530,22 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
     setCtxMenu({ x: e.clientX, y: e.clientY })
   }, [])
 
-  const acceptCurrentDiff = useCallback(() => {
-    if (diffFingerprint) setAcceptedDiffFingerprint(diffFingerprint)
-  }, [diffFingerprint])
+  const acceptCurrentDiff = useCallback(async () => {
+    if (!diffFingerprint) return
+    try {
+      if (workspace && window.api?.acceptGitFileChanges) {
+        await window.api.acceptGitFileChanges(workspace, file.path)
+        setAcceptedDiffFingerprint(null)
+        setFileDiff(null)
+        onAfterSave?.()
+      } else {
+        setAcceptedDiffFingerprint(diffFingerprint)
+      }
+    } catch (err) {
+      console.error('Accept changes failed:', err)
+      setAcceptedDiffFingerprint(diffFingerprint)
+    }
+  }, [diffFingerprint, file.path, onAfterSave, workspace])
 
   const discardCurrentDiff = useCallback(async () => {
     if (!workspace || !window.api?.discardGitFileChanges) return
@@ -682,6 +695,11 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
                 {t('новый файл', 'new file')}
               </span>
             )}
+            <span className="text-[10px] text-zinc-500">
+              {visibleDiff.baseline === 'shadow'
+                ? t('изменения агента', 'agent changes')
+                : t('git diff', 'git diff')}
+            </span>
             <button
               type="button"
               onClick={acceptCurrentDiff}
@@ -728,6 +746,8 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
             contextmenu: false,
             fontSize: 13,
             lineNumbers: 'on',
+            glyphMargin: true,
+            lineDecorationsWidth: 14,
             scrollBeyondLastLine: false,
             wordWrap: 'off',
             renderLineHighlight: 'line',

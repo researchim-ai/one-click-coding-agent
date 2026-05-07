@@ -590,4 +590,30 @@ describe('runAgent integration', () => {
       expect(hasEphemeral).toBe(false)
     })
   })
+
+  describe('thinking cleanup', () => {
+    it('does not surface chain-of-thought leaked as normal content', async () => {
+      live = await makeHarness()
+      live.enqueueAssistantText('The user wants me to inspect the project. Let me think about the implementation step by step.\nActually, I should first decide what files to read.')
+      live.enqueueAssistantText('Готово: перехожу к делу без размышлений.')
+
+      const result = await runAgent('проверь утечку размышлений', live.workspace, live.bridge)
+
+      expect(result).toContain('Готово')
+      expect(result).not.toContain('The user wants me')
+      expect(live.events.some((e) => e.type === 'thinking' && String(e.content ?? '').includes('The user wants me'))).toBe(true)
+      const done = live.events.filter((e) => e.type === 'response' && e.done).at(-1)
+      expect(done?.content).not.toContain('The user wants me')
+    })
+
+    it('keeps only the final answer when leaked reasoning has an explicit marker', async () => {
+      live = await makeHarness()
+      live.enqueueAssistantText('<think>hidden</think>The user wants me to solve this carefully.\nLet me outline private steps.\n\nFinal answer:\nСделано.')
+
+      const result = await runAgent('проверь final marker', live.workspace, live.bridge)
+
+      expect(result.trim()).toBe('Сделано.')
+      expect(live.session.messages.at(-1)?.content).toBe('Сделано.')
+    })
+  })
 })

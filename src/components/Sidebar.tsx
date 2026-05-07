@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef, useMemo, memo, type KeyboardE
 import type { FileTreeEntry } from '../../electron/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
+type AgentFileChange = import('../../electron/git').AgentFileChange
+
 /** Returns parent directory paths (ancestors) of the given path, for expanding tree. */
 function getParentPaths(filePath: string): string[] {
   const sep = filePath.includes('\\') ? '\\' : '/'
@@ -93,15 +95,56 @@ function InlineInput({
   )
 }
 
-function gitStatusLabel(xy: string): { label: string; className: string } {
+function gitStatusLabel(xy: string, lang: 'ru' | 'en' = 'ru'): { label: string; className: string; title: string; textClassName: string } {
+  const t = (ru: string, en: string) => (lang === 'ru' ? ru : en)
   const x = xy[0] ?? ''
   const y = xy[1] ?? ''
-  if (x === '?' || y === '?') return { label: 'U', className: 'text-amber-400' }
-  if (x === 'A' || y === 'A') return { label: 'A', className: 'text-emerald-400' }
-  if (x === 'D' || y === 'D') return { label: 'D', className: 'text-red-400' }
-  if (x === 'M' || y === 'M' || x === 'm' || y === 'm') return { label: 'M', className: 'text-orange-400' }
-  if (x === 'U' || y === 'U') return { label: 'U', className: 'text-purple-400' }
-  return { label: xy.slice(0, 1) || ' ', className: 'text-zinc-500' }
+  if (x === '?' || y === '?') {
+    return { label: 'N', className: 'text-emerald-400', title: t('Новый файл, ещё не отслеживается git', 'New untracked file'), textClassName: 'text-emerald-300' }
+  }
+  if (x === 'A' || y === 'A') {
+    return { label: 'A', className: 'text-emerald-400', title: t('Добавлен в git index', 'Added to git index'), textClassName: 'text-emerald-300' }
+  }
+  if (x === 'D' || y === 'D') {
+    return { label: 'D', className: 'text-red-400', title: t('Удалён', 'Deleted'), textClassName: 'text-red-300' }
+  }
+  if (x === 'M' || y === 'M' || x === 'm' || y === 'm') {
+    return { label: 'M', className: 'text-amber-400', title: t('Изменён', 'Modified'), textClassName: 'text-amber-200' }
+  }
+  if (x === 'U' || y === 'U') {
+    return { label: 'U', className: 'text-purple-400', title: t('Git conflict / unmerged', 'Git conflict / unmerged'), textClassName: 'text-purple-300' }
+  }
+  return { label: xy.slice(0, 1) || ' ', className: 'text-zinc-500', title: t(`Git status: ${xy}`, `Git status: ${xy}`), textClassName: 'text-zinc-300' }
+}
+
+function agentChangeLabel(change: AgentFileChange): { label: string; className: string; title: string } {
+  const stats = `+${change.added} / -${change.deleted}`
+  switch (change.status) {
+    case 'added':
+    case 'untracked':
+      return { label: 'N', className: 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/25', title: `Agent created file (${stats})` }
+    case 'deleted':
+      return { label: 'D', className: 'text-red-300 bg-red-500/10 ring-red-500/25', title: `Agent deleted file (${stats})` }
+    case 'renamed':
+      return { label: 'R', className: 'text-blue-300 bg-blue-500/10 ring-blue-500/25', title: `Agent renamed file (${stats})` }
+    default:
+      return { label: 'M', className: 'text-amber-300 bg-amber-500/10 ring-amber-500/25', title: `Agent modified file (${stats})` }
+  }
+}
+
+function agentChangeText(change: AgentFileChange, lang: 'ru' | 'en'): string {
+  const t = (ru: string, en: string) => (lang === 'ru' ? ru : en)
+  switch (change.status) {
+    case 'added':
+    case 'untracked':
+      return t('создан агентом', 'created by agent')
+    case 'deleted':
+      return t('удалён агентом', 'deleted by agent')
+    case 'renamed':
+      return t('переименован агентом', 'renamed by agent')
+    default:
+      return t('изменён агентом', 'modified by agent')
+  }
 }
 
 function TreeNode({
@@ -109,6 +152,9 @@ function TreeNode({
   renamingPath, ctxCreateAt, onRenameSubmit, onRenameCancel,
   onCtxCreateSubmit, onCtxCreateCancel,
   gitStatusByPath,
+  gitChangedDirPaths,
+  agentChangeByPath,
+  agentChangedDirPaths,
   expandedPaths,
   setExpandedPaths,
   activeFilePath,
@@ -126,6 +172,9 @@ function TreeNode({
   onCtxCreateSubmit: (name: string) => void
   onCtxCreateCancel: () => void
   gitStatusByPath?: Map<string, string>
+  gitChangedDirPaths?: Set<string>
+  agentChangeByPath?: Map<string, AgentFileChange>
+  agentChangedDirPaths?: Set<string>
   expandedPaths: Set<string>
   setExpandedPaths: (fn: (prev: Set<string>) => Set<string>) => void
   activeFilePath?: string | null
@@ -186,7 +235,16 @@ function TreeNode({
   }
 
   const fileGitStatus = gitStatusByPath?.get(entry.path)
-  const statusBadge = fileGitStatus ? gitStatusLabel(fileGitStatus) : null
+  const statusBadge = fileGitStatus ? gitStatusLabel(fileGitStatus, L) : null
+  const agentChange = agentChangeByPath?.get(entry.path)
+  const agentBadge = agentChange ? agentChangeLabel(agentChange) : null
+  const dirHasAgentChanges = entry.isDir && !!agentChangedDirPaths?.has(entry.path)
+  const dirHasGitChanges = entry.isDir && !!gitChangedDirPaths?.has(entry.path)
+  const fileTextClass = agentBadge
+    ? 'text-zinc-100 font-semibold'
+    : statusBadge
+      ? `${statusBadge.textClassName} font-medium`
+      : 'text-zinc-300'
 
   if (!entry.isDir) {
     return (
@@ -197,9 +255,25 @@ function TreeNode({
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         <FileIcon name={entry.name} isDir={false} />
-        <span className="truncate text-zinc-300 flex-1 min-w-0">{entry.name}</span>
+        <span className={`truncate flex-1 min-w-0 ${fileTextClass}`}>{entry.name}</span>
+        {agentBadge && agentChange && (
+          <>
+            <span
+              className={`shrink-0 min-w-4 px-1 rounded text-[9.5px] leading-4 text-center font-bold ring-1 ${agentBadge.className}`}
+              title={agentBadge.title}
+            >
+              {agentBadge.label}
+            </span>
+            {(agentChange.added > 0 || agentChange.deleted > 0) && (
+              <span className="hidden group-hover:inline-flex shrink-0 items-center gap-1 text-[9.5px] tabular-nums">
+                {agentChange.added > 0 && <span className="text-emerald-400">+{agentChange.added}</span>}
+                {agentChange.deleted > 0 && <span className="text-red-400">-{agentChange.deleted}</span>}
+              </span>
+            )}
+          </>
+        )}
         {statusBadge && (
-          <span className={`shrink-0 text-[10px] font-semibold ${statusBadge.className}`} title={fileGitStatus}>
+          <span className={`shrink-0 text-[10px] font-semibold ${agentBadge ? 'opacity-45' : ''} ${statusBadge.className}`} title={`${statusBadge.title} (${fileGitStatus})`}>
             {statusBadge.label}
           </span>
         )}
@@ -220,7 +294,19 @@ function TreeNode({
         >
           <span className="text-zinc-500 text-[10px] w-3 text-center">{isExpanded ? '▼' : '▶'}</span>
           <FileIcon name={entry.name} isDir={true} />
-          <span className="truncate text-zinc-200 font-medium">{entry.name}</span>
+          <span className={`truncate font-medium ${dirHasAgentChanges ? 'text-zinc-100' : dirHasGitChanges ? 'text-amber-200' : 'text-zinc-200'}`}>{entry.name}</span>
+          {dirHasAgentChanges && (
+            <span
+              className="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-400/90 shadow-[0_0_8px_rgba(251,191,36,0.45)]"
+              title={t('Внутри есть изменения агента', 'Contains agent changes')}
+            />
+          )}
+          {!dirHasAgentChanges && dirHasGitChanges && (
+            <span
+              className="ml-0.5 h-1.5 w-1.5 rounded-full bg-blue-400/90 shadow-[0_0_8px_rgba(96,165,250,0.45)]"
+              title={t('Внутри есть git-изменения', 'Contains git changes')}
+            />
+          )}
         </button>
         <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
           <button
@@ -268,6 +354,9 @@ function TreeNode({
               onCtxCreateSubmit={onCtxCreateSubmit}
               onCtxCreateCancel={onCtxCreateCancel}
               gitStatusByPath={gitStatusByPath}
+              gitChangedDirPaths={gitChangedDirPaths}
+              agentChangeByPath={agentChangeByPath}
+              agentChangedDirPaths={agentChangedDirPaths}
               expandedPaths={expandedPaths}
               setExpandedPaths={setExpandedPaths}
               activeFilePath={activeFilePath}
@@ -292,6 +381,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
   const [ctxCreateAt, setCtxCreateAt] = useState<{ dirPath: string; type: 'file' | 'dir' } | null>(null)
   const [gitStatus, setGitStatus] = useState<import('../../electron/git').GitStatus | null>(null)
   const [gitNumstat, setGitNumstat] = useState<import('../../electron/git').GitNumstatEntry[]>([])
+  const [agentChanges, setAgentChanges] = useState<AgentFileChange[]>([])
   const [sourceControlOpen, setSourceControlOpen] = useState(true)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set())
 
@@ -378,6 +468,39 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     }
   }, [workspace, loadGitStatus])
 
+  const loadAgentChanges = useCallback(async () => {
+    if (!workspace || !window.api?.getGitAgentChanges) {
+      setAgentChanges([])
+      return
+    }
+    try {
+      const changes = await window.api.getGitAgentChanges(workspace)
+      setAgentChanges(Array.isArray(changes) ? changes : [])
+    } catch {
+      setAgentChanges([])
+    }
+  }, [workspace])
+
+  useEffect(() => {
+    loadAgentChanges()
+  }, [loadAgentChanges])
+
+  const agentChangesTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!window.api?.onWorkspaceFilesChanged || !workspace) return
+    const unsub = window.api.onWorkspaceFilesChanged(() => {
+      if (agentChangesTimerRef.current) clearTimeout(agentChangesTimerRef.current)
+      agentChangesTimerRef.current = setTimeout(() => {
+        agentChangesTimerRef.current = null
+        loadAgentChanges()
+      }, 600)
+    })
+    return () => {
+      unsub()
+      if (agentChangesTimerRef.current) clearTimeout(agentChangesTimerRef.current)
+    }
+  }, [workspace, loadAgentChanges])
+
   const gitStatusByPath = useMemo(() => {
     if (!workspace || !gitStatus?.isRepo || !gitStatus.files.length) return undefined
     const sep = workspace.includes('\\') ? '\\' : '/'
@@ -389,6 +512,19 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     return map
   }, [workspace, gitStatus])
 
+  const gitChangedDirPaths = useMemo(() => {
+    if (!workspace || !gitStatus?.isRepo || !gitStatus.files.length) return undefined
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    const dirs = new Set<string>()
+    for (const change of gitStatus.files) {
+      const parts = change.path.split('/').filter(Boolean)
+      for (let i = 0; i < parts.length - 1; i++) {
+        dirs.add((workspace + sep + parts.slice(0, i + 1).join(sep)).replace(/[/\\]+/g, sep))
+      }
+    }
+    return dirs
+  }, [workspace, gitStatus])
+
   const numstatByPath = useMemo(() => {
     const map = new Map<string, { added: number; deleted: number }>()
     for (const n of gitNumstat) {
@@ -396,6 +532,30 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     }
     return map
   }, [gitNumstat])
+
+  const agentChangeByPath = useMemo(() => {
+    if (!workspace || agentChanges.length === 0) return undefined
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    const map = new Map<string, AgentFileChange>()
+    for (const change of agentChanges) {
+      const full = (workspace + sep + change.path).replace(/[/\\]+/g, sep)
+      map.set(full, change)
+    }
+    return map
+  }, [workspace, agentChanges])
+
+  const agentChangedDirPaths = useMemo(() => {
+    if (!workspace || agentChanges.length === 0) return undefined
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    const dirs = new Set<string>()
+    for (const change of agentChanges) {
+      const parts = change.path.split('/').filter(Boolean)
+      for (let i = 0; i < parts.length - 1; i++) {
+        dirs.add((workspace + sep + parts.slice(0, i + 1).join(sep)).replace(/[/\\]+/g, sep))
+      }
+    }
+    return dirs
+  }, [workspace, agentChanges])
 
   const handlePickDir = async () => {
     const dir = await window.api.pickDirectory()
@@ -475,6 +635,11 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
     }
     return fullPath
   }
+
+  const fullPathFromRel = useCallback((rel: string) => {
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    return (workspace + sep + rel).replace(/[/\\]+/g, sep)
+  }, [workspace])
 
   const buildMenuItems = (entry: FileTreeEntry): MenuItem[] => {
     const items: MenuItem[] = []
@@ -624,6 +789,9 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
             onCtxCreateSubmit={handleCtxCreateSubmit}
             onCtxCreateCancel={() => setCtxCreateAt(null)}
             gitStatusByPath={gitStatusByPath}
+            gitChangedDirPaths={gitChangedDirPaths}
+            agentChangeByPath={agentChangeByPath}
+            agentChangedDirPaths={agentChangedDirPaths}
             expandedPaths={expandedPaths}
             setExpandedPaths={setExpandedPaths}
             activeFilePath={activeFilePath}
@@ -641,15 +809,67 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
           >
             <span className="text-zinc-500">{sourceControlOpen ? '▼' : '▶'}</span>
             <span className="font-medium">Source Control</span>
-            {gitStatus?.isRepo && gitStatus.files.length > 0 && (
-              <span className="ml-auto text-zinc-500 tabular-nums">{gitStatus.files.length}</span>
+            {(agentChanges.length > 0 || (gitStatus?.isRepo && gitStatus.files.length > 0)) && (
+              <span className="ml-auto text-zinc-500 tabular-nums">
+                {agentChanges.length > 0 ? agentChanges.length : gitStatus?.files.length}
+              </span>
             )}
           </button>
           {sourceControlOpen && (
             <div className="px-2 pb-2 max-h-40 overflow-y-auto">
+              {agentChanges.length > 0 && (
+                <div className="mb-1">
+                  <div className="px-1 py-0.5 text-[10px] uppercase tracking-wide text-amber-300/80 flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    {t('Изменения агента', 'Agent Changes')}
+                  </div>
+                  <div className="space-y-0.5">
+                    {agentChanges.slice(0, 50).map((change) => {
+                      const badge = agentChangeLabel(change)
+                      const fullPath = fullPathFromRel(change.path)
+                      return (
+                        <div
+                          key={change.path}
+                          className="flex items-center gap-1 py-0.5 px-1 rounded text-[10px] hover:bg-zinc-800/50 group"
+                          title={`${agentChangeText(change, L)}: ${change.path}`}
+                        >
+                          <div
+                            className="flex items-center gap-1 min-w-0 flex-1 cursor-pointer truncate"
+                            onClick={() => change.status !== 'deleted' && onFileClick(fullPath)}
+                          >
+                            <span className={`shrink-0 min-w-4 px-1 rounded text-[9px] leading-4 text-center font-bold ring-1 ${badge.className}`}>
+                              {badge.label}
+                            </span>
+                            <span className="truncate text-zinc-300">{change.path}</span>
+                          </div>
+                          {(change.added > 0 || change.deleted > 0) && (
+                            <span className="shrink-0 flex items-center gap-1 tabular-nums">
+                              {change.added > 0 && <span className="text-emerald-400/90">+{change.added}</span>}
+                              {change.deleted > 0 && <span className="text-red-400/90">-{change.deleted}</span>}
+                            </span>
+                          )}
+                          {onOpenDiff && change.status !== 'deleted' && (
+                            <button
+                              type="button"
+                              className="shrink-0 opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-blue-400 cursor-pointer"
+                              title={t('Показать diff', 'Show diff')}
+                              onClick={(e) => { e.stopPropagation(); onOpenDiff(fullPath) }}
+                            >
+                              ⇔
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                    {agentChanges.length > 50 && (
+                      <div className="text-[10px] text-zinc-600 py-0.5">+{agentChanges.length - 50} {t('ещё', 'more')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
               {!gitStatus && <div className="text-[10px] text-zinc-600 py-1">{t('Проверка git…', 'Checking git…')}</div>}
               {gitStatus && !gitStatus.isRepo && (
-                <div className="text-[10px] text-zinc-600 py-1">{t('Не репозиторий git', 'Not a git repository')}</div>
+                agentChanges.length === 0 && <div className="text-[10px] text-zinc-600 py-1">{t('Не репозиторий git', 'Not a git repository')}</div>
               )}
               {gitStatus?.isRepo && (
                 <>
@@ -664,7 +884,7 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                   {gitStatus.files.length > 0 && (
                     <div className="space-y-0.5">
                       {gitStatus.files.slice(0, 50).map((f) => {
-                        const badge = gitStatusLabel(f.status)
+                        const badge = gitStatusLabel(f.status, L)
                         const stats = numstatByPath.get(f.path)
                         const sep = workspace.includes('\\') ? '\\' : '/'
                         const fullPath = (workspace + sep + f.path).replace(/[/\\]+/g, sep)
@@ -678,8 +898,8 @@ export const Sidebar = memo(function Sidebar({ workspace, onWorkspaceChange, onF
                               className="flex items-center gap-1 min-w-0 flex-1 cursor-pointer truncate"
                               onClick={() => onFileClick(fullPath)}
                             >
-                              <span className={`shrink-0 font-semibold w-3 ${badge.className}`}>{badge.label}</span>
-                              <span className="truncate text-zinc-400">{f.path}</span>
+                              <span className={`shrink-0 font-semibold w-3 ${badge.className}`} title={`${badge.title} (${f.status})`}>{badge.label}</span>
+                              <span className={`truncate ${badge.textClassName}`}>{f.path}</span>
                             </div>
                             {(stats?.added !== undefined || stats?.deleted !== undefined) && (
                               <span className="shrink-0 text-emerald-400/90 tabular-nums">

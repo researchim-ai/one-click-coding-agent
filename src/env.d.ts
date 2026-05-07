@@ -46,8 +46,10 @@ interface ElectronAPI {
   listFiles(workspace: string, dirPath?: string): Promise<import('../electron/types').FileTreeEntry[]>
   getGitStatus(workspace: string): Promise<import('../electron/git').GitStatus>
   getGitNumstat(workspace: string): Promise<import('../electron/git').GitNumstatEntry[]>
+  getGitAgentChanges(workspace: string): Promise<import('../electron/git').AgentFileChange[]>
   getGitFileAtHead(workspace: string, relativePath: string): Promise<string | null>
   getGitFileDiff(workspace: string, filePath: string, currentContent?: string): Promise<import('../electron/git').GitFileDiff>
+  acceptGitFileChanges(workspace: string, filePath: string): Promise<{ ok: true; path: string; baseline: 'shadow' }>
   discardGitFileChanges(workspace: string, filePath: string): Promise<{ ok: true; deleted: boolean; path: string }>
   readFileContent(filePath: string): Promise<{ content: string; size: number; lines: number }>
   writeFile(filePath: string, content: string): Promise<void>
@@ -80,6 +82,11 @@ interface ElectronAPI {
     id: string,
     mode: import('../electron/types').AgentMode,
   ): Promise<import('../electron/types').AgentMode | null>
+  selectPlanOption(
+    workspace: string,
+    id: string,
+    optionId: string,
+  ): Promise<import('../electron/task-state').TaskState | null>
   savePlanArtifact(workspace: string, id?: string, content?: string): Promise<{ path: string; content: string }>
 
   // Shadow-git checkpoints

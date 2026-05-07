@@ -20,6 +20,7 @@ interface Props {
    *  message — the agent picks it up with a non-empty `taskState`
    *  already in place, so it can start working immediately. */
   onApplyPlan?: () => void
+  onSelectPlanOption?: (optionId: string) => void | Promise<void>
   /** Disable the Apply-plan button while the agent is busy. */
   busy?: boolean
   /** Persist the current task state as PLAN.md in the workspace. */
@@ -49,7 +50,7 @@ function isMeaningful(t: TaskState | null): boolean {
  *  (goal, plan, notes). Mirrors what the agent sees injected into its
  *  system prompt on every turn — useful both as feedback ("is the agent
  *  on track?") and to catch plan drift. Hidden when empty. */
-export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', liveState, mode, onApplyPlan, busy, onSavePlan }: Props) {
+export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', liveState, mode, onApplyPlan, onSelectPlanOption, busy, onSavePlan }: Props) {
   const L = appLanguage
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const [state, setState] = useState<TaskState | null>(null)
@@ -96,6 +97,11 @@ export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', live
   const done = s.plan.filter((p) => p.status === 'completed').length
   const total = s.plan.length
   const inProgress = s.plan.find((p) => p.status === 'in_progress')
+  const planOptions = Array.isArray(s.planOptions) ? s.planOptions : []
+  const selectedOptionId =
+    s.selectedPlanOptionId ||
+    planOptions.find((opt) => opt.recommended)?.id ||
+    planOptions[0]?.id
 
   return (
     <div className="mx-3 mt-2 mb-1 rounded-md border border-zinc-800/80 bg-zinc-900/60 text-xs">
@@ -146,6 +152,62 @@ export function TaskStatePanel({ workspace, refreshKey, appLanguage = 'ru', live
                 </li>
               ))}
             </ul>
+          )}
+
+          {mode === 'plan' && planOptions.length > 0 && (
+            <div className="pt-1 border-t border-zinc-800/60 space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-zinc-500">
+                {t('Варианты исполнения', 'Execution options')}
+              </div>
+              <div className="grid gap-1.5">
+                {planOptions.map((opt) => {
+                  const selected = opt.id === selectedOptionId
+                  return (
+                    <button
+                      key={opt.id}
+                      disabled={busy}
+                      onClick={() => onSelectPlanOption?.(opt.id)}
+                      className={`text-left rounded-md px-2 py-1.5 ring-1 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                        selected
+                          ? 'bg-blue-500/10 ring-blue-500/40'
+                          : 'bg-zinc-950/40 ring-zinc-800 hover:bg-zinc-800/50'
+                      }`}
+                      title={opt.tradeoffs || opt.summary}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={selected ? 'text-blue-300' : 'text-zinc-400'}>
+                          {selected ? '●' : '○'}
+                        </span>
+                        <span className="font-medium text-zinc-200 truncate">{opt.title}</span>
+                        {opt.recommended && (
+                          <span className="text-[9.5px] px-1 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/20">
+                            {t('рек.', 'rec.')}
+                          </span>
+                        )}
+                        {opt.risk && (
+                          <span className="text-[9.5px] px-1 rounded bg-zinc-800 text-zinc-400">
+                            {t('риск', 'risk')}: {opt.risk}
+                          </span>
+                        )}
+                        {opt.effort && (
+                          <span className="text-[9.5px] px-1 rounded bg-zinc-800 text-zinc-400">
+                            {t('объём', 'effort')}: {opt.effort}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-[10.5px] text-zinc-400 leading-snug line-clamp-2">
+                        {opt.summary}
+                      </div>
+                      {opt.tradeoffs && (
+                        <div className="mt-0.5 text-[10px] text-zinc-500 leading-snug line-clamp-2">
+                          {opt.tradeoffs}
+                        </div>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
           )}
 
           {s.notes && (

@@ -95,6 +95,36 @@ describe('task-state', () => {
       expect(next.plan.length).toBeLessThanOrEqual(24)
     })
 
+    it('stores sanitized plan options and validates the selected option', () => {
+      const { next, summary } = applyTaskStateUpdate(emptyTaskState(), {
+        planOptions: [
+          {
+            id: 'Balanced Option!',
+            title: 'Balanced',
+            summary: 'Good default',
+            risk: 'medium',
+            effort: 'medium',
+            recommended: true,
+            files: ['src/App.tsx'],
+            tests: ['npm test'],
+            steps: [
+              { title: 'Inspect flow', status: 'completed' },
+              { title: 'Implement UI', status: 'in_progress' },
+            ],
+          },
+          { id: 'bad', title: '', summary: 'no title', steps: [] },
+        ] as any,
+        selectedPlanOptionId: 'Balanced Option!',
+      })
+
+      expect(next.planOptions).toHaveLength(1)
+      expect(next.planOptions?.[0].id).toBe('balanced-option')
+      expect(next.planOptions?.[0].steps.map((s) => s.status)).toEqual(['pending', 'pending'])
+      expect(next.selectedPlanOptionId).toBe('balanced-option')
+      expect(summary).toMatch(/options: 1/)
+      expect(summary).toMatch(/selected: balanced-option/)
+    })
+
     it('updates updatedAt on every apply', () => {
       const a = applyTaskStateUpdate(emptyTaskState(), { goal: 'x' }).next
       const b = applyTaskStateUpdate(a, { goal: 'y' }).next
@@ -112,6 +142,12 @@ describe('task-state', () => {
     it('is true if ANY field is populated', () => {
       expect(isMeaningful({ ...emptyTaskState(), goal: 'x' })).toBe(true)
       expect(isMeaningful({ ...emptyTaskState(), plan: [{ id: 1, title: 'x', status: 'pending' }] })).toBe(true)
+      expect(isMeaningful({ ...emptyTaskState(), planOptions: [{
+        id: 'a',
+        title: 'A',
+        summary: 'S',
+        steps: [{ id: 1, title: 'x', status: 'pending' }],
+      }] })).toBe(true)
       expect(isMeaningful({ ...emptyTaskState(), notes: 'x' })).toBe(true)
     })
   })
@@ -146,6 +182,26 @@ describe('task-state', () => {
       expect(renderTaskStateForPrompt(state, 'ru')).toMatch(/Цель:/)
       expect(renderTaskStateForPrompt(state, 'en')).toMatch(/Goal:/)
     })
+
+    it('renders execution options and selected option into the prompt', () => {
+      const state = applyTaskStateUpdate(emptyTaskState(), {
+        goal: 'G',
+        planOptions: [{
+          id: 'robust',
+          title: 'Robust',
+          summary: 'Safer architecture',
+          risk: 'low',
+          effort: 'large',
+          steps: [{ title: 'Refactor boundary', status: 'pending' }],
+        }] as any,
+        selectedPlanOptionId: 'robust',
+      }).next
+      const out = renderTaskStateForPrompt(state, 'en')
+      expect(out).toMatch(/Execution options/)
+      expect(out).toMatch(/robust: Robust/)
+      expect(out).toMatch(/selected/)
+      expect(out).toMatch(/Refactor boundary/)
+    })
   })
 
   describe('tool definition', () => {
@@ -153,6 +209,7 @@ describe('task-state', () => {
       expect(UPDATE_PLAN_TOOL_DEF.type).toBe('function')
       expect(UPDATE_PLAN_TOOL_DEF.function.name).toBe('update_plan')
       expect(UPDATE_PLAN_TOOL_DEF.function.parameters.type).toBe('object')
+      expect(UPDATE_PLAN_TOOL_DEF.function.parameters.properties.planOptions).toBeTruthy()
     })
   })
 })

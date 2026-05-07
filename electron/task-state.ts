@@ -19,11 +19,28 @@ export interface PlanStep {
   note?: string
 }
 
+export interface PlanOption {
+  id: string
+  title: string
+  summary: string
+  tradeoffs?: string
+  risk?: 'low' | 'medium' | 'high'
+  effort?: 'small' | 'medium' | 'large'
+  recommended?: boolean
+  steps: PlanStep[]
+  files?: string[]
+  tests?: string[]
+}
+
 export interface TaskState {
   /** User's one-line objective, as understood by the agent. */
   goal: string
   /** Ordered list of concrete subtasks. Keep it small (< 12). */
   plan: PlanStep[]
+  /** Alternative implementation strategies drafted in Plan mode. */
+  planOptions?: PlanOption[]
+  /** User-approved strategy to execute in Agent mode. */
+  selectedPlanOptionId?: string
   /** Free-form scratch notes: decisions made, dead-ends, open questions. */
   notes: string
   /** Last time the agent updated this state. */
@@ -36,25 +53,35 @@ export function emptyTaskState(): TaskState {
 
 export function isMeaningful(t: TaskState | undefined | null): boolean {
   if (!t) return false
-  return !!(t.goal?.trim() || t.plan?.length || t.notes?.trim())
+  return !!(t.goal?.trim() || t.plan?.length || t.planOptions?.length || t.notes?.trim())
 }
 
 /** Apply a partial update — used by the `update_plan` tool. Returns the
  *  merged state and a short human-readable diff for logging. */
 export function applyTaskStateUpdate(
   prev: TaskState,
-  upd: Partial<TaskState> & { plan?: PlanStep[] },
+  upd: Partial<TaskState> & { plan?: PlanStep[]; planOptions?: PlanOption[] },
 ): { next: TaskState; summary: string } {
   const rawPlan = Array.isArray(upd.plan) ? sanitizePlan(upd.plan) : prev.plan
+  const rawOptions = Array.isArray(upd.planOptions) ? sanitizePlanOptions(upd.planOptions) : prev.planOptions
+  const selectedPlanOptionId = typeof upd.selectedPlanOptionId === 'string'
+    ? normalizeOptionId(upd.selectedPlanOptionId)
+    : prev.selectedPlanOptionId
   const next: TaskState = {
     goal: typeof upd.goal === 'string' ? upd.goal.trim() : prev.goal,
     plan: Array.isArray(upd.plan) ? normalizeLinearProgress(rawPlan) : rawPlan,
+    planOptions: rawOptions,
+    selectedPlanOptionId: rawOptions?.some((opt) => opt.id === selectedPlanOptionId)
+      ? selectedPlanOptionId
+      : undefined,
     notes: typeof upd.notes === 'string' ? upd.notes.trim() : prev.notes,
     updatedAt: Date.now(),
   }
   const parts: string[] = []
   if (next.goal !== prev.goal) parts.push(`goal: "${short(next.goal, 60)}"`)
   if (Array.isArray(upd.plan)) parts.push(`plan: ${next.plan.length} step(s)`)
+  if (Array.isArray(upd.planOptions)) parts.push(`options: ${next.planOptions?.length ?? 0}`)
+  if (next.selectedPlanOptionId !== prev.selectedPlanOptionId) parts.push(`selected: ${next.selectedPlanOptionId ?? 'none'}`)
   if (next.notes !== prev.notes) parts.push(`notes: ${next.notes.length}b`)
   return { next, summary: parts.join(', ') || '(no-op)' }
 }
@@ -73,6 +100,55 @@ function sanitizePlan(raw: any[]): PlanStep[] {
   return out
 }
 
+function sanitizePlanOptions(raw: any[]): PlanOption[] {
+  const out: PlanOption[] = []
+  for (let i = 0; i < raw.length && out.length < 4; i++) {
+    const opt = raw[i] ?? {}
+    const title = typeof opt.title === 'string' ? opt.title.trim().slice(0, 120) : ''
+    const summary = typeof opt.summary === 'string' ? opt.summary.trim().slice(0, 500) : ''
+    const steps = Array.isArray(opt.steps) ? sanitizePlan(opt.steps).map((step) => ({ ...step, status: 'pending' as const })) : []
+    if (!title || !summary || steps.length === 0) continue
+
+    const id = normalizeOptionId(typeof opt.id === 'string' ? opt.id : '') || `option-${out.length + 1}`
+    const risk: PlanOption['risk'] = opt.risk === 'low' || opt.risk === 'medium' || opt.risk === 'high' ? opt.risk : undefined
+    const effort: PlanOption['effort'] = opt.effort === 'small' || opt.effort === 'medium' || opt.effort === 'large' ? opt.effort : undefined
+    const files = sanitizeStringList(opt.files, 12, 160)
+    const tests = sanitizeStringList(opt.tests, 12, 220)
+    const tradeoffs = typeof opt.tradeoffs === 'string' && opt.tradeoffs.trim()
+      ? opt.tradeoffs.trim().slice(0, 800)
+      : undefined
+
+    out.push({
+      id,
+      title,
+      summary,
+      tradeoffs,
+      risk,
+      effort,
+      recommended: opt.recommended === true,
+      steps,
+      files: files.length ? files : undefined,
+      tests: tests.length ? tests : undefined,
+    })
+  }
+  return out
+}
+
+function sanitizeStringList(raw: any, maxItems: number, maxLen: number): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const item of raw) {
+    const s = typeof item === 'string' ? item.trim().slice(0, maxLen) : ''
+    if (s) out.push(s)
+    if (out.length >= maxItems) break
+  }
+  return out
+}
+
+function normalizeOptionId(id: string): string {
+  return id.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+}
+
 function normalizeLinearProgress(plan: PlanStep[]): PlanStep[] {
   const activeIndex = plan.map((s) => s.status).lastIndexOf('in_progress')
   if (activeIndex <= 0) return plan
@@ -87,7 +163,11 @@ function normalizeLinearProgress(plan: PlanStep[]): PlanStep[] {
 export function normalizeTaskState(t: TaskState | undefined | null): TaskState | null {
   if (!t) return null
   const plan = Array.isArray(t.plan) ? normalizeLinearProgress(t.plan) : []
-  return { ...t, plan }
+  const planOptions = Array.isArray(t.planOptions) ? sanitizePlanOptions(t.planOptions) : undefined
+  const selectedPlanOptionId = planOptions?.some((opt) => opt.id === t.selectedPlanOptionId)
+    ? t.selectedPlanOptionId
+    : undefined
+  return { ...t, plan, planOptions, selectedPlanOptionId }
 }
 
 function short(s: string, n: number): string {
@@ -120,6 +200,23 @@ export function renderTaskStateForPrompt(t: TaskState | undefined | null, lang: 
     for (const step of s.plan) {
       const note = step.note ? ` — ${step.note}` : ''
       lines.push(`- ${STATUS_ICON[step.status]} ${step.title}${note}`)
+    }
+  }
+  if (s.planOptions?.length) {
+    lines.push('')
+    lines.push(lang === 'ru' ? '**Варианты исполнения:**' : '**Execution options:**')
+    for (const opt of s.planOptions) {
+      const selected = opt.id === s.selectedPlanOptionId
+      const badges = [
+        selected ? (lang === 'ru' ? 'выбран' : 'selected') : '',
+        opt.recommended ? (lang === 'ru' ? 'рекомендован' : 'recommended') : '',
+        opt.risk ? `risk: ${opt.risk}` : '',
+        opt.effort ? `effort: ${opt.effort}` : '',
+      ].filter(Boolean).join(', ')
+      lines.push(`- ${opt.id}: ${opt.title}${badges ? ` (${badges})` : ''} — ${opt.summary}`)
+      if (opt.steps.length) {
+        for (const step of opt.steps) lines.push(`  - ${step.title}${step.note ? ` — ${step.note}` : ''}`)
+      }
     }
   }
   if (s.notes) {
@@ -170,6 +267,42 @@ export const UPDATE_PLAN_TOOL_DEF = {
         notes: {
           type: 'string',
           description: 'Freeform notes: key decisions, dead-ends, open questions. Replace wholesale.',
+        },
+        planOptions: {
+          type: 'array',
+          description: 'Alternative implementation strategies for Plan mode. Provide 2-3 options when there are meaningful trade-offs.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Stable short id like quick-fix, balanced, robust.' },
+              title: { type: 'string', description: 'Human-readable strategy title.' },
+              summary: { type: 'string', description: 'What this option does and when to choose it.' },
+              tradeoffs: { type: 'string', description: 'Pros/cons and notable trade-offs.' },
+              risk: { type: 'string', enum: ['low', 'medium', 'high'] },
+              effort: { type: 'string', enum: ['small', 'medium', 'large'] },
+              recommended: { type: 'boolean', description: 'True for the best default option.' },
+              files: { type: 'array', items: { type: 'string' }, description: 'Likely files or areas affected.' },
+              tests: { type: 'array', items: { type: 'string' }, description: 'Verification commands or test areas.' },
+              steps: {
+                type: 'array',
+                description: 'Concrete execution steps for this option.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                    status: { type: 'string', enum: ['pending', 'blocked'] },
+                    note: { type: 'string' },
+                  },
+                  required: ['title', 'status'],
+                },
+              },
+            },
+            required: ['id', 'title', 'summary', 'steps'],
+          },
+        },
+        selectedPlanOptionId: {
+          type: 'string',
+          description: 'The option id approved by the user. Leave unset while drafting options in Plan mode.',
         },
       },
     },

@@ -24,7 +24,7 @@
 
 ---
 
-**Модель:** [Qwen3.5-35B-A3B](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) (MoE, 35B параметров, 3B активных) — квантизация UD-Q4_K_XL, ~19 ГБ.
+**Модели:** [Qwen3.5-35B-A3B](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) и [Qwen3.6-27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) в GGUF-квантизациях. Выбор модели и кванта доступен в мастере настройки и настройках.
 
 **Inference:** [llama.cpp](https://github.com/ggml-org/llama.cpp) — предсобранные бинарники скачиваются автоматически.
 
@@ -32,9 +32,18 @@
 
 - **Автоматическая настройка** — при первом запуске скачивает llama.cpp и модель, определяет GPU/CPU/RAM, запускает сервер с оптимальными параметрами
 - **IDE-интерфейс** — файловое дерево, редактор кода с подсветкой синтаксиса, табы, чат с агентом
-- **Автономный агент** — итеративный цикл: explore → edit → verify, до 30 шагов
+- **Режимы Chat / Plan / Agent** — обсуждение без инструментов, планирование с `PLAN.md` на согласование и полноценное выполнение после явного подтверждения
+- **Автономный агент** — итеративный цикл: explore → edit → verify, с persistent task-state и восстановлением состояния между сессиями
 - **Инструменты агента** — чтение/запись/редактирование файлов, поиск по коду, выполнение команд, управление директориями
-- **Безопасность** — подтверждение опасных операций (write, edit, delete, execute), блокировка деструктивных команд
+- **Планы и Markdown-артефакты** — красивый Markdown viewer, автоматическое открытие `PLAN.md`, кнопка выполнения утверждённого плана
+- **Inline diff как в IDE** — добавленные строки подсвечиваются зелёным, удалённые красным; изменения можно принять или откатить прямо из редактора
+- **Индикаторы изменений в дереве** — файлы и родительские папки показывают `N/M/D/R`, счётчики `+/-` и отдельный блок Agent Changes
+- **Shadow-checkpoints** — безопасный rollback файлов после действий агента без вмешательства в пользовательскую git-историю
+- **Persistent project memory** — агент может сохранять решения, предпочтения и known issues проекта
+- **MCP-клиент** — подключение внешних MCP-серверов и zero-config примеры в настройках
+- **Самопроверка** — после изменений агент сам запускает релевантные тесты/линтеры/сборку перед финальным ответом
+- **Безопасность** — подтверждения можно включить для file ops / commands; деструктивные команды блокируются
+- **Обновление llama.cpp** — проверка новой версии llama.cpp в настройках, скачивание и перезапуск сервера
 - **Multi-GPU** — автоматический `--tensor-split` для систем с несколькими видеокартами
 - **Кроссплатформенность** — Linux (AppImage, deb, rpm, tar.gz), macOS (dmg, zip), Windows (NSIS installer, portable)
 - **Resizable панели** — ширина сайдбара и чата настраивается перетаскиванием
@@ -120,16 +129,16 @@ npm run package:linux
 
 Результат в `release/`:
 ```
-One-Click Coding Agent-0.1.0.AppImage      # Универсальный, работает везде
-one-click-coding-agent_0.1.0_amd64.deb     # Debian/Ubuntu
-one-click-coding-agent-0.1.0.x86_64.rpm    # Fedora/RHEL
-one-click-coding-agent-0.1.0.tar.gz        # Архив
+One-Click Coding Agent-<version>.AppImage      # Универсальный, работает везде
+one-click-coding-agent_<version>_amd64.deb     # Debian/Ubuntu
+one-click-coding-agent-<version>.x86_64.rpm    # Fedora/RHEL
+one-click-coding-agent-<version>.tar.gz        # Архив
 ```
 
 AppImage — рекомендуемый формат. Запуск:
 ```bash
-chmod +x "One-Click Coding Agent-0.1.0.AppImage"
-./"One-Click Coding Agent-0.1.0.AppImage"
+chmod +x "One-Click Coding Agent-<version>.AppImage"
+./"One-Click Coding Agent-<version>.AppImage"
 ```
 
 > **Примечание:** для ARM64 (Raspberry Pi 5, Ampere и т.д.) бинарники также собираются автоматически.
@@ -142,8 +151,8 @@ npm run package:mac
 
 Результат:
 ```
-One-Click Coding Agent-0.1.0.dmg           # Disk image с drag-to-Applications
-One-Click Coding Agent-0.1.0-mac.zip       # ZIP-архив
+One-Click Coding Agent-<version>.dmg           # Disk image с drag-to-Applications
+One-Click Coding Agent-<version>-mac.zip       # ZIP-архив
 ```
 
 Собирается для **x64** (Intel) и **arm64** (Apple Silicon) одновременно.
@@ -158,8 +167,8 @@ npm run package:win
 
 Результат:
 ```
-One-Click Coding Agent Setup 0.1.0.exe     # Установщик (NSIS)
-"One-Click Coding Agent 0.1.0.exe"         # Portable (без установки)
+One-Click Coding Agent Setup <version>.exe     # Установщик (NSIS)
+"One-Click Coding Agent <version>.exe"         # Portable (без установки)
 ```
 
 ### Все платформы сразу

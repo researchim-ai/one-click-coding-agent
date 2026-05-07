@@ -43,7 +43,7 @@ import {
   getActiveSession, getSessionById, getSessionPathForWorker, saveSession as persistSession, isCancelRequested,
   updateSessionFromWorker,
   computeContextBreakdown, toggleMessagePin, listPinnedMessages,
-  setSessionMode,
+  setSessionMode, selectPlanOption,
   savePlanArtifact, savePlanArtifactContent,
   DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARIZE_PROMPT,
   type SessionInfo, type AgentBridge,
@@ -1065,6 +1065,10 @@ function registerIpcHandlers() {
     if (mode !== 'chat' && mode !== 'plan' && mode !== 'agent') return null
     return setSessionMode(workspace, id, mode)
   })
+  ipcMain.handle('plan:select-option', (_e, workspace: string, id: string, optionId: string) => {
+    if (!workspace || !id || !optionId) return null
+    return selectPlanOption(workspace, id, optionId)
+  })
   ipcMain.handle('plan:save-artifact', (_e, workspace: string, id?: string, content?: string) => {
     const saved = typeof content === 'string' && content.trim()
       ? savePlanArtifactContent(workspace, content)
@@ -1231,8 +1235,14 @@ function registerIpcHandlers() {
 
   ipcMain.handle('git-status', (_e, workspace: string) => git.getStatus(workspace))
   ipcMain.handle('git-numstat', (_e, workspace: string) => git.getNumstat(workspace))
+  ipcMain.handle('git-agent-changes', (_e, workspace: string) => git.getAgentFileChanges(workspace))
   ipcMain.handle('git-file-at-head', (_e, workspace: string, relativePath: string) => git.getFileContentAtHead(workspace, relativePath))
   ipcMain.handle('git-file-diff', (_e, workspace: string, filePath: string, currentContent?: string) => git.getFileDiff(workspace, filePath, currentContent))
+  ipcMain.handle('git-accept-file', (_e, workspace: string, filePath: string) => {
+    const result = git.acceptFileChanges(workspace, filePath)
+    scheduleWorkspaceChangedNotify()
+    return result
+  })
   ipcMain.handle('git-discard-file', (_e, workspace: string, filePath: string) => {
     const result = git.discardFileChanges(workspace, filePath)
     scheduleWorkspaceChangedNotify()

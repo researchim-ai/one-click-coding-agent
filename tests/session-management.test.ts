@@ -67,4 +67,48 @@ describe('session management cold start', () => {
     expect(agent.getSessionById(workspace, first)?.taskState?.goal).toBe('first goal')
     expect(agent.getSessionById(workspace, second)?.taskState?.goal).toBe('second goal')
   })
+
+  it('selects a plan option and promotes its steps to the active plan', async () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'oca-session-option-'))
+    process.env.HOME = tmpHome
+    vi.resetModules()
+
+    const agent = await import('../electron/agent')
+    const workspace = path.join(tmpHome, 'workspace')
+    fs.mkdirSync(workspace, { recursive: true })
+
+    const id = agent.createSession(workspace)
+    const session = agent.getActiveSession(workspace)
+    session.taskState = {
+      goal: 'choose plan',
+      plan: [],
+      planOptions: [
+        {
+          id: 'quick',
+          title: 'Quick',
+          summary: 'Small patch',
+          steps: [{ id: 1, title: 'Patch locally', status: 'pending' }],
+        },
+        {
+          id: 'robust',
+          title: 'Robust',
+          summary: 'Better design',
+          recommended: true,
+          steps: [
+            { id: 1, title: 'Refactor boundary', status: 'pending' },
+            { id: 2, title: 'Add regression tests', status: 'pending' },
+          ],
+        },
+      ],
+      notes: '',
+      updatedAt: Date.now(),
+    }
+    agent.saveSession(session)
+
+    const next = agent.selectPlanOption(workspace, id, 'robust')
+
+    expect(next?.selectedPlanOptionId).toBe('robust')
+    expect(next?.plan.map((s) => s.title)).toEqual(['Refactor boundary', 'Add regression tests'])
+    expect(agent.getSessionById(workspace, id)?.taskState?.selectedPlanOptionId).toBe('robust')
+  })
 })

@@ -533,6 +533,14 @@ export function useAgent() {
     } catch {}
   }, [workspace, activeSessionId, busy, refreshSessions])
 
+  const selectPlanOption = useCallback(async (optionId: string) => {
+    if (!workspace || !activeSessionId || busy) return
+    try {
+      const next = await window.api.selectPlanOption(workspace, activeSessionId, optionId)
+      setTaskState(next ?? null)
+    } catch {}
+  }, [workspace, activeSessionId, busy])
+
   const removeSession = useCallback(async (id: string) => {
     if (busy || !workspace) return
     await window.api.deleteSession(workspace, id)
@@ -647,5 +655,6 @@ export function useAgent() {
     planArtifactPath,
     clearPlanArtifactPath: () => setPlanArtifactPath(null),
     mode: activeMode, setMode: setSessionMode,
+    selectPlanOption,
   }
 }

@@ -44,10 +44,14 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('git-status', workspace),
   getGitNumstat: (workspace: string): Promise<import('./git').GitNumstatEntry[]> =>
     ipcRenderer.invoke('git-numstat', workspace),
+  getGitAgentChanges: (workspace: string): Promise<import('./git').AgentFileChange[]> =>
+    ipcRenderer.invoke('git-agent-changes', workspace),
   getGitFileAtHead: (workspace: string, relativePath: string): Promise<string | null> =>
     ipcRenderer.invoke('git-file-at-head', workspace, relativePath),
   getGitFileDiff: (workspace: string, filePath: string, currentContent?: string): Promise<import('./git').GitFileDiff> =>
     ipcRenderer.invoke('git-file-diff', workspace, filePath, currentContent),
+  acceptGitFileChanges: (workspace: string, filePath: string): Promise<{ ok: true; path: string; baseline: 'shadow' }> =>
+    ipcRenderer.invoke('git-accept-file', workspace, filePath),
   discardGitFileChanges: (workspace: string, filePath: string): Promise<{ ok: true; deleted: boolean; path: string }> =>
     ipcRenderer.invoke('git-discard-file', workspace, filePath),
   readFileContent: (filePath: string): Promise<{ content: string; size: number; lines: number }> =>
@@ -114,6 +118,8 @@ contextBridge.exposeInMainWorld('api', {
   getUiMessages: (workspace: string, id: string): Promise<any[]> => ipcRenderer.invoke('get-ui-messages', workspace, id),
   setSessionMode: (workspace: string, id: string, mode: import('./types').AgentMode): Promise<import('./types').AgentMode | null> =>
     ipcRenderer.invoke('session:set-mode', workspace, id, mode),
+  selectPlanOption: (workspace: string, id: string, optionId: string): Promise<import('./task-state').TaskState | null> =>
+    ipcRenderer.invoke('plan:select-option', workspace, id, optionId),
   savePlanArtifact: (workspace: string, id?: string, content?: string): Promise<{ path: string; content: string }> =>
     ipcRenderer.invoke('plan:save-artifact', workspace, id, content),
 
