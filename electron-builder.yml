@@ -1,5 +1,5 @@
 appId: ai.researchim.one-click-coding-agent
-productName: One-Click Coding Agent
+productName: one-click-coding-agent
 copyright: Copyright © 2025-2026 researchim-ai
 
 directories:
@@ -17,6 +17,7 @@ asarUnpack:
 afterPack: build/afterPack.cjs
 
 linux:
+  executableName: one-click-coding-agent
   target:
     - target: AppImage
       arch: [x64, arm64]
@@ -33,6 +34,7 @@ linux:
     Downloads and serves Qwen3.5-35B-A3B via llama.cpp.
     Reads, writes, and edits code autonomously.
   desktop:
+    Name: One-Click Coding Agent
     StartupWMClass: one-click-coding-agent
 
 deb:

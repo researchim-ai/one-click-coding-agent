@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-APP_DIR="/opt/One-Click Coding Agent"
+APP_DIR="/opt/one-click-coding-agent"
 SANDBOX="$APP_DIR/chrome-sandbox"
 
 if [ -f "$SANDBOX" ]; then
