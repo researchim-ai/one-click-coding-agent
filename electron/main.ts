@@ -196,14 +196,13 @@ async function ensureLlamaServerRunning(): Promise<void> {
 
       console.log(`[ensure-server] attempt ${attempt + 1}/${layerSchedule.length}: quant=${quant}, ctx=${attemptArgs.ctxSize}, nGpuLayers=${attemptArgs.nGpuLayers} (full=${fullLayers})`)
       if (mainWindow) {
+        // Service-level status goes to the status bar / settings build log, NOT
+        // to the chat. The chat is for user/agent conversation; flooding it
+        // with "starting llama.cpp" boilerplate at boot is noise.
         const statusText = attempt === 0
           ? `⏳ Запускаю llama.cpp (ctx=${attemptArgs.ctxSize}, GPU-слоёв: ${attemptArgs.nGpuLayers})…`
           : `⚠ Не хватило памяти — пробую с ${attemptArgs.nGpuLayers} GPU-слоями (остальное в RAM)…`
         try {
-          mainWindow.webContents.send('agent-event', {
-            type: 'status',
-            content: statusText,
-          })
           mainWindow.webContents.send('build-status', statusText)
         } catch {}
       }
@@ -977,7 +976,8 @@ function registerIpcHandlers() {
       const reachable = processAlive && await probeServerReachable()
       console.log(`[send-message] preflight: processAlive=${processAlive}, reachable=${reachable}, pid=${serverManager.getServerProcessPid()}`)
       if (!reachable) {
-        try { mainWindow.webContents.send('agent-event', { type: 'status', content: '⏳ Запускаю llama.cpp сервер…' }) } catch {}
+        // Status bar handles "starting llama.cpp" — chat stays clean.
+        try { mainWindow.webContents.send('build-status', '⏳ Запускаю llama.cpp сервер…') } catch {}
       }
       await ensureLlamaServerRunning()
       // Final sanity check — if /health STILL doesn't answer, don't hand off

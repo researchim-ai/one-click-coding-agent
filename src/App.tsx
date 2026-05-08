@@ -277,13 +277,13 @@ export function App() {
       {showSetup ? (
         <TitleBar appLanguage={appLanguage}>
           <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
-            ⚡ One-Click Agent
+            ⚡ One Click Coding Agent
           </span>
         </TitleBar>
       ) : (
         <TitleBar appLanguage={appLanguage}>
           <span className="text-[11px] font-semibold text-zinc-500 tracking-wide">
-            ⚡ One-Click Agent
+            ⚡ One Click Coding Agent
           </span>
           <div className="relative flex items-center gap-1" ref={fileMenuRef} style={{ WebkitAppRegion: 'no-drag' } as any}>
             <button

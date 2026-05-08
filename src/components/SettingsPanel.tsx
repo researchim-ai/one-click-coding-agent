@@ -139,7 +139,7 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       setModelDownloadStatus(null)
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
-      const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q4_K_XL')
+      const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q3_K_XL')
       setSelectedQuant(quant)
       const variantObj = v.find((vi: ModelVariantInfo) => vi.quant === quant)
       const max = variantObj?.maxCtx ?? 32768
@@ -330,7 +330,7 @@ export function SettingsPanel({ open, onClose, initialTab, appLanguage = 'ru' }:
       setTools(toolsList)
       setSelectedGpuMode(gpuMode)
       setSelectedGpuIndex(gpuIndex)
-      const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q4_K_XL')
+      const quant = pickQuantForVariants(v, c.lastQuant || 'UD-Q3_K_XL')
       setSelectedQuant(quant)
       const variant = v.find((entry) => entry.quant === quant)
       setSelectedCtx(Math.min(32768, variant?.maxCtx ?? 32768))
@@ -699,18 +699,35 @@ function ModelTab({
           >
             {t('Проверить обновления', 'Check updates')}
           </button>
-          <button
-            onClick={onUpdateLlama}
-            disabled={llamaUpdating || !llamaInfo?.latestTag}
-            className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-            title={t('Скачает последний релиз и заменит старую версию llama.cpp', 'Download the latest release and replace the old llama.cpp')}
-          >
-            {llamaUpdating
-              ? t('Обновление…', 'Updating…')
-              : llamaInfo?.installed
-                ? t('Обновить llama.cpp', 'Update llama.cpp')
-                : t('Установить llama.cpp', 'Install llama.cpp')}
-          </button>
+          {/* Show the install/update action only when it can actually do
+              something useful: not yet installed, or there is a newer release
+              than what's installed. When the local copy already matches the
+              latest GitHub release we hide the button entirely so users can't
+              re-download the same archive over and over. */}
+          {(() => {
+            const hasUpdate = !!llamaInfo?.updateAvailable
+            const upToDate =
+              !!llamaInfo?.installed &&
+              !!llamaInfo?.installedTag &&
+              !!llamaInfo?.latestTag &&
+              llamaInfo.latestTag === llamaInfo.installedTag
+            const showButton = !llamaInfo?.installed || hasUpdate || (!upToDate && !!llamaInfo?.latestTag)
+            if (!showButton) return null
+            return (
+              <button
+                onClick={onUpdateLlama}
+                disabled={llamaUpdating || !llamaInfo?.latestTag}
+                className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                title={t('Скачает последний релиз и заменит старую версию llama.cpp', 'Download the latest release and replace the old llama.cpp')}
+              >
+                {llamaUpdating
+                  ? t('Обновление…', 'Updating…')
+                  : llamaInfo?.installed
+                    ? t('Обновить llama.cpp', 'Update llama.cpp')
+                    : t('Установить llama.cpp', 'Install llama.cpp')}
+              </button>
+            )
+          })()}
         </div>
 
         <p className="mt-2 text-[11px] leading-snug text-zinc-600">

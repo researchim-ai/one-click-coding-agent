@@ -10,7 +10,7 @@ describe('model catalogue', () => {
     const family = MODEL_FAMILIES.find((f) => f.id === FAMILY_QWEN36_27B)
     expect(family).toBeTruthy()
     expect(family?.repoId).toBe('unsloth/Qwen3.6-27B-GGUF')
-    expect(family?.defaultQuant).toBe('27B-UD-Q4_K_XL')
+    expect(family?.defaultQuant).toBe('27B-UD-Q3_K_XL')
 
     const variants = MODEL_VARIANTS.filter((v) => v.family === FAMILY_QWEN36_27B)
     const quants = variants.map((v) => v.quant).sort()

@@ -180,7 +180,7 @@ export const MODEL_FAMILIES: ModelFamily[] = [
     label: 'Qwen3.5-9B',
     description: 'Dense 9B — быстрый, помещается в 16 GB VRAM',
     repoId: REPO_9B,
-    defaultQuant: '9B-UD-Q4_K_XL',
+    defaultQuant: '9B-UD-Q3_K_XL',
     filenameTag: '9b',
   },
   {
@@ -188,7 +188,7 @@ export const MODEL_FAMILIES: ModelFamily[] = [
     label: 'Qwen3.6-27B',
     description: 'Dense 27B — новая Qwen3.6, сильная универсальная модель',
     repoId: REPO_36_27B,
-    defaultQuant: '27B-UD-Q4_K_XL',
+    defaultQuant: '27B-UD-Q3_K_XL',
     filenameTag: '3.6-27b',
   },
   {
@@ -196,7 +196,7 @@ export const MODEL_FAMILIES: ModelFamily[] = [
     label: 'Qwen3.5-35B-A3B',
     description: 'MoE 35B (A3B) — баланс качества и скорости',
     repoId: REPO_35B,
-    defaultQuant: 'UD-Q4_K_XL',
+    defaultQuant: 'UD-Q3_K_XL',
     filenameTag: '3.5-35b',
     recommended: true,
   },
@@ -205,7 +205,7 @@ export const MODEL_FAMILIES: ModelFamily[] = [
     label: 'Qwen3.6-35B-A3B',
     description: 'MoE 35B (A3B) — новая ревизия Qwen3.6',
     repoId: REPO_36B,
-    defaultQuant: '36-UD-Q4_K_XL',
+    defaultQuant: '36-UD-Q3_K_XL',
     filenameTag: '3.6-35b',
   },
 ]
@@ -224,8 +224,8 @@ export const MODEL_VARIANTS: ModelVariant[] = [
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-IQ2_M',    bits: 2, label: '9B  IQ2_M',                 sizeMb: 3738,  quality: 2,  repoId: REPO_9B },
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-IQ3_XXS',  bits: 3, label: '9B  IQ3_XXS',              sizeMb: 4116,  quality: 3,  repoId: REPO_9B },
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q2_K_XL',  bits: 2, label: '9B  Q2_K_XL',              sizeMb: 4219,  quality: 3,  repoId: REPO_9B },
-  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q3_K_XL',  bits: 3, label: '9B  Q3_K_XL',              sizeMb: 5171,  quality: 5,  repoId: REPO_9B },
-  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q4_K_XL',  bits: 4, label: '9B  Q4_K_XL — рекоменд.',  sizeMb: 6113,  quality: 7,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q3_K_XL',  bits: 3, label: '9B  Q3_K_XL — рекоменд.',  sizeMb: 5171,  quality: 5,  repoId: REPO_9B },
+  { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q4_K_XL',  bits: 4, label: '9B  Q4_K_XL',              sizeMb: 6113,  quality: 7,  repoId: REPO_9B },
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q5_K_XL',  bits: 5, label: '9B  Q5_K_XL',              sizeMb: 6902,  quality: 8,  repoId: REPO_9B },
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q6_K_XL',  bits: 6, label: '9B  Q6_K_XL — высокое',    sizeMb: 8971,  quality: 9,  repoId: REPO_9B },
   { family: FAMILY_QWEN35_9B, quant: '9B-UD-Q8_K_XL',  bits: 8, label: '9B  Q8_K_XL — максимум',   sizeMb: 11500, quality: 10, repoId: REPO_9B },
@@ -237,14 +237,14 @@ export const MODEL_VARIANTS: ModelVariant[] = [
   { family: FAMILY_QWEN36_27B, quant: '27B-UD-IQ3_XXS', bits: 3, label: '27B 3.6 UD-IQ3_XXS',               sizeMb: 11439, quality: 13, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q3_K_S',     bits: 3, label: '27B 3.6 Q3_K_S',                   sizeMb: 11786, quality: 13, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q3_K_M',     bits: 3, label: '27B 3.6 Q3_K_M',                   sizeMb: 12957, quality: 14, repoId: REPO_36_27B },
-  { family: FAMILY_QWEN36_27B, quant: '27B-UD-Q3_K_XL', bits: 3, label: '27B 3.6 UD-Q3_K_XL',               sizeMb: 13803, quality: 15, repoId: REPO_36_27B },
+  { family: FAMILY_QWEN36_27B, quant: '27B-UD-Q3_K_XL', bits: 3, label: '27B 3.6 UD-Q3_K_XL — рекоменд.',   sizeMb: 13803, quality: 15, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-IQ4_XS',     bits: 4, label: '27B 3.6 IQ4_XS',                   sizeMb: 14725, quality: 15, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q4_0',       bits: 4, label: '27B 3.6 Q4_0',                     sizeMb: 15060, quality: 15, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q4_K_S',     bits: 4, label: '27B 3.6 Q4_K_S',                   sizeMb: 15122, quality: 16, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-IQ4_NL',     bits: 4, label: '27B 3.6 IQ4_NL',                   sizeMb: 15327, quality: 16, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q4_K_M',     bits: 4, label: '27B 3.6 Q4_K_M — баланс',          sizeMb: 16038, quality: 16, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q4_1',       bits: 4, label: '27B 3.6 Q4_1',                     sizeMb: 16453, quality: 16, repoId: REPO_36_27B },
-  { family: FAMILY_QWEN36_27B, quant: '27B-UD-Q4_K_XL', bits: 4, label: '27B 3.6 UD-Q4_K_XL — рекоменд.',   sizeMb: 16797, quality: 17, repoId: REPO_36_27B },
+  { family: FAMILY_QWEN36_27B, quant: '27B-UD-Q4_K_XL', bits: 4, label: '27B 3.6 UD-Q4_K_XL',               sizeMb: 16797, quality: 17, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q5_K_S',     bits: 5, label: '27B 3.6 Q5_K_S',                   sizeMb: 18080, quality: 17, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-Q5_K_M',     bits: 5, label: '27B 3.6 Q5_K_M',                   sizeMb: 18606, quality: 18, repoId: REPO_36_27B },
   { family: FAMILY_QWEN36_27B, quant: '27B-UD-Q5_K_XL', bits: 5, label: '27B 3.6 UD-Q5_K_XL — высокое',     sizeMb: 19110, quality: 18, repoId: REPO_36_27B },
@@ -259,9 +259,9 @@ export const MODEL_VARIANTS: ModelVariant[] = [
   { family: FAMILY_QWEN35_35B, quant: 'UD-IQ3_XXS',     bits: 3, label: '35B IQ3_XXS',              sizeMb: 14438, quality: 13, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-IQ3_S',       bits: 3, label: '35B IQ3_S',                sizeMb: 15565, quality: 14, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-Q3_K_M',      bits: 3, label: '35B Q3_K_M',               sizeMb: 17101, quality: 15, repoId: REPO_35B },
-  { family: FAMILY_QWEN35_35B, quant: 'UD-Q3_K_XL',     bits: 3, label: '35B Q3_K_XL',              sizeMb: 17613, quality: 15, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q3_K_XL',     bits: 3, label: '35B Q3_K_XL — рекоменд.',  sizeMb: 17613, quality: 15, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-Q4_K_M',      bits: 4, label: '35B Q4_K_M — баланс',      sizeMb: 20378, quality: 17, repoId: REPO_35B },
-  { family: FAMILY_QWEN35_35B, quant: 'UD-Q4_K_XL',     bits: 4, label: '35B Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18, repoId: REPO_35B },
+  { family: FAMILY_QWEN35_35B, quant: 'UD-Q4_K_XL',     bits: 4, label: '35B Q4_K_XL',              sizeMb: 21094, quality: 18, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-Q5_K_XL',     bits: 5, label: '35B Q5_K_XL — высокое',     sizeMb: 25498, quality: 19, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-Q6_K_XL',     bits: 6, label: '35B Q6_K_XL',              sizeMb: 31027, quality: 20, repoId: REPO_35B },
   { family: FAMILY_QWEN35_35B, quant: 'UD-Q8_K_XL',     bits: 8, label: '35B Q8_K_XL — максимум',    sizeMb: 39629, quality: 21, repoId: REPO_35B },
@@ -274,9 +274,9 @@ export const MODEL_VARIANTS: ModelVariant[] = [
   { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ3_XXS',  bits: 3, label: '35B 3.6 IQ3_XXS',              sizeMb: 14438, quality: 13, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-IQ3_S',    bits: 3, label: '35B 3.6 IQ3_S',                sizeMb: 15565, quality: 14, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-Q3_K_M',   bits: 3, label: '35B 3.6 Q3_K_M',               sizeMb: 17101, quality: 15, repoId: REPO_36B },
-  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q3_K_XL',  bits: 3, label: '35B 3.6 Q3_K_XL',              sizeMb: 17613, quality: 15, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q3_K_XL',  bits: 3, label: '35B 3.6 Q3_K_XL — рекоменд.',  sizeMb: 17613, quality: 15, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-Q4_K_M',   bits: 4, label: '35B 3.6 Q4_K_M — баланс',      sizeMb: 20378, quality: 17, repoId: REPO_36B },
-  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q4_K_XL',  bits: 4, label: '35B 3.6 Q4_K_XL — рекоменд.',   sizeMb: 21094, quality: 18, repoId: REPO_36B },
+  { family: FAMILY_QWEN36_35B, quant: '36-UD-Q4_K_XL',  bits: 4, label: '35B 3.6 Q4_K_XL',              sizeMb: 21094, quality: 18, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-Q5_K_XL',  bits: 5, label: '35B 3.6 Q5_K_XL — высокое',     sizeMb: 25498, quality: 19, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-Q6_K_XL',  bits: 6, label: '35B 3.6 Q6_K_XL',              sizeMb: 31027, quality: 20, repoId: REPO_36B },
   { family: FAMILY_QWEN36_35B, quant: '36-UD-Q8_K_XL',  bits: 8, label: '35B 3.6 Q8_K_XL — максимум',    sizeMb: 39629, quality: 21, repoId: REPO_36B },
@@ -345,10 +345,11 @@ export function evaluateVariants(res: SystemResources): ModelVariantInfo[] {
     return { ...v, fits, maxCtx, selectableMaxCtx, fullGpuMaxCtx, mode, recommended: false }
   })
 
-  // On small systems (RAM ≤ 16 GB and VRAM < 16 GB), prefer 9B-UD-Q4_K_XL
+  // On small systems (RAM ≤ 16 GB and VRAM < 16 GB), prefer the recommended
+  // 9B Q3_K_XL — same default tier we use for every family now.
   const smallSystem = res.ramTotalMb <= 17408 && freeVram < 16384
   if (smallSystem) {
-    const idx9b = results.findIndex((r) => r.quant === '9B-UD-Q4_K_XL' && r.fits)
+    const idx9b = results.findIndex((r) => r.quant === '9B-UD-Q3_K_XL' && r.fits)
     if (idx9b >= 0) { bestFittingIdx = idx9b }
   }
 

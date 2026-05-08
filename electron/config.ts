@@ -65,7 +65,7 @@ export interface AppConfig {
 }
 
 const DEFAULT_CONFIG: AppConfig = {
-  lastQuant: 'UD-Q4_K_XL',
+  lastQuant: 'UD-Q3_K_XL',
   ctxSize: null,
   gpuMode: 'single',
   gpuIndex: 0,

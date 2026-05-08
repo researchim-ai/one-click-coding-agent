@@ -421,15 +421,22 @@ async function installLatestBinary(win: BrowserWindow, forceReplace: boolean): P
 export async function ensureBinary(win: BrowserWindow): Promise<string> {
   const existing = findServerBin()
   const installedVariant = getInstalledVariant()
-  if (existing && installedVariant) {
-    const manifest = readReleaseManifest()
-    emitBuild(win, manifest?.tag
-      ? `llama-server уже установлен (${manifest.tag}, ${installedVariant})`
-      : `llama-server уже установлен (${installedVariant})`)
-    return existing
+  const manifest = readReleaseManifest()
+
+  // First-time install OR legacy binary without a release manifest:
+  // always pull the latest release from GitHub so users land on the
+  // freshest llama.cpp instead of whatever happened to be on disk.
+  // (We never hardcode a release tag — `installLatestBinary` queries
+  // the GitHub API for the most recent published release.)
+  if (!existing || !installedVariant || !manifest?.tag) {
+    if (existing && installedVariant && !manifest?.tag) {
+      emitBuild(win, 'Найдена старая установка llama.cpp без манифеста — обновляю на последний релиз…')
+    }
+    return installLatestBinary(win, !!existing)
   }
 
-  return installLatestBinary(win, false)
+  emitBuild(win, `llama-server уже установлен (${manifest.tag}, ${installedVariant})`)
+  return existing
 }
 
 export async function getLlamaReleaseInfo(): Promise<LlamaReleaseInfo> {
