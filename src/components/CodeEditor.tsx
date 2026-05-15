@@ -136,6 +136,8 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
   const t = (ru: string, en: string) => (L === 'ru' ? ru : en)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
+  const latestFileRef = useRef(file)
+  const onAfterSaveRef = useRef(onAfterSave)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const linkProviderDisposable = useRef<{ dispose(): void } | null>(null)
   const tsProvidersDisposable = useRef<{ dispose(): void } | null>(null)
@@ -159,6 +161,11 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
     ? `${fileDiff.baseline}:${fileDiff.path}:${fileDiff.additions}:${fileDiff.removals}:${fileDiff.hunks.map((h) => `${h.oldStart}/${h.oldCount}/${h.newStart}/${h.newCount}`).join('|')}:${file.content.length}`
     : null
   const visibleDiff = fileDiff?.hasChanges && diffFingerprint !== acceptedDiffFingerprint ? fileDiff : null
+
+  useEffect(() => {
+    latestFileRef.current = file
+    onAfterSaveRef.current = onAfterSave
+  }, [file, onAfterSave])
 
   const importLinks = useRef<{ line: number; startCol: number; endCol: number; resolvedPath: string }[]>([])
   importLinks.current = (() => {
@@ -317,13 +324,46 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
         run: async () => {
           const content = editor.getModel()?.getValue() ?? ''
           try {
-            await window.api?.writeFile(file.path, content)
-            onAfterSave?.()
+            await window.api?.writeFile(latestFileRef.current.path, content)
+            onAfterSaveRef.current?.()
           } catch (e) {
             console.error('Save failed:', e)
           }
         },
       })
+
+      editor.addAction({
+        id: 'editor.find-file',
+        label: t('Найти в файле', 'Find in file'),
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF],
+        run: () => editor.trigger('keyboard', 'actions.find', {}),
+      })
+      editor.addAction({
+        id: 'editor.replace-file',
+        label: t('Заменить в файле', 'Replace in file'),
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyH],
+        run: () => editor.trigger('keyboard', 'editor.action.startFindReplaceAction', {}),
+      })
+      editor.addAction({
+        id: 'editor.toggle-comment',
+        label: t('Закомментировать строку', 'Toggle line comment'),
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash],
+        run: () => editor.trigger('keyboard', 'editor.action.commentLine', {}),
+      })
+      editor.addAction({
+        id: 'editor.go-to-definition',
+        label: t('Перейти к определению', 'Go to definition'),
+        keybindings: [monaco.KeyCode.F12],
+        run: () => editor.trigger('keyboard', 'editor.action.revealDefinition', {}),
+      })
+      editor.addAction({
+        id: 'editor.go-to-line',
+        label: t('Перейти к строке', 'Go to line'),
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG],
+        run: () => editor.trigger('keyboard', 'editor.action.gotoLine', {}),
+      })
+
+      requestAnimationFrame(() => editor.focus())
 
       editor.onMouseDown((e) => {
         const isMod = e.event.ctrlKey || e.event.metaKey
@@ -365,6 +405,10 @@ export const CodeEditor = memo(function CodeEditor({ file, workspace, onAttachCo
       if (typeof document !== 'undefined') document.body.classList.remove('monaco-editor')
     }
   }, [])
+
+  useEffect(() => {
+    requestAnimationFrame(() => editorRef.current?.focus())
+  }, [file.path])
 
   useEffect(() => {
     const ed = editorRef.current

@@ -14,7 +14,10 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { TitleBar } from './components/TitleBar'
 import { DiffViewer } from './components/DiffViewer'
 import { HunkReviewModal } from './components/HunkReviewModal'
+import { AgentChangesBar } from './components/AgentChangesBar'
 import { useState, useEffect, useCallback, useRef } from 'react'
+
+type AgentFileChange = import('../electron/git').AgentFileChange
 
 export function App() {
   const {
@@ -45,6 +48,8 @@ export function App() {
   const [fileMenuOpen, setFileMenuOpen] = useState(false)
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   const [appLanguage, setAppLanguage] = useState<'ru' | 'en'>('ru')
+  const [agentChanges, setAgentChanges] = useState<AgentFileChange[]>([])
+  const [agentChangesBusy, setAgentChangesBusy] = useState(false)
   const fileMenuRef = useRef<HTMLDivElement>(null)
   const L = appLanguage === 'ru'
 
@@ -109,6 +114,84 @@ export function App() {
       setDiffView(null)
     }
   }, [workspace])
+
+  const refreshAgentChanges = useCallback(async () => {
+    if (!workspace || !window.api?.getGitAgentChanges) {
+      setAgentChanges([])
+      return
+    }
+    try {
+      const changes = await window.api.getGitAgentChanges(workspace)
+      setAgentChanges(Array.isArray(changes) ? changes : [])
+    } catch {
+      setAgentChanges([])
+    }
+  }, [workspace])
+
+  useEffect(() => {
+    refreshAgentChanges()
+  }, [refreshAgentChanges])
+
+  useEffect(() => {
+    if (!workspace || !window.api?.onWorkspaceFilesChanged) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsub = window.api.onWorkspaceFilesChanged(() => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        refreshAgentChanges()
+      }, 350)
+    })
+    return () => {
+      unsub()
+      if (timer) clearTimeout(timer)
+    }
+  }, [workspace, refreshAgentChanges])
+
+  const fullPathFromAgentChange = useCallback((change: AgentFileChange) => {
+    const sep = workspace.includes('\\') ? '\\' : '/'
+    return (workspace + sep + change.path).replace(/[/\\]+/g, sep)
+  }, [workspace])
+
+  const reviewAgentChanges = useCallback(async () => {
+    const first = agentChanges.find((change) => change.status !== 'deleted') ?? agentChanges[0]
+    if (!first) return
+    const fullPath = fullPathFromAgentChange(first)
+    if (first.status !== 'deleted') await openFile(fullPath).catch(() => {})
+    if (first.status !== 'deleted') await handleOpenDiff(fullPath)
+  }, [agentChanges, fullPathFromAgentChange, handleOpenDiff, openFile])
+
+  const keepAllAgentChanges = useCallback(async () => {
+    if (!workspace || !window.api?.acceptGitFileChanges || agentChanges.length === 0) return
+    setAgentChangesBusy(true)
+    try {
+      for (const change of agentChanges) {
+        await window.api.acceptGitFileChanges(workspace, fullPathFromAgentChange(change))
+      }
+      setDiffView(null)
+      await refreshAgentChanges()
+    } finally {
+      setAgentChangesBusy(false)
+    }
+  }, [agentChanges, fullPathFromAgentChange, refreshAgentChanges, workspace])
+
+  const undoAllAgentChanges = useCallback(async () => {
+    if (!workspace || !window.api?.discardGitFileChanges || agentChanges.length === 0) return
+    const ok = confirm(appLanguage === 'ru'
+      ? `Откатить все изменения агента (${agentChanges.length})? Это вернёт файлы к состоянию до правок агента.`
+      : `Undo all agent changes (${agentChanges.length})? Files will be restored to their pre-agent state.`)
+    if (!ok) return
+    setAgentChangesBusy(true)
+    try {
+      for (const change of [...agentChanges].reverse()) {
+        await window.api.discardGitFileChanges(workspace, fullPathFromAgentChange(change))
+      }
+      setDiffView(null)
+      await refreshAgentChanges()
+    } finally {
+      setAgentChangesBusy(false)
+    }
+  }, [agentChanges, appLanguage, fullPathFromAgentChange, refreshAgentChanges, workspace])
 
   const addCodeRef = useCallback((ref: CodeReference) => {
     setCodeRefs((prev) => {
@@ -547,6 +630,14 @@ export function App() {
                       : `Execute the approved Plan-mode option${selected ? `: "${selected.title}" (${selected.id}). ${selected.summary}` : ''}. Follow the selected steps closely, respect the risks/tests from the plan, and track progress via update_plan.`
                     sendMessage(msg)
                   }}
+                />
+                <AgentChangesBar
+                  changes={agentChanges}
+                  busy={agentChangesBusy}
+                  appLanguage={appLanguage}
+                  onReview={reviewAgentChanges}
+                  onKeepAll={keepAllAgentChanges}
+                  onUndoAll={undoAllAgentChanges}
                 />
               </div>
             )}
