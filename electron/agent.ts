@@ -414,7 +414,7 @@ export const DEFAULT_SYSTEM_PROMPT = `You are an expert software engineer workin
 ## Dynamic context discovery
 
 - The initial prompt contains only a compact project index. Pull deeper context on demand instead of assuming it is already loaded.
-- Use get_project_context(section="overview") to orient, section="rules" before editing when rule files exist, and section="repo_map" to jump to likely implementation files.
+- Use get_project_context(section="overview") to orient, section="rules" before editing when rule files exist, and get_repo_map/search_code_index/get_symbol_context to jump to likely implementation files.
 - Do not repeatedly list/read broad project context if you already have enough evidence. Prefer focused find_files/read_file calls.
 
 ## Self-check before final answer
@@ -427,7 +427,7 @@ When you changed files, installed dependencies, altered configuration, or affect
 
 ## Tool usage
 
-- **get_project_context**: Dynamically fetch overview, project rules, or repo map only when needed. Prefer this over relying on a huge initial prompt.
+- **get_project_context / get_repo_map / search_code_index / get_symbol_context**: Dynamically fetch overview, project rules, repo map, symbol search, or focused symbol context only when needed. Prefer this over relying on a huge initial prompt.
 - **read_file**: Returns line-numbered content. Use offset/limit for files > 500 lines. Always read before editing.
 - **edit_file**: old_string must exactly match file content (whitespace, indentation). If not unique, include more surrounding lines for context.
 - **write_file**: Only for NEW files. Creates parent directories automatically.
@@ -652,7 +652,7 @@ function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
   return lang === 'ru'
     ? `## Режим: Plan (планирование, только чтение)
 
-Ты в режиме планирования. Это отдельный этап согласования, а не начало выполнения. Доступны только инструменты исследования и планирования: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
+Ты в режиме планирования. Это отдельный этап согласования, а не начало выполнения. Доступны только инструменты исследования и планирования: get_project_context, get_repo_map, search_code_index, get_symbol_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
 
 Писать/редактировать исходные файлы, запускать команды и выполнять шаги плана ЗАПРЕЩЕНО. Plan-режим должен вести себя как продвинутый planning-агент: уточнить требования, изучить проект, предложить план, обсудить корректировки и ждать явного подтверждения пользователя.
 
@@ -679,7 +679,7 @@ function renderModeInstruction(mode: AgentMode, lang: 'ru' | 'en'): string {
 НЕ начинай выполнять шаги плана, НЕ отмечай прогресс выполнения и НЕ переходи в Agent сам. Это сделает приложение только после явного подтверждения пользователя.`
     : `## Mode: Plan (read-only planning)
 
-You are in planning mode. This is an approval/discussion stage, not execution. Only research and planning tools are available: get_project_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
+You are in planning mode. This is an approval/discussion stage, not execution. Only research and planning tools are available: get_project_context, get_repo_map, search_code_index, get_symbol_context, read_file, list_directory, find_files, fetch_url, search_web, recall, update_plan, save_plan_artifact.
 
 Writing/editing source files, running commands, and executing plan steps is FORBIDDEN. Plan mode should behave like an advanced planning agent: clarify requirements, inspect the project, propose a plan, discuss revisions, and wait for explicit user approval.
 
@@ -815,6 +815,9 @@ function compactToolDefs(tools: any[]): any[] {
  *  when in doubt, omit, and let the user switch to `agent` mode. */
 const PLAN_MODE_BUILTIN_ALLOWLIST = new Set([
   'get_project_context',
+  'get_repo_map',
+  'search_code_index',
+  'get_symbol_context',
   'read_file',
   'list_directory',
   'find_files',

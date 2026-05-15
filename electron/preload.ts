@@ -139,6 +139,10 @@ contextBridge.exposeInMainWorld('api', {
     truncated: boolean
     totalBytes: number
   }> => ipcRenderer.invoke('project-rules:info', workspace),
+  getCodeIndexStatus: (workspace: string): Promise<import('./code-index').CodeIndexStatus> =>
+    ipcRenderer.invoke('code-index:status', workspace),
+  rebuildCodeIndex: (workspace: string): Promise<import('./code-index').CodeIndexStatus> =>
+    ipcRenderer.invoke('code-index:rebuild', workspace),
 
   // /context breakdown + message pinning
   getContextBreakdown: (workspace: string): Promise<{

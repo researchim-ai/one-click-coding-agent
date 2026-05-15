@@ -15,6 +15,7 @@ import { TitleBar } from './components/TitleBar'
 import { DiffViewer } from './components/DiffViewer'
 import { HunkReviewModal } from './components/HunkReviewModal'
 import { AgentChangesBar } from './components/AgentChangesBar'
+import { AgentChangesReviewModal } from './components/AgentChangesReviewModal'
 import { useState, useEffect, useCallback, useRef } from 'react'
 
 type AgentFileChange = import('../electron/git').AgentFileChange
@@ -50,6 +51,7 @@ export function App() {
   const [appLanguage, setAppLanguage] = useState<'ru' | 'en'>('ru')
   const [agentChanges, setAgentChanges] = useState<AgentFileChange[]>([])
   const [agentChangesBusy, setAgentChangesBusy] = useState(false)
+  const [agentReviewOpen, setAgentReviewOpen] = useState(false)
   const fileMenuRef = useRef<HTMLDivElement>(null)
   const L = appLanguage === 'ru'
 
@@ -133,6 +135,10 @@ export function App() {
   }, [refreshAgentChanges])
 
   useEffect(() => {
+    if (agentChanges.length === 0) setAgentReviewOpen(false)
+  }, [agentChanges.length])
+
+  useEffect(() => {
     if (!workspace || !window.api?.onWorkspaceFilesChanged) return
     let timer: ReturnType<typeof setTimeout> | null = null
     const unsub = window.api.onWorkspaceFilesChanged(() => {
@@ -154,12 +160,36 @@ export function App() {
   }, [workspace])
 
   const reviewAgentChanges = useCallback(async () => {
-    const first = agentChanges.find((change) => change.status !== 'deleted') ?? agentChanges[0]
-    if (!first) return
-    const fullPath = fullPathFromAgentChange(first)
-    if (first.status !== 'deleted') await openFile(fullPath).catch(() => {})
-    if (first.status !== 'deleted') await handleOpenDiff(fullPath)
-  }, [agentChanges, fullPathFromAgentChange, handleOpenDiff, openFile])
+    if (agentChanges.length === 0) return
+    setAgentReviewOpen(true)
+  }, [agentChanges.length])
+
+  const keepAgentFileChange = useCallback(async (filePath: string) => {
+    if (!workspace || !window.api?.acceptGitFileChanges) return
+    setAgentChangesBusy(true)
+    try {
+      await window.api.acceptGitFileChanges(workspace, filePath)
+      await refreshAgentChanges()
+    } finally {
+      setAgentChangesBusy(false)
+    }
+  }, [refreshAgentChanges, workspace])
+
+  const undoAgentFileChange = useCallback(async (filePath: string) => {
+    if (!workspace || !window.api?.discardGitFileChanges) return
+    const ok = confirm(appLanguage === 'ru'
+      ? 'Откатить этот файл к состоянию до правок агента?'
+      : 'Undo this file to its pre-agent state?')
+    if (!ok) return
+    setAgentChangesBusy(true)
+    try {
+      await window.api.discardGitFileChanges(workspace, filePath)
+      setDiffView((current) => (current?.filePath === filePath ? null : current))
+      await refreshAgentChanges()
+    } finally {
+      setAgentChangesBusy(false)
+    }
+  }, [appLanguage, refreshAgentChanges, workspace])
 
   const keepAllAgentChanges = useCallback(async () => {
     if (!workspace || !window.api?.acceptGitFileChanges || agentChanges.length === 0) return
@@ -673,6 +703,19 @@ export function App() {
           appLanguage={appLanguage}
         />
       )}
+      <AgentChangesReviewModal
+        workspace={workspace}
+        changes={agentChanges}
+        open={agentReviewOpen}
+        busy={agentChangesBusy}
+        appLanguage={appLanguage}
+        onClose={() => setAgentReviewOpen(false)}
+        onOpenFile={openFile}
+        onKeepFile={keepAgentFileChange}
+        onUndoFile={undoAgentFileChange}
+        onKeepAll={keepAllAgentChanges}
+        onUndoAll={undoAllAgentChanges}
+      />
     </div>
   )
 }

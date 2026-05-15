@@ -99,6 +99,19 @@ describe('executeTool', () => {
       expect(r).not.toContain('c.js')
     })
   })
+
+  describe('code index tools', () => {
+    it('searches code index and reads symbol context', () => {
+      fs.mkdirSync(path.join(tmpWs, 'src'), { recursive: true })
+      fs.writeFileSync(path.join(tmpWs, 'src', 'runner.ts'), 'export class Runner {}\n')
+
+      const search = executeTool('search_code_index', { query: 'Runner' }, tmpWs)
+      expect(search).toContain('src/runner.ts:1 class Runner')
+
+      const ctx = executeTool('get_symbol_context', { symbol: 'Runner' }, tmpWs)
+      expect(ctx).toContain('export class Runner')
+    })
+  })
 })
 
 describe('tool definitions', () => {

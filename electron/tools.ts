@@ -6,7 +6,7 @@ import { getWebSearchStatus, loadWebSearchConfig, resolveWebSearchBaseUrl, shoul
 import { fetchUrl as fetchUrlImpl } from './url-fetch'
 import * as searchCache from './search-cache'
 import { loadProjectRules, describeProjectRules } from './project-rules'
-import { buildRepoMap, renderRepoMap as renderRepoMapText } from './repo-map'
+import { getSymbolContext, renderCodeIndexMap, searchCodeIndex } from './code-index'
 
 export const TOOL_DEFINITIONS = [
   {
@@ -30,6 +30,55 @@ export const TOOL_DEFINITIONS = [
           },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_repo_map',
+      description:
+        'Fetch the local semantic code index / repo map: files, symbols with line numbers, imports, and ranked entrypoints. Use this before broad exploration.',
+      parameters: {
+        type: 'object',
+        properties: {
+          max_bytes: { type: 'number', description: 'Approximate output cap in bytes. Defaults to 8000, max 20000.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_code_index',
+      description:
+        'Search the local code index by symbol name, file path, import, or concept tokens. Faster and cheaper than repeatedly listing/reading files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query, e.g. "session mode", "AgentChangesBar", "download model".' },
+          kind: { type: 'string', enum: ['class', 'function', 'const', 'interface', 'type', 'struct', 'enum', 'trait'], description: 'Optional symbol kind filter.' },
+          max_results: { type: 'number', description: 'Maximum results. Defaults to 20, max 50.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_symbol_context',
+      description:
+        'Read focused source context around a symbol found by the code index. Use before editing a symbol-heavy file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Symbol name or partial name.' },
+          path: { type: 'string', description: 'Optional relative file path to narrow the search.' },
+          max_bytes: { type: 'number', description: 'Approximate output cap in bytes. Defaults to 12000.' },
+        },
+        required: ['symbol'],
       },
     },
   },
@@ -311,7 +360,8 @@ function getProjectContext(sectionRaw: unknown, workspace: string, maxBytesRaw?:
       '',
       '### Dynamic context',
       '- Call get_project_context(section="rules") before edits when rule files exist.',
-      '- Call get_project_context(section="repo_map") to find likely implementation files without scanning the tree repeatedly.',
+      '- Call get_repo_map or search_code_index to find likely implementation files without scanning the tree repeatedly.',
+      '- Call get_symbol_context(symbol=...) when you know the symbol and need focused source lines.',
       '- Use find_files/read_file for precise context after this overview.',
     ]
     return lines.join('\n')
@@ -324,8 +374,7 @@ function getProjectContext(sectionRaw: unknown, workspace: string, maxBytesRaw?:
   }
 
   const renderRepoMapSection = () => {
-    const repoMap = buildRepoMap(workspace, maxBytes)
-    const rendered = renderRepoMapText(repoMap)
+    const rendered = renderCodeIndexMap(workspace, maxBytes)
     return rendered || 'Repo map is empty.'
   }
 
@@ -348,6 +397,12 @@ export function executeTool(name: string, args: Record<string, any>, workspace: 
         return readFile(args.path, workspace, args.offset, args.limit)
       case 'get_project_context':
         return getProjectContext(args.section, workspace, args.max_bytes)
+      case 'get_repo_map':
+        return renderCodeIndexMap(workspace, clampContextBytes(args.max_bytes))
+      case 'search_code_index':
+        return searchCodeIndex(workspace, String(args.query ?? ''), args.max_results, args.kind)
+      case 'get_symbol_context':
+        return getSymbolContext(workspace, String(args.symbol ?? ''), args.path, clampContextBytes(args.max_bytes ?? 12000))
       case 'write_file':
         return writeFile(args.path, args.content, workspace)
       case 'edit_file':

@@ -87,6 +87,15 @@ interface ContextBreakdown {
   cache: { hits: number; misses: number; size: number }
 }
 
+interface CodeIndexStatus {
+  indexed: boolean
+  stale: boolean
+  updatedAt: number | null
+  files: number
+  symbols: number
+  truncated: boolean
+}
+
 export function Chat({
   messages,
   busy,
@@ -121,6 +130,7 @@ export function Chat({
   const [slashResults, setSlashResults] = useState<SlashCommand[]>(SLASH_COMMANDS)
   const [slashIndex, setSlashIndex] = useState(0)
   const [rulesInfo, setRulesInfo] = useState<{ files: { relativePath: string; bytes: number }[]; truncated: boolean; totalBytes: number } | null>(null)
+  const [codeIndexStatus, setCodeIndexStatus] = useState<CodeIndexStatus | null>(null)
   const [contextModal, setContextModal] = useState<ContextBreakdown | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -153,6 +163,39 @@ export function Chat({
       if (!cancelled) setRulesInfo(null)
     })
     return () => { cancelled = true }
+  }, [workspace])
+
+  const refreshCodeIndexStatus = useCallback(() => {
+    if (!workspace || !window.api?.getCodeIndexStatus) {
+      setCodeIndexStatus(null)
+      return
+    }
+    window.api.getCodeIndexStatus(workspace)
+      .then((status) => setCodeIndexStatus(status))
+      .catch(() => setCodeIndexStatus(null))
+  }, [workspace])
+
+  useEffect(() => {
+    refreshCodeIndexStatus()
+  }, [refreshCodeIndexStatus])
+
+  useEffect(() => {
+    if (!workspace || !window.api?.onWorkspaceFilesChanged) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const off = window.api.onWorkspaceFilesChanged(() => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(refreshCodeIndexStatus, 500)
+    })
+    return () => {
+      off()
+      if (timer) clearTimeout(timer)
+    }
+  }, [workspace, refreshCodeIndexStatus])
+
+  const rebuildCodeIndex = useCallback(async () => {
+    if (!workspace || !window.api?.rebuildCodeIndex) return
+    const status = await window.api.rebuildCodeIndex(workspace).catch(() => null)
+    if (status) setCodeIndexStatus(status)
   }, [workspace])
 
   const handleSend = useCallback(async () => {
@@ -517,7 +560,7 @@ export function Chat({
       {/* Context usage bar + project-rules pill. Lives right above the
           composer, so the user sees both pieces of "who's at the wheel"
           state without ever having to open settings. */}
-      {(contextUsage || rulesInfo) && (
+      {(contextUsage || rulesInfo || codeIndexStatus) && (
         <div className="border-t border-zinc-800/40 bg-[#0d1117] px-3 py-1 flex items-center gap-2">
           {contextUsage && (
             <>
@@ -587,6 +630,28 @@ export function Chat({
                   : `${rulesInfo.files.length} ${t('правил', 'rules')}`}
               </span>
             </span>
+          )}
+          {codeIndexStatus && (
+            <button
+              type="button"
+              onClick={rebuildCodeIndex}
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] shrink-0 ${
+                codeIndexStatus.stale
+                  ? 'border-amber-500/25 bg-amber-500/5 text-amber-300/90 hover:bg-amber-500/10'
+                  : 'border-blue-500/25 bg-blue-500/5 text-blue-300/90 hover:bg-blue-500/10'
+              } ${!rulesInfo && !contextUsage ? 'ml-auto' : ''}`}
+              title={t(
+                `Code index: ${codeIndexStatus.files} файлов, ${codeIndexStatus.symbols} символов.${codeIndexStatus.stale ? '\nИндекс устарел — нажми, чтобы пересобрать.' : '\nНажми, чтобы пересобрать.'}`,
+                `Code index: ${codeIndexStatus.files} files, ${codeIndexStatus.symbols} symbols.${codeIndexStatus.stale ? '\nIndex is stale — click to rebuild.' : '\nClick to rebuild.'}`,
+              )}
+            >
+              <span>{codeIndexStatus.stale ? '◌' : '◇'}</span>
+              <span className="font-mono">
+                {codeIndexStatus.indexed
+                  ? `${t('индекс', 'index')} ${codeIndexStatus.files}/${codeIndexStatus.symbols}`
+                  : t('индекс: нет', 'index: none')}
+              </span>
+            </button>
           )}
         </div>
       )}

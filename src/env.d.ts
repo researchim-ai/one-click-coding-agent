@@ -104,6 +104,8 @@ interface ElectronAPI {
     truncated: boolean
     totalBytes: number
   }>
+  getCodeIndexStatus(workspace: string): Promise<import('../electron/code-index').CodeIndexStatus>
+  rebuildCodeIndex(workspace: string): Promise<import('../electron/code-index').CodeIndexStatus>
 
   // /context breakdown + message pinning
   getContextBreakdown(workspace: string): Promise<{

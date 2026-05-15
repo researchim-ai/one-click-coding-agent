@@ -68,6 +68,7 @@ import * as pyResolve from './py-resolve'
 import * as git from './git'
 import * as recentWorkspaces from './recent-workspaces'
 import * as workspaceWatcher from './workspace-watcher'
+import * as codeIndex from './code-index'
 import type { ToolInfo } from './types'
 
 let mainWindow: BrowserWindow | null = null
@@ -1122,6 +1123,19 @@ function registerIpcHandlers() {
     if (!workspace) return { files: [], truncated: false, totalBytes: 0 }
     try { return describeProjectRules(workspace) }
     catch { return { files: [], truncated: false, totalBytes: 0 } }
+  })
+
+  ipcMain.handle('code-index:status', (_e, workspace: string) => {
+    if (!workspace) return { indexed: false, stale: false, updatedAt: null, files: 0, symbols: 0, truncated: false }
+    try { return codeIndex.getCodeIndexStatus(workspace) }
+    catch { return { indexed: false, stale: true, updatedAt: null, files: 0, symbols: 0, truncated: false } }
+  })
+
+  ipcMain.handle('code-index:rebuild', (_e, workspace: string) => {
+    if (!workspace) throw new Error('workspace is required')
+    codeIndex.buildCodeIndex(workspace)
+    try { mainWindow?.webContents.send('workspace-files-changed') } catch {}
+    return codeIndex.getCodeIndexStatus(workspace)
   })
 
   // ---- Context inspector (`/context`) and message pinning --------------

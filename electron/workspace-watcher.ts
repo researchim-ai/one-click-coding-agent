@@ -22,6 +22,7 @@
 import fs from 'fs'
 import path from 'path'
 import * as toolCache from './tool-cache'
+import * as codeIndex from './code-index'
 
 function debugLog(category: string, msg: string): void {
   if (process.env.OCA_DEBUG || process.env.DEBUG) {
@@ -71,6 +72,7 @@ function scheduleInvalidate(absPath: string) {
     pendingTimers.delete(absPath)
     try {
       toolCache.invalidateFile(absPath)
+      if (currentRoot) codeIndex.invalidateWorkspace(currentRoot)
     } catch (e: any) {
       debugLog('WATCHER', `invalidate failed for ${absPath}: ${e?.message ?? e}`)
     }
